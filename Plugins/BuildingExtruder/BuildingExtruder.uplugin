@@ -1,0 +1,30 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Building Extruder",
+	"Description": "Editor tool that reads EPSG:4326 building footprint shapefiles (.shp), extrudes tiled StaticMeshActors for in-editor QA, and writes a combined FBX.",
+	"Category": "Editor",
+	"CreatedBy": "GeoSim Tools",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "CesiumForUnreal",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "BuildingExtruder",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
