@@ -16,8 +16,16 @@
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
 #include "Materials/MaterialInterface.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
+
+static TAutoConsoleVariable<int32> CVarBuildingExtruderDiagnoseDtmLoad(
+	TEXT("BuildingExtruder.DiagnoseDtmLoadConsistency"),
+	0,
+	TEXT("If 1, after normal DTM sampling re-sample with a longer refine (no timeout, 99%) and log ")
+	TEXT("buildings whose floor min changes. Placement still uses the first sample. Default 0."),
+	ECVF_Default);
 
 namespace
 {
@@ -305,11 +313,11 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
 	const FString& TileIndices,
-	bool bEnableDtmLoadTimeout,
-	bool bDiagnoseDtmLoadConsistency)
+	bool bEnableDtmLoadTimeout)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
+	const bool bDiagnoseDtmLoadConsistency = CVarBuildingExtruderDiagnoseDtmLoad.GetValueOnGameThread() != 0;
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
