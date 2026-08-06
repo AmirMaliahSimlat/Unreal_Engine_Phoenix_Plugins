@@ -317,7 +317,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
-	const bool bDiagnoseDtmLoadConsistency = CVarBuildingExtruderDiagnoseDtmLoad.GetValueOnGameThread() != 0;
+	const bool bDiagnoseDtmLoadConsistency = CVarBuildingExtruderDiagnoseDtmLoad.GetValueOnAnyThread() != 0;
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
@@ -905,7 +905,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					LogBuildingExtruder,
 					Warning,
 					TEXT("DTM load diagnose: record=%d tile=%d first-pass vertex spread=%.3fm (min=%.3f max=%.3f) "
-						 "— possible mixed LOD on one footprint"),
+						 "- possible mixed LOD on one footprint"),
 					Features[I].RecordIndex,
 					TileIndex,
 					FirstMax - FirstMin,
@@ -929,7 +929,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				LogBuildingExtruder,
 				Warning,
 				TEXT("DTM load diagnose: record=%d tile=%d floorMin FIRST=%.3fm DEEP=%.3fm delta=%+.3fm "
-					 "→ longer refine changed floor (load/LOD timing)"),
+					 "-> longer refine changed floor (load/LOD timing)"),
 				Features[I].RecordIndex,
 				TileIndex,
 				FirstMin,
@@ -945,22 +945,25 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				{
 					continue;
 				}
-				const double HA = bA ? SampleHeights[Idx] : 0.0;
-				const double HB = bB ? DeepHeights[Idx] : 0.0;
-				const double Lon = SamplePoints[Idx].X;
-				const double Lat = SamplePoints[Idx].Y;
-				if (!bA || !bB || FMath::Abs(HB - HA) > FloorDeltaEpsM)
+
+				const FString FirstStr = bA ? FString::Printf(TEXT("%.3fm"), SampleHeights[Idx]) : FString(TEXT("MISS"));
+				const FString DeepStr = bB ? FString::Printf(TEXT("%.3fm"), DeepHeights[Idx]) : FString(TEXT("MISS"));
+				const FString DeltaStr =
+					(bA && bB) ? FString::Printf(TEXT("%+.3fm"), DeepHeights[Idx] - SampleHeights[Idx])
+							   : FString(TEXT("n/a"));
+
+				if (!bA || !bB || FMath::Abs(DeepHeights[Idx] - SampleHeights[Idx]) > FloorDeltaEpsM)
 				{
 					UE_LOG(
 						LogBuildingExtruder,
 						Warning,
 						TEXT("  vertex[%d] lon=%.6f lat=%.6f first=%s deep=%s delta=%s"),
 						V,
-						Lon,
-						Lat,
-						bA ? *FString::Printf(TEXT("%.3fm"), HA) : TEXT("MISS"),
-						bB ? *FString::Printf(TEXT("%.3fm"), HB) : TEXT("MISS"),
-						(bA && bB) ? *FString::Printf(TEXT("%+.3fm"), HB - HA) : TEXT("n/a"));
+						SamplePoints[Idx].X,
+						SamplePoints[Idx].Y,
+						*FirstStr,
+						*DeepStr,
+						*DeltaStr);
 				}
 			}
 		}
