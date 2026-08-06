@@ -317,7 +317,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
-	const bool bDiagnoseDtmLoadConsistency = CVarBuildingExtruderDiagnoseDtmLoad.GetValueOnAnyThread() != 0;
+	const bool bDiagnoseDtmLoadConsistency = CVarBuildingExtruderDiagnoseDtmLoad.GetValueOnGameThread() != 0;
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
@@ -549,7 +549,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("Tile filter active: [%s] → %d non-empty selected tiles, %d buildings"),
+			TEXT("Tile filter active: [%s] -> %d non-empty selected tiles, %d buildings"),
 			*FilterList,
 			NonEmptyTiles,
 			BuildingsInSelectedTiles);

@@ -113,7 +113,7 @@ bool BuildingFbxExporter::ExportTileActors(
 	if (!bOk || !FPaths::FileExists(FbxPath))
 	{
 		OutError = FString::Printf(
-			TEXT("Native FBX export failed for %d actors → '%s'."),
+			TEXT("Native FBX export failed for %d actors -> '%s'."),
 			SelectedCount,
 			*FbxPath);
 		return false;
