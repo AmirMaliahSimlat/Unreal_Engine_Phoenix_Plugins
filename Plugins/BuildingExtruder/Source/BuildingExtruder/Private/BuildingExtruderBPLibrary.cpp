@@ -305,7 +305,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
 	const FString& TileIndices,
-	bool bEnableDtmLoadTimeout)
+	bool bEnableDtmLoadTimeout,
+	bool bDiagnoseDtmLoadConsistency)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -317,13 +318,14 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' heightField='%s' targetTiles=%d tileFilter='%s' dtmTimeout=%s (base Z from DTM min)"),
+		TEXT("shp='%s' fbx='%s' heightField='%s' targetTiles=%d tileFilter='%s' dtmTimeout=%s diagnoseDtmLoad=%s (base Z from DTM min)"),
 		*CleanInputPath,
 		*CleanFbxPath,
 		*HeightFieldName,
 		TargetTileCount,
 		*TileIndices,
-		bEnableDtmLoadTimeout ? TEXT("ON") : TEXT("OFF"));
+		bEnableDtmLoadTimeout ? TEXT("ON") : TEXT("OFF"),
+		bDiagnoseDtmLoadConsistency ? TEXT("ON") : TEXT("OFF"));
 
 	if (CleanFbxPath.IsEmpty())
 	{
@@ -688,6 +690,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				BatchPoints,
 				BatchTileIndices,
 				bEnableDtmLoadTimeout,
+				DtmDoneThresholdPercent,
 				BatchHeights,
 				BatchOk,
 				SampleError,
@@ -760,6 +763,211 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		TEXT("DTM base altitude: %d buildings OK, %d failed (no successful samples)"),
 		BuildingsInSelectedTiles - DtmFailBuildings,
 		DtmFailBuildings);
+
+	// Prove load/LOD timing: re-sample with longer refine; log buildings whose floor min moves.
+	// Placement still uses the first (normal) sample above.
+	if (bDiagnoseDtmLoadConsistency && SamplePoints.Num() > 0)
+	{
+		UE_LOG(
+			LogBuildingExtruder,
+			Display,
+			TEXT("DTM load diagnose: re-sampling with timeout=OFF doneThreshold=99%% (placement unchanged)..."));
+
+		TArray<double> DeepHeights;
+		TArray<bool> DeepOk;
+		DeepHeights.SetNum(SamplePoints.Num());
+		DeepOk.SetNum(SamplePoints.Num());
+
+		FScopedSlowTask DiagTask(
+			static_cast<float>(FMath::Max(NumBatches, 1)),
+			NSLOCTEXT("BuildingExtruder", "DiagnoseDtmLoad", "Diagnose: longer DTM refine..."));
+		DiagTask.MakeDialog(true);
+
+		constexpr float DeepDonePercent = 99.0f;
+		for (int32 Batch = 0; Batch < NumBatches; ++Batch)
+		{
+			DiagTask.EnterProgressFrame(1.0f);
+			if (DiagTask.ShouldCancel())
+			{
+				Result.bCancelled = true;
+				Result.Message = TEXT("Cancelled during DTM load diagnose.");
+				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+				UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+				return Result;
+			}
+
+			const int32 StartIdx = Batch * BatchSize;
+			const int32 Count = FMath::Min(BatchSize, SamplePoints.Num() - StartIdx);
+			TArray<FVector> BatchPoints;
+			TArray<int32> BatchTileIndices;
+			BatchPoints.Reserve(Count);
+			BatchTileIndices.Reserve(Count);
+			for (int32 I = 0; I < Count; ++I)
+			{
+				BatchPoints.Add(SamplePoints[StartIdx + I]);
+				BatchTileIndices.Add(SamplePointTileIndices[StartIdx + I]);
+			}
+
+			TArray<double> BatchHeights;
+			TArray<bool> BatchOk;
+			FString SampleError;
+			if (!BuildingCesiumTerrain::SampleHeightsBlocking(
+					*World,
+					*Georeference,
+					*TerrainTileset,
+					BatchPoints,
+					BatchTileIndices,
+					/*bEnableDtmLoadTimeout*/ false,
+					DeepDonePercent,
+					BatchHeights,
+					BatchOk,
+					SampleError,
+					BuildingCesiumTerrain::FDtmProgressCallback(),
+					[&DiagTask]() { return DiagTask.ShouldCancel(); }))
+			{
+				if (SampleError.Contains(TEXT("Cancelled")))
+				{
+					Result.bCancelled = true;
+					Result.Message = SampleError;
+					Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+					UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+					return Result;
+				}
+				UE_LOG(
+					LogBuildingExtruder,
+					Warning,
+					TEXT("DTM load diagnose batch %d failed: %s (continuing)"),
+					Batch + 1,
+					*SampleError);
+				continue;
+			}
+
+			for (int32 I = 0; I < Count; ++I)
+			{
+				DeepHeights[StartIdx + I] = BatchHeights[I];
+				DeepOk[StartIdx + I] = BatchOk[I];
+			}
+		}
+
+		constexpr double FloorDeltaEpsM = 0.05;
+		constexpr double VertexSpreadWarnM = 2.0;
+		int32 BuildingsFloorChanged = 0;
+		int32 BuildingsWideSpread = 0;
+
+		for (int32 I = 0; I < ToImport; ++I)
+		{
+			if (FeatureSampleStart[I] < 0 || Features[I].OuterRingLonLat.Num() < 3)
+			{
+				continue;
+			}
+
+			const int32 StartIdx = FeatureSampleStart[I];
+			const int32 Count = FeatureSampleCount[I];
+			const int32 TileIndex =
+				SamplePointTileIndices.IsValidIndex(StartIdx) ? SamplePointTileIndices[StartIdx] : INDEX_NONE;
+
+			double FirstMin = TNumericLimits<double>::Max();
+			double FirstMax = TNumericLimits<double>::Lowest();
+			int32 FirstOk = 0;
+			double DeepMin = TNumericLimits<double>::Max();
+			double DeepMax = TNumericLimits<double>::Lowest();
+			int32 DeepOkCount = 0;
+
+			for (int32 V = 0; V < Count; ++V)
+			{
+				const int32 Idx = StartIdx + V;
+				if (SampleOk.IsValidIndex(Idx) && SampleOk[Idx])
+				{
+					FirstMin = FMath::Min(FirstMin, SampleHeights[Idx]);
+					FirstMax = FMath::Max(FirstMax, SampleHeights[Idx]);
+					++FirstOk;
+				}
+				if (DeepOk.IsValidIndex(Idx) && DeepOk[Idx])
+				{
+					DeepMin = FMath::Min(DeepMin, DeepHeights[Idx]);
+					DeepMax = FMath::Max(DeepMax, DeepHeights[Idx]);
+					++DeepOkCount;
+				}
+			}
+
+			if (FirstOk > 0 && (FirstMax - FirstMin) > VertexSpreadWarnM)
+			{
+				++BuildingsWideSpread;
+				UE_LOG(
+					LogBuildingExtruder,
+					Warning,
+					TEXT("DTM load diagnose: record=%d tile=%d first-pass vertex spread=%.3fm (min=%.3f max=%.3f) "
+						 "— possible mixed LOD on one footprint"),
+					Features[I].RecordIndex,
+					TileIndex,
+					FirstMax - FirstMin,
+					FirstMin,
+					FirstMax);
+			}
+
+			if (FirstOk == 0 || DeepOkCount == 0)
+			{
+				continue;
+			}
+
+			const double FloorDelta = DeepMin - FirstMin;
+			if (FMath::Abs(FloorDelta) <= FloorDeltaEpsM)
+			{
+				continue;
+			}
+
+			++BuildingsFloorChanged;
+			UE_LOG(
+				LogBuildingExtruder,
+				Warning,
+				TEXT("DTM load diagnose: record=%d tile=%d floorMin FIRST=%.3fm DEEP=%.3fm delta=%+.3fm "
+					 "→ longer refine changed floor (load/LOD timing)"),
+				Features[I].RecordIndex,
+				TileIndex,
+				FirstMin,
+				DeepMin,
+				FloorDelta);
+
+			for (int32 V = 0; V < Count; ++V)
+			{
+				const int32 Idx = StartIdx + V;
+				const bool bA = SampleOk.IsValidIndex(Idx) && SampleOk[Idx];
+				const bool bB = DeepOk.IsValidIndex(Idx) && DeepOk[Idx];
+				if (!bA && !bB)
+				{
+					continue;
+				}
+				const double HA = bA ? SampleHeights[Idx] : 0.0;
+				const double HB = bB ? DeepHeights[Idx] : 0.0;
+				const double Lon = SamplePoints[Idx].X;
+				const double Lat = SamplePoints[Idx].Y;
+				if (!bA || !bB || FMath::Abs(HB - HA) > FloorDeltaEpsM)
+				{
+					UE_LOG(
+						LogBuildingExtruder,
+						Warning,
+						TEXT("  vertex[%d] lon=%.6f lat=%.6f first=%s deep=%s delta=%s"),
+						V,
+						Lon,
+						Lat,
+						bA ? *FString::Printf(TEXT("%.3fm"), HA) : TEXT("MISS"),
+						bB ? *FString::Printf(TEXT("%.3fm"), HB) : TEXT("MISS"),
+						(bA && bB) ? *FString::Printf(TEXT("%+.3fm"), HB - HA) : TEXT("n/a"));
+				}
+			}
+		}
+
+		UE_LOG(
+			LogBuildingExtruder,
+			Display,
+			TEXT("DTM load diagnose summary: %d buildings floor-min changed after longer refine (eps=%.2fm); "
+				 "%d buildings had first-pass vertex spread > %.1fm. "
+				 "If floor-min changes > 0, float/sink is partly load/LOD timing."),
+			BuildingsFloorChanged,
+			FloorDeltaEpsM,
+			BuildingsWideSpread,
+			VertexSpreadWarnM);
+	}
 
 	FScopedSlowTask SlowTask(
 		static_cast<float>(FMath::Max(NonEmptyTiles, 1)) + 1.0f,

@@ -25,6 +25,8 @@ namespace BuildingCesiumTerrain
 	/**
 	 * Samples ellipsoid heights (meters) at lon/lat points (X=lon, Y=lat) using DTM tileset only.
 	 * Forces high-detail Cesium terrain tiles to load near each point, then line-traces.
+	 *
+	 * @param DoneProgressPercent Cesium GetLoadProgress() threshold to treat refine as done (e.g. 95).
 	 */
 	bool SampleHeightsBlocking(
 		UWorld& World,
@@ -33,6 +35,7 @@ namespace BuildingCesiumTerrain
 		const TArray<FVector>& InLonLatPoints,
 		const TArray<int32>& InPointTileIndices,
 		bool bEnableDtmLoadTimeout,
+		float DoneProgressPercent,
 		TArray<double>& OutHeightsM,
 		TArray<bool>& OutSuccess,
 		FString& OutError,

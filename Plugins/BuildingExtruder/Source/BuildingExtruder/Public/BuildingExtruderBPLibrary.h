@@ -62,6 +62,9 @@ public:
 	 *        Empty = all tiles. Same TargetTileCount + full dataset → same indices as a full run.
 	 * @param bEnableDtmLoadTimeout If true, DTM refine waits with a short timeout (faster).
 	 *        If false, waits until load progress ~95% or progress stalls (better for bad tiles).
+	 * @param bDiagnoseDtmLoadConsistency Temporary: after normal DTM sample, re-sample with a longer
+	 *        refine (no timeout, 99% threshold) and log buildings whose floor min changes.
+	 *        Placement still uses the first (normal) sample. Does not change FBX.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -73,7 +76,8 @@ public:
 			CPP_Default_EditorFolderPath = "ExtrudedBuildings",
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_TileIndices = "",
-			CPP_Default_bEnableDtmLoadTimeout = "true"))
+			CPP_Default_bEnableDtmLoadTimeout = "true",
+			CPP_Default_bDiagnoseDtmLoadConsistency = "false"))
 	static FBuildingExtrudeResult ImportAndExtrudeBuildingsFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -83,5 +87,6 @@ public:
 		const FString& EditorFolderPath,
 		int32 TargetTileCount,
 		const FString& TileIndices,
-		bool bEnableDtmLoadTimeout);
+		bool bEnableDtmLoadTimeout,
+		bool bDiagnoseDtmLoadConsistency);
 };

@@ -282,12 +282,13 @@ namespace
 		ACesiumCameraManager& CameraManager,
 		bool bEnableTimeout,
 		double MaxWaitSeconds,
+		float DoneProgressPercent,
 		float& OutProgress,
 		bool& OutCancelled,
 		const BuildingCesiumTerrain::FDtmProgressCallback& OnProgress,
 		const BuildingCesiumTerrain::FDtmShouldCancelCallback& ShouldCancel)
 	{
-		constexpr float DoneProgressPercent = 95.0f;
+		DoneProgressPercent = FMath::Clamp(DoneProgressPercent, 1.0f, 99.0f);
 		// If load % does not improve for this long, stop waiting (stuck refine / plateau).
 		constexpr double StallSeconds = 45.0;
 		constexpr float StallEpsilonPercent = 0.25f;
@@ -373,6 +374,7 @@ bool BuildingCesiumTerrain::SampleHeightsBlocking(
 	const TArray<FVector>& InLonLatPoints,
 	const TArray<int32>& InPointTileIndices,
 	bool bEnableDtmLoadTimeout,
+	float DoneProgressPercent,
 	TArray<double>& OutHeightsM,
 	TArray<bool>& OutSuccess,
 	FString& OutError,
@@ -481,6 +483,7 @@ bool BuildingCesiumTerrain::SampleHeightsBlocking(
 		*CameraManager,
 		bEnableDtmLoadTimeout,
 		MaxWaitSeconds,
+		DoneProgressPercent,
 		ProgressAtEnd,
 		bCancelled,
 		OnProgress,
