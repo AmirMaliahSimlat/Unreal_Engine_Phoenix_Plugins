@@ -619,7 +619,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	SampleOk.SetNum(SamplePoints.Num());
 	float SampleWorkDone = 0.0f;
 
-	auto SetSampleProgress = [&SampleTask, &SampleWorkDone](float Overall01)
+	auto SetSampleProgress = [&SampleTask, &SampleWorkDone, SampleTotalWork](float Overall01)
 	{
 		Overall01 = FMath::Clamp(Overall01, 0.0f, 1.0f);
 		const float Target = Overall01 * SampleTotalWork;
@@ -665,7 +665,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			BatchTileIndices.Add(SamplePointTileIndices[StartIdx + I]);
 		}
 
-		auto UpdateDtmUi = [Batch, NumBatches, SetSampleProgress](
+		auto UpdateDtmUi = [Batch, NumBatches, SetSampleProgress, DtmDoneThresholdPercent](
 							   float LoadProgressPercent,
 							   bool bWaitFinished,
 							   bool /*bReachedTarget*/)
