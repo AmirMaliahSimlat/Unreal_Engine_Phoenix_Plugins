@@ -771,7 +771,15 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		}
 	};
 
-	if (bUsePerTileStableTimeout)
+	const bool bPrimaryUseStable = bUsePerTileStableTimeout && !bDiagnoseDtmLoadConsistency;
+	if (bDiagnoseDtmLoadConsistency)
+	{
+		UE_LOG(
+			LogBuildingExtruder,
+			Display,
+			TEXT("Diagnose ON: Pass1 = OLD timeout/done%% (BP values), Pass2 = NEW per-tile stable (hard+center warm)"));
+	}
+	if (bPrimaryUseStable)
 	{
 		constexpr double StableEpsilonM = 0.05;
 		constexpr double StableHoldSeconds = 2.0;
@@ -1156,7 +1164,11 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		if (OkCount == 0)
 		{
 			++DtmFailBuildings;
-			Features[I].OuterRingLonLat.Reset();
+			// Keep rings when diagnosing so Pass2 (stable) can still mesh the same footprints.
+			if (!bDiagnoseDtmLoadConsistency)
+			{
+				Features[I].OuterRingLonLat.Reset();
+			}
 		}
 		else
 		{
@@ -1185,21 +1197,40 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("DTM load diagnose: COLD re-sample timeout=30s doneThreshold=98%%, then spawn both layers..."));
+			TEXT("DTM diagnose Pass2: COLD per-tile STABLE method (hard footprint + center warm), then compare to Pass1 OLD..."));
 
 		TArray<double> DeepHeights;
 		TArray<bool> DeepOk;
 		DeepHeights.SetNum(SamplePoints.Num());
 		DeepOk.SetNum(SamplePoints.Num());
+		for (int32 I = 0; I < DeepOk.Num(); ++I)
+		{
+			DeepHeights[I] = 0.0;
+			DeepOk[I] = false;
+		}
+
+		TArray<int32> DiagTileList;
+		DiagTileList.Reserve(NonEmptyTiles);
+		for (int32 TileIndex = 0; TileIndex < TileFeatureIndices.Num(); ++TileIndex)
+		{
+			if (TileFeatureIndices[TileIndex].Num() > 0)
+			{
+				DiagTileList.Add(TileIndex);
+			}
+		}
 
 		FScopedSlowTask DiagTask(
-			static_cast<float>(FMath::Max(NumBatches, 1)),
-			NSLOCTEXT("BuildingExtruder", "DiagnoseDtmLoad", "Diagnose: cold deep DTM refine..."));
+			static_cast<float>(FMath::Max(DiagTileList.Num(), 1)),
+			NSLOCTEXT("BuildingExtruder", "DiagnoseDtmLoad", "Diagnose: stable per-tile DTM..."));
 		DiagTask.MakeDialog(true);
 
-		constexpr float DeepDonePercent = 98.0f;
-		constexpr double DeepTimeoutSeconds = 30.0;
-		for (int32 Batch = 0; Batch < NumBatches; ++Batch)
+		constexpr double StableEpsilonM = 0.05;
+		constexpr double StableHoldSeconds = 2.0;
+		constexpr double MaxProbeSeconds = 60.0;
+		constexpr double TimeoutMarginSeconds = 3.0;
+		constexpr double MinTileTimeoutSeconds = 5.0;
+
+		for (int32 TileOrd = 0; TileOrd < DiagTileList.Num(); ++TileOrd)
 		{
 			DiagTask.EnterProgressFrame(1.0f);
 			if (DiagTask.ShouldCancel())
@@ -1211,57 +1242,177 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				return Result;
 			}
 
-			const int32 StartIdx = Batch * BatchSize;
-			const int32 Count = FMath::Min(BatchSize, SamplePoints.Num() - StartIdx);
-			TArray<FVector> BatchPoints;
-			TArray<int32> BatchTileIndices;
-			BatchPoints.Reserve(Count);
-			BatchTileIndices.Reserve(Count);
-			for (int32 I = 0; I < Count; ++I)
+			const int32 TileIndex = DiagTileList[TileOrd];
+			const TArray<int32>& Bucket = TileFeatureIndices[TileIndex];
+			const int32 HardFeature = PickHardestFeatureInTile(Features, Bucket);
+
+			double TimeToStable = 8.0;
+			bool bHitMaxProbe = false;
+			int32 ProbeRecord = INDEX_NONE;
+
+			if (HardFeature != INDEX_NONE && FeatureSampleStart[HardFeature] >= 0)
 			{
-				BatchPoints.Add(SamplePoints[StartIdx + I]);
-				BatchTileIndices.Add(SamplePointTileIndices[StartIdx + I]);
+				TArray<FVector> ProbePoints;
+				const int32 ProbeStart = FeatureSampleStart[HardFeature];
+				const int32 ProbeCount = FeatureSampleCount[HardFeature];
+				ProbePoints.Reserve(ProbeCount);
+				for (int32 V = 0; V < ProbeCount; ++V)
+				{
+					ProbePoints.Add(SamplePoints[ProbeStart + V]);
+				}
+				ProbeRecord = Features[HardFeature].RecordIndex;
+
+				double StableFloor = 0.0;
+				FString ProbeError;
+				if (!BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
+						*World,
+						*Georeference,
+						*TerrainTileset,
+						ProbePoints,
+						MaxProbeSeconds,
+						StableHoldSeconds,
+						StableEpsilonM,
+						TimeToStable,
+						StableFloor,
+						bHitMaxProbe,
+						ProbeError,
+						[&DiagTask]() { return DiagTask.ShouldCancel(); }))
+				{
+					if (ProbeError.Contains(TEXT("Cancelled")))
+					{
+						Result.bCancelled = true;
+						Result.Message = ProbeError;
+						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+						return Result;
+					}
+					TimeToStable = 8.0;
+					bHitMaxProbe = false;
+				}
 			}
 
-			TArray<double> BatchHeights;
-			TArray<bool> BatchOk;
-			FString SampleError;
-			if (!BuildingCesiumTerrain::SampleHeightsBlocking(
-					*World,
-					*Georeference,
-					*TerrainTileset,
-					BatchPoints,
-					BatchTileIndices,
-					/*bEnableDtmLoadTimeout*/ true,
-					DeepDonePercent,
-					DeepTimeoutSeconds,
-					BatchHeights,
-					BatchOk,
-					SampleError,
-					BuildingCesiumTerrain::FDtmProgressCallback(),
-					[&DiagTask]() { return DiagTask.ShouldCancel(); }))
+			const double TileTimeout = FMath::Max(MinTileTimeoutSeconds, TimeToStable + TimeoutMarginSeconds);
+			UE_LOG(
+				LogBuildingExtruder,
+				Display,
+				TEXT("Diagnose stable: tile=%d hardRecord=%d timeToStable=%.2fs%s -> tileTimeout=%.2fs"),
+				TileIndex,
+				ProbeRecord,
+				TimeToStable,
+				bHitMaxProbe ? TEXT(" [HIT_MAX_PROBE]") : TEXT(""),
+				TileTimeout);
+
+			TArray<FVector> WarmPoints;
+			double TileDiagonalM = 0.0;
+			bool bUsedExtraMidpoints = false;
+			BuildTileWarmSamplePoints(
+				TileIndex, TilesX, TilesY, MinLon, LonSpan, MinLat, LatSpan,
+				WarmPoints, TileDiagonalM, bUsedExtraMidpoints);
+			if (WarmPoints.Num() > 0)
 			{
-				if (SampleError.Contains(TEXT("Cancelled")))
+				double WarmStableTime = 0.0;
+				double WarmHeight = 0.0;
+				bool bWarmHitMax = false;
+				FString WarmError;
+				if (!BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
+						*World, *Georeference, *TerrainTileset, WarmPoints, TileTimeout,
+						StableHoldSeconds, StableEpsilonM, WarmStableTime, WarmHeight, bWarmHitMax, WarmError,
+						[&DiagTask]() { return DiagTask.ShouldCancel(); }))
+				{
+					if (WarmError.Contains(TEXT("Cancelled")))
+					{
+						Result.bCancelled = true;
+						Result.Message = WarmError;
+						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+						return Result;
+					}
+				}
+				else
+				{
+					UE_LOG(
+						LogBuildingExtruder,
+						Display,
+						TEXT("Diagnose warm: tile=%d diagonal=%.0fm points=%d%s warmStable=%.2fs%s"),
+						TileIndex,
+						TileDiagonalM,
+						WarmPoints.Num(),
+						bUsedExtraMidpoints ? TEXT(" (center+4)") : TEXT(" (center)"),
+						WarmStableTime,
+						bWarmHitMax ? TEXT(" [HIT_MAX]") : TEXT(""));
+				}
+			}
+
+			int32 TileSampleStart = INDEX_NONE;
+			int32 TileSampleEnd = INDEX_NONE;
+			for (int32 I = 0; I < SamplePointTileIndices.Num(); ++I)
+			{
+				if (SamplePointTileIndices[I] == TileIndex)
+				{
+					if (TileSampleStart == INDEX_NONE)
+					{
+						TileSampleStart = I;
+					}
+					TileSampleEnd = I + 1;
+				}
+			}
+			if (TileSampleStart == INDEX_NONE)
+			{
+				continue;
+			}
+
+			const int32 TilePointCount = TileSampleEnd - TileSampleStart;
+			const int32 TileBatches = FMath::DivideAndRoundUp(TilePointCount, BatchSize);
+			for (int32 Batch = 0; Batch < TileBatches; ++Batch)
+			{
+				if (DiagTask.ShouldCancel())
 				{
 					Result.bCancelled = true;
-					Result.Message = SampleError;
+					Result.Message = TEXT("Cancelled during DTM load diagnose.");
 					Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 					UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
 					return Result;
 				}
-				UE_LOG(
-					LogBuildingExtruder,
-					Warning,
-					TEXT("DTM load diagnose batch %d failed: %s (continuing)"),
-					Batch + 1,
-					*SampleError);
-				continue;
-			}
 
-			for (int32 I = 0; I < Count; ++I)
-			{
-				DeepHeights[StartIdx + I] = BatchHeights[I];
-				DeepOk[StartIdx + I] = BatchOk[I];
+				const int32 StartIdx = TileSampleStart + Batch * BatchSize;
+				const int32 Count = FMath::Min(BatchSize, TileSampleEnd - StartIdx);
+				TArray<FVector> BatchPoints;
+				TArray<int32> BatchTileIndices;
+				BatchPoints.Reserve(Count);
+				BatchTileIndices.Reserve(Count);
+				for (int32 I = 0; I < Count; ++I)
+				{
+					BatchPoints.Add(SamplePoints[StartIdx + I]);
+					BatchTileIndices.Add(SamplePointTileIndices[StartIdx + I]);
+				}
+
+				TArray<double> BatchHeights;
+				TArray<bool> BatchOk;
+				FString SampleError;
+				if (!BuildingCesiumTerrain::SampleHeightsBlocking(
+						*World, *Georeference, *TerrainTileset, BatchPoints, BatchTileIndices,
+						/*bEnableDtmLoadTimeout*/ true, DtmDoneThresholdPercent, TileTimeout,
+						BatchHeights, BatchOk, SampleError,
+						BuildingCesiumTerrain::FDtmProgressCallback(),
+						[&DiagTask]() { return DiagTask.ShouldCancel(); }))
+				{
+					if (SampleError.Contains(TEXT("Cancelled")))
+					{
+						Result.bCancelled = true;
+						Result.Message = SampleError;
+						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+						return Result;
+					}
+					UE_LOG(LogBuildingExtruder, Warning, TEXT("Diagnose stable sample tile=%d batch failed: %s"), TileIndex, *SampleError);
+					continue;
+				}
+
+				for (int32 I = 0; I < Count; ++I)
+				{
+					DeepHeights[StartIdx + I] = BatchHeights[I];
+					DeepOk[StartIdx + I] = BatchOk[I];
+				}
 			}
 		}
 
@@ -1282,55 +1433,45 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			const int32 TileIndex =
 				SamplePointTileIndices.IsValidIndex(StartIdx) ? SamplePointTileIndices[StartIdx] : INDEX_NONE;
 
-			double FirstMin = TNumericLimits<double>::Max();
-			double FirstMax = TNumericLimits<double>::Lowest();
-			int32 FirstOk = 0;
-			double DeepMin = TNumericLimits<double>::Max();
-			int32 DeepOkCount = 0;
+			double OldMin = TNumericLimits<double>::Max();
+			double OldMax = TNumericLimits<double>::Lowest();
+			int32 OldOk = 0;
+			double StableMin = TNumericLimits<double>::Max();
+			int32 StableOkCount = 0;
 
 			for (int32 V = 0; V < Count; ++V)
 			{
 				const int32 Idx = StartIdx + V;
 				if (SampleOk.IsValidIndex(Idx) && SampleOk[Idx])
 				{
-					FirstMin = FMath::Min(FirstMin, SampleHeights[Idx]);
-					FirstMax = FMath::Max(FirstMax, SampleHeights[Idx]);
-					++FirstOk;
+					OldMin = FMath::Min(OldMin, SampleHeights[Idx]);
+					OldMax = FMath::Max(OldMax, SampleHeights[Idx]);
+					++OldOk;
 				}
 				if (DeepOk.IsValidIndex(Idx) && DeepOk[Idx])
 				{
-					DeepMin = FMath::Min(DeepMin, DeepHeights[Idx]);
-					++DeepOkCount;
+					StableMin = FMath::Min(StableMin, DeepHeights[Idx]);
+					++StableOkCount;
 				}
 			}
 
-			if (DeepOkCount > 0)
+			if (StableOkCount > 0)
 			{
-				DeepFeatureElevationM[I] = DeepMin;
+				DeepFeatureElevationM[I] = StableMin;
 				DeepFeatureOk[I] = true;
 			}
 
-			if (FirstOk > 0 && (FirstMax - FirstMin) > VertexSpreadWarnM)
+			if (OldOk > 0 && (OldMax - OldMin) > VertexSpreadWarnM)
 			{
 				++BuildingsWideSpread;
-				UE_LOG(
-					LogBuildingExtruder,
-					Warning,
-					TEXT("DTM load diagnose: record=%d tile=%d first-pass vertex spread=%.3fm (min=%.3f max=%.3f) "
-						 "- possible mixed LOD on one footprint"),
-					Features[I].RecordIndex,
-					TileIndex,
-					FirstMax - FirstMin,
-					FirstMin,
-					FirstMax);
 			}
 
-			if (FirstOk == 0 || DeepOkCount == 0)
+			if (OldOk == 0 || StableOkCount == 0)
 			{
 				continue;
 			}
 
-			const double FloorDelta = DeepMin - FirstMin;
+			const double FloorDelta = StableMin - OldMin;
 			if (FMath::Abs(FloorDelta) <= FloorDeltaEpsM)
 			{
 				continue;
@@ -1340,53 +1481,22 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			UE_LOG(
 				LogBuildingExtruder,
 				Warning,
-				TEXT("DTM load diagnose: record=%d tile=%d floorMin FIRST=%.3fm DEEP=%.3fm delta=%+.3fm "
-					 "-> cold longer refine changed floor (load/LOD timing)"),
+				TEXT("DTM diagnose: record=%d tile=%d floorMin OLD=%.3fm STABLE=%.3fm delta=%+.3fm "
+					 "-> methods disagree (inspect Pass1_Old vs Pass2_Stable in level)"),
 				Features[I].RecordIndex,
 				TileIndex,
-				FirstMin,
-				DeepMin,
+				OldMin,
+				StableMin,
 				FloorDelta);
-
-			for (int32 V = 0; V < Count; ++V)
-			{
-				const int32 Idx = StartIdx + V;
-				const bool bA = SampleOk.IsValidIndex(Idx) && SampleOk[Idx];
-				const bool bB = DeepOk.IsValidIndex(Idx) && DeepOk[Idx];
-				if (!bA && !bB)
-				{
-					continue;
-				}
-
-				const FString FirstStr = bA ? FString::Printf(TEXT("%.3fm"), SampleHeights[Idx]) : FString(TEXT("MISS"));
-				const FString DeepStr = bB ? FString::Printf(TEXT("%.3fm"), DeepHeights[Idx]) : FString(TEXT("MISS"));
-				const FString DeltaStr =
-					(bA && bB) ? FString::Printf(TEXT("%+.3fm"), DeepHeights[Idx] - SampleHeights[Idx])
-							   : FString(TEXT("n/a"));
-
-				if (!bA || !bB || FMath::Abs(DeepHeights[Idx] - SampleHeights[Idx]) > FloorDeltaEpsM)
-				{
-					UE_LOG(
-						LogBuildingExtruder,
-						Warning,
-						TEXT("  vertex[%d] lon=%.6f lat=%.6f first=%s deep=%s delta=%s"),
-						V,
-						SamplePoints[Idx].X,
-						SamplePoints[Idx].Y,
-						*FirstStr,
-						*DeepStr,
-						*DeltaStr);
-				}
-			}
 		}
 
 		bHaveDeepLayer = true;
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("DTM load diagnose summary: %d buildings floor-min changed after COLD longer refine (eps=%.2fm); "
-				 "%d buildings had first-pass vertex spread > %.1fm. "
-				 "Spawning Pass1 (normal) + Pass2 (deep) layers."),
+			TEXT("DTM diagnose summary: %d buildings OLD-vs-STABLE floor-min differ (eps=%.2fm); "
+				 "%d buildings had OLD vertex spread > %.1fm. "
+				 "Spawning Pass1_OldTimeoutPct + Pass2_StablePerTile."),
 			BuildingsFloorChanged,
 			FloorDeltaEpsM,
 			BuildingsWideSpread,
@@ -1402,12 +1512,12 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("BldgTile") : ActorLabelPrefix;
 	const FString Pass1Folder = bHaveDeepLayer
-		? (EditorFolderPath.IsEmpty() ? FString(TEXT("ExtrudedBuildings/Pass1_Normal_95"))
-									  : (EditorFolderPath + TEXT("/Pass1_Normal_95")))
+		? (EditorFolderPath.IsEmpty() ? FString(TEXT("ExtrudedBuildings/Pass1_OldTimeoutPct"))
+									  : (EditorFolderPath + TEXT("/Pass1_OldTimeoutPct")))
 		: EditorFolderPath;
 	const FString Pass2Folder = EditorFolderPath.IsEmpty()
-		? FString(TEXT("ExtrudedBuildings/Pass2_Deep_98_30s"))
-		: (EditorFolderPath + TEXT("/Pass2_Deep_98_30s"));
+		? FString(TEXT("ExtrudedBuildings/Pass2_StablePerTile"))
+		: (EditorFolderPath + TEXT("/Pass2_StablePerTile"));
 
 	int32 BuildingsMeshed = 0;
 	int32 BuildingsSkipped = 0;
@@ -1543,7 +1653,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 
 	if (bHaveDeepLayer)
 	{
-		const FString DeepLabelPrefix = LabelPrefix + TEXT("_Deep98");
+		const FString DeepLabelPrefix = LabelPrefix + TEXT("_Stable");
 		if (!SpawnLayer(
 				DeepLabelPrefix,
 				Pass2Folder,
@@ -1609,7 +1719,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		Result.ElapsedSeconds);
 	if (bHaveDeepLayer)
 	{
-		Result.Message += TEXT(" Diagnose: Pass1_Normal_95 (FBX) + Pass2_Deep_98_30s (preview only).");
+		Result.Message += TEXT(" Diagnose: Pass1_OldTimeoutPct (FBX) + Pass2_StablePerTile (preview only).");
 	}
 
 	World->MarkPackageDirty();

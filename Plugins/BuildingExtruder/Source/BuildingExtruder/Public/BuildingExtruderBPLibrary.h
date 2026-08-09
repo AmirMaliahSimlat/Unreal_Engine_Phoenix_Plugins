@@ -70,7 +70,8 @@ public:
 	 * @param DtmDoneProgressPercent Cesium GetLoadProgress() threshold to treat refine as done (1-99).
 	 * @param bUsePerTileStableTimeout If true, per tile: (1) hardest footprint -> timeout T,
 	 *        (2) warm tile center (+4 midpoints if diagonal>=450m) under T, (3) sample with T.
-	 * @param bDiagnoseDtmLoadConsistency Optional dual-pass compare in one run (prefer separate runs).
+	 * @param bDiagnoseDtmLoadConsistency If true: Pass1 = OLD timeout/done% (BP values),
+	 *        Pass2 = NEW per-tile stable; spawn both layers for visual A/B (FBX = Pass1/OLD).
 	 */
 	UFUNCTION(
 		BlueprintCallable,
