@@ -375,6 +375,7 @@ bool BuildingCesiumTerrain::SampleHeightsBlocking(
 	const TArray<int32>& InPointTileIndices,
 	bool bEnableDtmLoadTimeout,
 	float DoneProgressPercent,
+	double TimeoutSecondsOverride,
 	TArray<double>& OutHeightsM,
 	TArray<bool>& OutSuccess,
 	FString& OutError,
@@ -472,8 +473,10 @@ bool BuildingCesiumTerrain::SampleHeightsBlocking(
 	}
 
 
-	const double TimeoutSeconds = 8.0 + InLonLatPoints.Num() * 0.05;
+	const double DefaultTimeoutSeconds = 8.0 + InLonLatPoints.Num() * 0.05;
 	constexpr double NoTimeoutSafetySeconds = 600.0;
+	const double TimeoutSeconds =
+		(TimeoutSecondsOverride > 0.0) ? TimeoutSecondsOverride : DefaultTimeoutSeconds;
 	const double MaxWaitSeconds = bEnableDtmLoadTimeout ? TimeoutSeconds : NoTimeoutSafetySeconds;
 
 	float ProgressAtEnd = 0.0f;

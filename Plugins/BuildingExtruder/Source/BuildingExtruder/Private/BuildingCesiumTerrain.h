@@ -27,6 +27,8 @@ namespace BuildingCesiumTerrain
 	 * Forces high-detail Cesium terrain tiles to load near each point, then line-traces.
 	 *
 	 * @param DoneProgressPercent Cesium GetLoadProgress() threshold to treat refine as done (e.g. 95).
+	 * @param TimeoutSecondsOverride If > 0 and bEnableDtmLoadTimeout, use this wait cap (seconds).
+	 *        If <= 0 and timeout enabled, use default 8 + 0.05*pointCount.
 	 */
 	bool SampleHeightsBlocking(
 		UWorld& World,
@@ -36,6 +38,7 @@ namespace BuildingCesiumTerrain
 		const TArray<int32>& InPointTileIndices,
 		bool bEnableDtmLoadTimeout,
 		float DoneProgressPercent,
+		double TimeoutSecondsOverride,
 		TArray<double>& OutHeightsM,
 		TArray<bool>& OutSuccess,
 		FString& OutError,

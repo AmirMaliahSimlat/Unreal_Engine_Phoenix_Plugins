@@ -23,7 +23,7 @@
 static TAutoConsoleVariable<int32> CVarBuildingExtruderDiagnoseDtmLoad(
 	TEXT("BuildingExtruder.DiagnoseDtmLoadConsistency"),
 	0,
-	TEXT("If 1, after normal DTM sampling re-sample with a longer refine (no timeout, 99%) and log ")
+	TEXT("If 1, after normal DTM sampling re-sample with a longer refine (30s timeout, 98% done) and log ")
 	TEXT("buildings whose floor min changes. Placement still uses the first sample. Default 0."),
 	ECVF_Default);
 
@@ -699,6 +699,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				BatchTileIndices,
 				bEnableDtmLoadTimeout,
 				DtmDoneThresholdPercent,
+				/*TimeoutSecondsOverride*/ 0.0,
 				BatchHeights,
 				BatchOk,
 				SampleError,
@@ -779,7 +780,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("DTM load diagnose: re-sampling with timeout=OFF doneThreshold=99%% (placement unchanged)..."));
+			TEXT("DTM load diagnose: re-sampling with timeout=30s doneThreshold=98%% (placement unchanged)..."));
 
 		TArray<double> DeepHeights;
 		TArray<bool> DeepOk;
@@ -791,7 +792,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			NSLOCTEXT("BuildingExtruder", "DiagnoseDtmLoad", "Diagnose: longer DTM refine..."));
 		DiagTask.MakeDialog(true);
 
-		constexpr float DeepDonePercent = 99.0f;
+		constexpr float DeepDonePercent = 98.0f;
+		constexpr double DeepTimeoutSeconds = 30.0;
 		for (int32 Batch = 0; Batch < NumBatches; ++Batch)
 		{
 			DiagTask.EnterProgressFrame(1.0f);
@@ -825,8 +827,9 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					*TerrainTileset,
 					BatchPoints,
 					BatchTileIndices,
-					/*bEnableDtmLoadTimeout*/ false,
+					/*bEnableDtmLoadTimeout*/ true,
 					DeepDonePercent,
+					DeepTimeoutSeconds,
 					BatchHeights,
 					BatchOk,
 					SampleError,

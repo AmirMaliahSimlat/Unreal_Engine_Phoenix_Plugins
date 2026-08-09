@@ -65,7 +65,8 @@ public:
 	 *
 	 * Temporary diagnose (no BP pin — keeps node signature stable):
 	 * Console: BuildingExtruder.DiagnoseDtmLoadConsistency 1
-	 * Then run extrude; Output Log shows buildings whose floor min changes after a longer refine.
+	 * Then run extrude; second pass uses 98% done + 30s timeout and logs buildings whose
+	 * floor min changes vs the normal pass (95% + ~8-11s). Placement uses the first sample.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
