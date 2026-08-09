@@ -118,6 +118,65 @@ namespace
 		return BestIdx;
 	}
 
+	/** Lon/lat warm points for a tile: always center; +4 midpoints toward corners if tile is large. */
+	void BuildTileWarmSamplePoints(
+		int32 TileIndex,
+		int32 TilesX,
+		int32 TilesY,
+		double MinLon,
+		double LonSpan,
+		double MinLat,
+		double LatSpan,
+		TArray<FVector>& OutLonLatPoints,
+		double& OutTileDiagonalM,
+		bool& OutUsedExtraMidpoints)
+	{
+		OutLonLatPoints.Reset();
+		OutUsedExtraMidpoints = false;
+		OutTileDiagonalM = 0.0;
+
+		if (TilesX <= 0 || TilesY <= 0)
+		{
+			return;
+		}
+
+		const int32 TileX = TileIndex % TilesX;
+		const int32 TileY = TileIndex / TilesX;
+		const double Lon0 = MinLon + (static_cast<double>(TileX) / static_cast<double>(TilesX)) * LonSpan;
+		const double Lon1 = MinLon + (static_cast<double>(TileX + 1) / static_cast<double>(TilesX)) * LonSpan;
+		const double Lat0 = MinLat + (static_cast<double>(TileY) / static_cast<double>(TilesY)) * LatSpan;
+		const double Lat1 = MinLat + (static_cast<double>(TileY + 1) / static_cast<double>(TilesY)) * LatSpan;
+		const double CenterLon = 0.5 * (Lon0 + Lon1);
+		const double CenterLat = 0.5 * (Lat0 + Lat1);
+
+		const double MidLatRad = FMath::DegreesToRadians(CenterLat);
+		constexpr double MetersPerDegLat = 110540.0;
+		const double MetersPerDegLon = FMath::Max(111320.0 * FMath::Cos(MidLatRad), 1.0);
+		const double WidthM = (Lon1 - Lon0) * MetersPerDegLon;
+		const double HeightM = (Lat1 - Lat0) * MetersPerDegLat;
+		OutTileDiagonalM = FMath::Sqrt(WidthM * WidthM + HeightM * HeightM);
+
+		OutLonLatPoints.Add(FVector(CenterLon, CenterLat, 0.0));
+
+		// Large tiles: also warm halfway from center toward each corner.
+		constexpr double LargeTileDiagonalM = 450.0;
+		if (OutTileDiagonalM >= LargeTileDiagonalM)
+		{
+			OutUsedExtraMidpoints = true;
+			const FVector2D Corners[4] = {
+				FVector2D(Lon0, Lat0),
+				FVector2D(Lon1, Lat0),
+				FVector2D(Lon0, Lat1),
+				FVector2D(Lon1, Lat1)};
+			for (int32 C = 0; C < 4; ++C)
+			{
+				const double MidLon = 0.5 * (CenterLon + Corners[C].X);
+				const double MidLat = 0.5 * (CenterLat + Corners[C].Y);
+				OutLonLatPoints.Add(FVector(MidLon, MidLat, 0.0));
+			}
+		}
+	}
+
 	/**
 	 * Chooses TXxTY with TX*TY == TargetTileCount (exact factor pair).
 	 * Picks the pair whose cells are closest to square in meters.
@@ -723,8 +782,9 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("Per-tile stable timeout ON: probe hardest shapefile footprint, then sample tile with measured timeout + %.1fs margin"),
-			TimeoutMarginSeconds);
+			TEXT("Per-tile stable timeout ON: (1) hard footprint -> timeout T  (2) warm tile center"
+				 "%s under T  (3) sample tile with timeout T+margin"),
+			TEXT(" (+4 midpoints if tile diagonal>=450m)"));
 
 		TArray<int32> NonEmptyTileList;
 		NonEmptyTileList.Reserve(NonEmptyTiles);
@@ -816,7 +876,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			UE_LOG(
 				LogBuildingExtruder,
 				Display,
-				TEXT("Per-tile stable: tile=%d record=%d timeToStableHeight=%.2fs%s margin=+%.1fs -> tileTimeout=%.2fs (buildings=%d)"),
+				TEXT("Per-tile stable: tile=%d hardRecord=%d timeToStableHeight=%.2fs%s margin=+%.1fs -> tileTimeout=%.2fs (buildings=%d)"),
 				TileIndex,
 				ProbeRecord,
 				TimeToStable,
@@ -824,6 +884,75 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				TimeoutMarginSeconds,
 				TileTimeout,
 				Bucket.Num());
+
+			// Warm DTM at tile center (and midpoints toward corners if the tile is large).
+			TArray<FVector> WarmPoints;
+			double TileDiagonalM = 0.0;
+			bool bUsedExtraMidpoints = false;
+			BuildTileWarmSamplePoints(
+				TileIndex,
+				TilesX,
+				TilesY,
+				MinLon,
+				LonSpan,
+				MinLat,
+				LatSpan,
+				WarmPoints,
+				TileDiagonalM,
+				bUsedExtraMidpoints);
+
+			if (WarmPoints.Num() > 0)
+			{
+				double WarmStableTime = 0.0;
+				double WarmHeight = 0.0;
+				bool bWarmHitMax = false;
+				FString WarmError;
+				if (!BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
+						*World,
+						*Georeference,
+						*TerrainTileset,
+						WarmPoints,
+						TileTimeout,
+						StableHoldSeconds,
+						StableEpsilonM,
+						WarmStableTime,
+						WarmHeight,
+						bWarmHitMax,
+						WarmError,
+						[&SampleTask]() { return SampleTask.ShouldCancel(); }))
+				{
+					if (WarmError.Contains(TEXT("Cancelled")))
+					{
+						Result.bCancelled = true;
+						Result.Message = WarmError;
+						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+						return Result;
+					}
+					UE_LOG(
+						LogBuildingExtruder,
+						Warning,
+						TEXT("Per-tile warm failed tile=%d diagonal=%.0fm points=%d: %s (continuing to sample)"),
+						TileIndex,
+						TileDiagonalM,
+						WarmPoints.Num(),
+						*WarmError);
+				}
+				else
+				{
+					UE_LOG(
+						LogBuildingExtruder,
+						Display,
+						TEXT("Per-tile warm: tile=%d diagonal=%.0fm points=%d%s warmStable=%.2fs%s (budget=%.2fs)"),
+						TileIndex,
+						TileDiagonalM,
+						WarmPoints.Num(),
+						bUsedExtraMidpoints ? TEXT(" (center+4 midpoints)") : TEXT(" (center only)"),
+						WarmStableTime,
+						bWarmHitMax ? TEXT(" [HIT_MAX]") : TEXT(""),
+						TileTimeout);
+				}
+			}
 
 			int32 TileSampleStart = INDEX_NONE;
 			int32 TileSampleEnd = INDEX_NONE;

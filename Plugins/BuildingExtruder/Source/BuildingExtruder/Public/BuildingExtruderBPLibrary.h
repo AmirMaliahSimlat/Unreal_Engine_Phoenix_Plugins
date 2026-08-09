@@ -68,8 +68,8 @@ public:
 	 * @param DtmTimeoutSeconds Refine wait cap in seconds when timeout is enabled.
 	 *        <=0 means default 8 + 0.05*batchPointCount (~8-11s).
 	 * @param DtmDoneProgressPercent Cesium GetLoadProgress() threshold to treat refine as done (1-99).
-	 * @param bUsePerTileStableTimeout If true, per tile: hardest footprint -> time-to-stable (+ margin)
-	 *        as that tile's timeout (overrides DtmTimeoutSeconds for that tile).
+	 * @param bUsePerTileStableTimeout If true, per tile: (1) hardest footprint -> timeout T,
+	 *        (2) warm tile center (+4 midpoints if diagonal>=450m) under T, (3) sample with T.
 	 * @param bDiagnoseDtmLoadConsistency Optional dual-pass compare in one run (prefer separate runs).
 	 */
 	UFUNCTION(
