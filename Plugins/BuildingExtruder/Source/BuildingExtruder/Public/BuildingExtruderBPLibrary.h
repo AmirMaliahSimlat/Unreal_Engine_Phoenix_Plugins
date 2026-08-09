@@ -18,7 +18,7 @@ struct FBuildingExtrudeResult
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	int32 BuildingsSkipped = 0;
 
-	/** Non-empty tile StaticMeshActors spawned. */
+	/** Non-empty tile slots spawned (each tile = walls actor + roof actor). */
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	int32 TilesSpawned = 0;
 
@@ -49,8 +49,8 @@ class BUILDINGEXTRUDER_API UBuildingExtruderBPLibrary : public UBlueprintFunctio
 public:
 	/**
 	 * Reads EPSG:4326 building footprints from a shapefile (.shp + .dbf),
-	 * places floors from AltitudeFieldName, extrudes tiled StaticMeshActors,
-	 * and writes a combined FBX.
+	 * places floors from AltitudeFieldName, extrudes tiled StaticMeshActors
+	 * (walls+floor and roof as separate actors per tile), and writes a combined FBX.
 	 *
 	 * @param ShapefilePath Path to .shp (with or without extension; .dbf required beside it).
 	 * @param FbxOutputPath Required output path for the combined FBX.

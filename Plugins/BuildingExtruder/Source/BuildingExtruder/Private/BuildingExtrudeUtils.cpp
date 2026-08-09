@@ -147,15 +147,42 @@ namespace
 		Mesh.Triangles.Add(Base + 1);
 		Mesh.Triangles.Add(Base + 2);
 	}
+
+	void AddDoubleSidedCopies(FExtrudedPrismMesh& Mesh)
+	{
+		const int32 OrigTriCount = Mesh.Triangles.Num();
+		for (int32 T = 0; T + 2 < OrigTriCount; T += 3)
+		{
+			const FVector VA = Mesh.Vertices[Mesh.Triangles[T]];
+			const FVector VB = Mesh.Vertices[Mesh.Triangles[T + 1]];
+			const FVector VC = Mesh.Vertices[Mesh.Triangles[T + 2]];
+			AddTri(Mesh, VA, VC, VB);
+		}
+	}
+
+	void AppendMesh(FExtrudedPrismMesh& Combined, const FExtrudedPrismMesh& Part)
+	{
+		const int32 VertexOffset = Combined.Vertices.Num();
+		Combined.Vertices.Append(Part.Vertices);
+		Combined.Normals.Append(Part.Normals);
+		Combined.UVs.Append(Part.UVs);
+		Combined.Triangles.Reserve(Combined.Triangles.Num() + Part.Triangles.Num());
+		for (const int32 Index : Part.Triangles)
+		{
+			Combined.Triangles.Add(Index + VertexOffset);
+		}
+	}
 }
 
-bool BuildingExtrudeUtils::BuildPrismFromRings(
+bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 	const TArray<FVector>& BaseRingLocal,
 	const TArray<FVector>& TopRingLocal,
-	FExtrudedPrismMesh& OutMesh,
+	FExtrudedPrismMesh& OutWallsAndFloor,
+	FExtrudedPrismMesh& OutRoof,
 	FString& OutError)
 {
-	OutMesh = FExtrudedPrismMesh();
+	OutWallsAndFloor = FExtrudedPrismMesh();
+	OutRoof = FExtrudedPrismMesh();
 
 	TArray<FVector> Base = BaseRingLocal;
 	TArray<FVector> Top = TopRingLocal;
@@ -181,7 +208,7 @@ bool BuildingExtrudeUtils::BuildPrismFromRings(
 
 	const bool bCCW = SignedArea2XY(Base) > 0.0;
 
-	// Bottom cap (inward / downward winding relative to CCW base).
+	// Floor (bottom cap).
 	for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
 	{
 		const FVector& A = Base[CapTris[I]];
@@ -189,15 +216,15 @@ bool BuildingExtrudeUtils::BuildPrismFromRings(
 		const FVector& C = Base[CapTris[I + 2]];
 		if (bCCW)
 		{
-			AddTri(OutMesh, A, C, B);
+			AddTri(OutWallsAndFloor, A, C, B);
 		}
 		else
 		{
-			AddTri(OutMesh, A, B, C);
+			AddTri(OutWallsAndFloor, A, B, C);
 		}
 	}
 
-	// Top cap
+	// Roof (top cap).
 	for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
 	{
 		const FVector& A = Top[CapTris[I]];
@@ -205,15 +232,15 @@ bool BuildingExtrudeUtils::BuildPrismFromRings(
 		const FVector& C = Top[CapTris[I + 2]];
 		if (bCCW)
 		{
-			AddTri(OutMesh, A, B, C);
+			AddTri(OutRoof, A, B, C);
 		}
 		else
 		{
-			AddTri(OutMesh, A, C, B);
+			AddTri(OutRoof, A, C, B);
 		}
 	}
 
-	// Sides
+	// Walls (sides).
 	const int32 N = Base.Num();
 	for (int32 I = 0; I < N; ++I)
 	{
@@ -224,27 +251,46 @@ bool BuildingExtrudeUtils::BuildPrismFromRings(
 
 		if (bCCW)
 		{
-			AddTri(OutMesh, B0, B1, T1);
-			AddTri(OutMesh, B0, T1, T0);
+			AddTri(OutWallsAndFloor, B0, B1, T1);
+			AddTri(OutWallsAndFloor, B0, T1, T0);
 		}
 		else
 		{
-			AddTri(OutMesh, B0, T1, B1);
-			AddTri(OutMesh, B0, T0, T1);
+			AddTri(OutWallsAndFloor, B0, T1, B1);
+			AddTri(OutWallsAndFloor, B0, T0, T1);
 		}
 	}
 
 	// Duplicate every triangle with reversed winding so the solid is closed/visible from both sides
 	// (Unreal and FBX viewers typically cull back faces).
-	const int32 OrigTriCount = OutMesh.Triangles.Num();
-	for (int32 T = 0; T + 2 < OrigTriCount; T += 3)
+	AddDoubleSidedCopies(OutWallsAndFloor);
+	AddDoubleSidedCopies(OutRoof);
+
+	if (OutWallsAndFloor.Triangles.Num() < 3 || OutRoof.Triangles.Num() < 3)
 	{
-		const FVector VA = OutMesh.Vertices[OutMesh.Triangles[T]];
-		const FVector VB = OutMesh.Vertices[OutMesh.Triangles[T + 1]];
-		const FVector VC = OutMesh.Vertices[OutMesh.Triangles[T + 2]];
-		AddTri(OutMesh, VA, VC, VB);
+		OutError = TEXT("Prism parts produced empty meshes.");
+		return false;
+	}
+	return true;
+}
+
+bool BuildingExtrudeUtils::BuildPrismFromRings(
+	const TArray<FVector>& BaseRingLocal,
+	const TArray<FVector>& TopRingLocal,
+	FExtrudedPrismMesh& OutMesh,
+	FString& OutError)
+{
+	FExtrudedPrismMesh WallsAndFloor;
+	FExtrudedPrismMesh Roof;
+	if (!BuildPrismPartsFromRings(BaseRingLocal, TopRingLocal, WallsAndFloor, Roof, OutError))
+	{
+		OutMesh = FExtrudedPrismMesh();
+		return false;
 	}
 
+	OutMesh = FExtrudedPrismMesh();
+	AppendMesh(OutMesh, WallsAndFloor);
+	AppendMesh(OutMesh, Roof);
 	return OutMesh.Triangles.Num() >= 3;
 }
 

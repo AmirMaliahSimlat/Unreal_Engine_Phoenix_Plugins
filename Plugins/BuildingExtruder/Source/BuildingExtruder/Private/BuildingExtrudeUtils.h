@@ -13,8 +13,19 @@ struct FExtrudedPrismMesh
 namespace BuildingExtrudeUtils
 {
 	/**
-	 * Builds a prism from matching base/top rings in actor-local space.
+	 * Builds separate wall+floor and roof meshes from matching base/top rings in actor-local space.
 	 * Triangulates using base ring XY (ear clipping). Side faces connect base[i]→top[i].
+	 * WallsAndFloor = bottom cap + vertical sides. Roof = top cap only.
+	 */
+	bool BuildPrismPartsFromRings(
+		const TArray<FVector>& BaseRingLocal,
+		const TArray<FVector>& TopRingLocal,
+		FExtrudedPrismMesh& OutWallsAndFloor,
+		FExtrudedPrismMesh& OutRoof,
+		FString& OutError);
+
+	/**
+	 * Builds a full prism (walls + floor + roof) from matching base/top rings.
 	 */
 	bool BuildPrismFromRings(
 		const TArray<FVector>& BaseRingLocal,
