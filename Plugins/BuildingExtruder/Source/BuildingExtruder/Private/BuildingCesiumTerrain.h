@@ -23,6 +23,12 @@ namespace BuildingCesiumTerrain
 	using FDtmShouldCancelCallback = TFunction<bool()>;
 
 	/**
+	 * Destroys in-memory Cesium tiles via RefreshTileset and pumps ticks so the next
+	 * SampleHeightsBlocking starts from an empty tileset (HTTP cache may still speed downloads).
+	 */
+	void ColdReloadTileset(ACesium3DTileset& TerrainTileset, UWorld* World);
+
+	/**
 	 * Samples ellipsoid heights (meters) at lon/lat points (X=lon, Y=lat) using DTM tileset only.
 	 * Forces high-detail Cesium terrain tiles to load near each point, then line-traces.
 	 *

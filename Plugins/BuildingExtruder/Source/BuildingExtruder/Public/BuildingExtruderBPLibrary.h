@@ -65,8 +65,8 @@ public:
 	 *
 	 * Temporary diagnose (no BP pin — keeps node signature stable):
 	 * Console: BuildingExtruder.DiagnoseDtmLoadConsistency 1
-	 * Then run extrude; second pass uses 98% done + 30s timeout and logs buildings whose
-	 * floor min changes vs the normal pass (95% + ~8-11s). Placement uses the first sample.
+	 * Cold-reloads DTM before each pass, samples normal (95%/~8-11s) then deep (98%/30s),
+	 * spawns BOTH layers in the level (FBX = normal layer only), and logs floor-min deltas.
 	 */
 	UFUNCTION(
 		BlueprintCallable,

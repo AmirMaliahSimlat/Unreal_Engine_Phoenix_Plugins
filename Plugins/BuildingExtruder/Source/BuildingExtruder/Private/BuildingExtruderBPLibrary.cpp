@@ -23,8 +23,8 @@
 static TAutoConsoleVariable<int32> CVarBuildingExtruderDiagnoseDtmLoad(
 	TEXT("BuildingExtruder.DiagnoseDtmLoadConsistency"),
 	0,
-	TEXT("If 1, after normal DTM sampling re-sample with a longer refine (30s timeout, 98% done) and log ")
-	TEXT("buildings whose floor min changes. Placement still uses the first sample. Default 0."),
+	TEXT("If 1: cold-reload DTM, sample normal (95%/~8-11s), cold-reload again, sample deep (98%/30s), ")
+	TEXT("spawn BOTH layers in the level, and log floor-min deltas. FBX uses the normal layer only. Default 0."),
 	ECVF_Default);
 
 namespace
@@ -65,7 +65,7 @@ namespace
 	}
 
 	/**
-	 * Chooses TX×TY with TX*TY == TargetTileCount (exact factor pair).
+	 * Chooses TXÃƒâ€”TY with TX*TY == TargetTileCount (exact factor pair).
 	 * Picks the pair whose cells are closest to square in meters.
 	 */
 	void ChooseSquareTileGrid(
@@ -90,7 +90,7 @@ namespace
 		int32 BestY = 1;
 		double BestAspectError = TNumericLimits<double>::Max();
 
-		// Exact factor pairs only: for 24 → 1×24, 2×12, 3×8, 4×6, 6×4, 8×3, 12×2, 24×1.
+		// Exact factor pairs only: for 24 Ã¢â€ â€™ 1Ãƒâ€”24, 2Ãƒâ€”12, 3Ãƒâ€”8, 4Ãƒâ€”6, 6Ãƒâ€”4, 8Ãƒâ€”3, 12Ãƒâ€”2, 24Ãƒâ€”1.
 		for (int32 Y = 1; Y <= Target; ++Y)
 		{
 			if (Target % Y != 0)
@@ -114,7 +114,7 @@ namespace
 		OutTilesY = BestY;
 	}
 
-	/** Parses "0,6,12" into a set of linear tile indices. Empty string → empty set (meaning all). */
+	/** Parses "0,6,12" into a set of linear tile indices. Empty string Ã¢â€ â€™ empty set (meaning all). */
 	bool ParseTileIndicesFilter(const FString& TileIndices, TSet<int32>& OutIndices, FString& OutError)
 	{
 		OutIndices.Reset();
@@ -612,6 +612,11 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		BuildingsInSelectedTiles,
 		bEnableDtmLoadTimeout ? TEXT("ON") : TEXT("OFF"));
 
+	if (bDiagnoseDtmLoadConsistency && TerrainTileset)
+	{
+		BuildingCesiumTerrain::ColdReloadTileset(*TerrainTileset, World);
+	}
+
 	// DTM-only sampling (other actors hidden / unticked / no collision inside SampleHeightsBlocking).
 	constexpr int32 BatchSize = 64;
 	const int32 NumBatches = FMath::DivideAndRoundUp(FMath::Max(SamplePoints.Num(), 1), BatchSize);
@@ -773,14 +778,21 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		BuildingsInSelectedTiles - DtmFailBuildings,
 		DtmFailBuildings);
 
-	// Prove load/LOD timing: re-sample with longer refine; log buildings whose floor min moves.
-	// Placement still uses the first (normal) sample above.
+	// Prove load/LOD timing with a COLD second pass + spawn both layers when diagnose is on.
+	TArray<double> DeepFeatureElevationM;
+	TArray<bool> DeepFeatureOk;
+	bool bHaveDeepLayer = false;
+	DeepFeatureElevationM.Init(0.0, ToImport);
+	DeepFeatureOk.Init(false, ToImport);
+
 	if (bDiagnoseDtmLoadConsistency && SamplePoints.Num() > 0)
 	{
+		BuildingCesiumTerrain::ColdReloadTileset(*TerrainTileset, World);
+
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("DTM load diagnose: re-sampling with timeout=30s doneThreshold=98%% (placement unchanged)..."));
+			TEXT("DTM load diagnose: COLD re-sample timeout=30s doneThreshold=98%%, then spawn both layers..."));
 
 		TArray<double> DeepHeights;
 		TArray<bool> DeepOk;
@@ -789,7 +801,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 
 		FScopedSlowTask DiagTask(
 			static_cast<float>(FMath::Max(NumBatches, 1)),
-			NSLOCTEXT("BuildingExtruder", "DiagnoseDtmLoad", "Diagnose: longer DTM refine..."));
+			NSLOCTEXT("BuildingExtruder", "DiagnoseDtmLoad", "Diagnose: cold deep DTM refine..."));
 		DiagTask.MakeDialog(true);
 
 		constexpr float DeepDonePercent = 98.0f;
@@ -881,7 +893,6 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			double FirstMax = TNumericLimits<double>::Lowest();
 			int32 FirstOk = 0;
 			double DeepMin = TNumericLimits<double>::Max();
-			double DeepMax = TNumericLimits<double>::Lowest();
 			int32 DeepOkCount = 0;
 
 			for (int32 V = 0; V < Count; ++V)
@@ -896,9 +907,14 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				if (DeepOk.IsValidIndex(Idx) && DeepOk[Idx])
 				{
 					DeepMin = FMath::Min(DeepMin, DeepHeights[Idx]);
-					DeepMax = FMath::Max(DeepMax, DeepHeights[Idx]);
 					++DeepOkCount;
 				}
+			}
+
+			if (DeepOkCount > 0)
+			{
+				DeepFeatureElevationM[I] = DeepMin;
+				DeepFeatureOk[I] = true;
 			}
 
 			if (FirstOk > 0 && (FirstMax - FirstMin) > VertexSpreadWarnM)
@@ -932,7 +948,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				LogBuildingExtruder,
 				Warning,
 				TEXT("DTM load diagnose: record=%d tile=%d floorMin FIRST=%.3fm DEEP=%.3fm delta=%+.3fm "
-					 "-> longer refine changed floor (load/LOD timing)"),
+					 "-> cold longer refine changed floor (load/LOD timing)"),
 				Features[I].RecordIndex,
 				TileIndex,
 				FirstMin,
@@ -971,124 +987,181 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			}
 		}
 
+		bHaveDeepLayer = true;
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("DTM load diagnose summary: %d buildings floor-min changed after longer refine (eps=%.2fm); "
+			TEXT("DTM load diagnose summary: %d buildings floor-min changed after COLD longer refine (eps=%.2fm); "
 				 "%d buildings had first-pass vertex spread > %.1fm. "
-				 "If floor-min changes > 0, float/sink is partly load/LOD timing."),
+				 "Spawning Pass1 (normal) + Pass2 (deep) layers."),
 			BuildingsFloorChanged,
 			FloorDeltaEpsM,
 			BuildingsWideSpread,
 			VertexSpreadWarnM);
 	}
 
+	const float SpawnTileWork = static_cast<float>(FMath::Max(NonEmptyTiles, 1));
+	const float SpawnTotalWork = SpawnTileWork * (bHaveDeepLayer ? 2.0f : 1.0f) + 1.0f;
 	FScopedSlowTask SlowTask(
-		static_cast<float>(FMath::Max(NonEmptyTiles, 1)) + 1.0f,
+		SpawnTotalWork,
 		NSLOCTEXT("BuildingExtruder", "ImportProgress", "Extruding tiled buildings..."));
 	SlowTask.MakeDialog(true);
 
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("BldgTile") : ActorLabelPrefix;
+	const FString Pass1Folder = bHaveDeepLayer
+		? (EditorFolderPath.IsEmpty() ? FString(TEXT("ExtrudedBuildings/Pass1_Normal_95"))
+									  : (EditorFolderPath + TEXT("/Pass1_Normal_95")))
+		: EditorFolderPath;
+	const FString Pass2Folder = EditorFolderPath.IsEmpty()
+		? FString(TEXT("ExtrudedBuildings/Pass2_Deep_98_30s"))
+		: (EditorFolderPath + TEXT("/Pass2_Deep_98_30s"));
+
 	int32 BuildingsMeshed = 0;
 	int32 BuildingsSkipped = 0;
 	int32 TilesSpawned = 0;
 	TArray<AStaticMeshActor*> SpawnedTileActors;
 	SpawnedTileActors.Reserve(NonEmptyTiles);
 	UMaterialInterface* CorrectMaterial = BuildingStaticMeshUtils::GetTwoSidedBuildingMaterial();
+	UMaterialInterface* DeepMaterial = BuildingStaticMeshUtils::GetDiagnoseDeepCompareMaterial();
 	TArray<FName> TileTags;
 	TileTags.Add(FName(TEXT("BuildingExtruderTile")));
+	TArray<FName> DeepTileTags;
+	DeepTileTags.Add(FName(TEXT("BuildingExtruderTile")));
+	DeepTileTags.Add(FName(TEXT("BuildingExtruderDiagnoseDeep")));
 
-	for (int32 TileY = 0; TileY < TilesY; ++TileY)
+	auto SpawnLayer = [&](
+						  const FString& LayerLabelPrefix,
+						  const FString& LayerFolder,
+						  UMaterialInterface* LayerMaterial,
+						  const TArray<FName>& LayerTags,
+						  bool bUseDeepElevation,
+						  bool bCollectForFbx) -> bool
 	{
-		for (int32 TileX = 0; TileX < TilesX; ++TileX)
+		for (int32 TileY = 0; TileY < TilesY; ++TileY)
 		{
-			const TArray<int32>& Bucket = TileFeatureIndices[TileY * TilesX + TileX];
-			if (Bucket.Num() == 0)
+			for (int32 TileX = 0; TileX < TilesX; ++TileX)
 			{
-				continue;
-			}
-
-			const FString TileLabel = FString::Printf(TEXT("%s_%d_%d"), *LabelPrefix, TileX, TileY);
-			SlowTask.EnterProgressFrame(
-				1.0f,
-				FText::Format(
-					NSLOCTEXT("BuildingExtruder", "ImportProgressTile", "Tile {0} ({1} buildings)"),
-					FText::FromString(TileLabel),
-					FText::AsNumber(Bucket.Num())));
-
-			if (SlowTask.ShouldCancel())
-			{
-				Result.bCancelled = true;
-				Result.BuildingsSpawned = BuildingsMeshed;
-				Result.BuildingsSkipped = BuildingsSkipped + (ToImport - BuildingsMeshed - BuildingsSkipped);
-				Result.TilesSpawned = TilesSpawned;
-				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-				Result.Message = FString::Printf(
-					TEXT("Cancelled. Tiles=%d buildings=%d. FBX not written. Elapsed: %.2fs."),
-					TilesSpawned,
-					BuildingsMeshed,
-					Result.ElapsedSeconds);
-				UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-				return Result;
-			}
-
-			FExtrudedPrismMesh TileWorldMesh;
-			int32 TileBuildingCount = 0;
-			for (const int32 FeatureIndex : Bucket)
-			{
-				FExtrudedPrismMesh BuildingWorldMesh;
-				FVector Centroid;
-				FString ExtrudeError;
-				if (!BuildFeaturePrismWorld(
-						*Georeference,
-						Features[FeatureIndex],
-						Features[FeatureIndex].ElevationM,
-						BuildingWorldMesh,
-						Centroid,
-						ExtrudeError))
+				const TArray<int32>& Bucket = TileFeatureIndices[TileY * TilesX + TileX];
+				if (Bucket.Num() == 0)
 				{
-					++BuildingsSkipped;
-					UE_LOG(
-						LogBuildingExtruder,
-						Warning,
-						TEXT("Skipped record %d: %s"),
-						Features[FeatureIndex].RecordIndex,
-						*ExtrudeError);
 					continue;
 				}
 
-				AppendWorldMesh(TileWorldMesh, BuildingWorldMesh, FVector::ZeroVector);
-				++BuildingsMeshed;
-				++TileBuildingCount;
-			}
+				const FString TileLabel = FString::Printf(TEXT("%s_%d_%d"), *LayerLabelPrefix, TileX, TileY);
+				SlowTask.EnterProgressFrame(
+					1.0f,
+					FText::Format(
+						NSLOCTEXT("BuildingExtruder", "ImportProgressTile", "Tile {0} ({1} buildings)"),
+						FText::FromString(TileLabel),
+						FText::AsNumber(Bucket.Num())));
 
-			if (TileBuildingCount == 0)
-			{
-				continue;
-			}
+				if (SlowTask.ShouldCancel())
+				{
+					Result.bCancelled = true;
+					Result.BuildingsSpawned = BuildingsMeshed;
+					Result.BuildingsSkipped = BuildingsSkipped + (ToImport - BuildingsMeshed - BuildingsSkipped);
+					Result.TilesSpawned = TilesSpawned;
+					Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+					Result.Message = FString::Printf(
+						TEXT("Cancelled. Tiles=%d buildings=%d. FBX not written. Elapsed: %.2fs."),
+						TilesSpawned,
+						BuildingsMeshed,
+						Result.ElapsedSeconds);
+					UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+					return false;
+				}
 
-			AStaticMeshActor* SpawnedActor = nullptr;
-			FString SpawnError;
-			if (!SpawnTileStaticMeshActor(
-					*World,
-					TileWorldMesh,
-					TileLabel,
-					EditorFolderPath,
-					CorrectMaterial,
-					TileTags,
-					SpawnedActor,
-					SpawnError))
-			{
-				UE_LOG(LogBuildingExtruder, Error, TEXT("Tile %s failed: %s"), *TileLabel, *SpawnError);
-				BuildingsSkipped += TileBuildingCount;
-				BuildingsMeshed -= TileBuildingCount;
-				continue;
+				FExtrudedPrismMesh TileWorldMesh;
+				int32 TileBuildingCount = 0;
+				for (const int32 FeatureIndex : Bucket)
+				{
+					if (bUseDeepElevation && (!DeepFeatureOk.IsValidIndex(FeatureIndex) || !DeepFeatureOk[FeatureIndex]))
+					{
+						++BuildingsSkipped;
+						continue;
+					}
+
+					const double ElevationM = bUseDeepElevation
+						? DeepFeatureElevationM[FeatureIndex]
+						: Features[FeatureIndex].ElevationM;
+
+					FExtrudedPrismMesh BuildingWorldMesh;
+					FVector Centroid;
+					FString ExtrudeError;
+					if (!BuildFeaturePrismWorld(
+							*Georeference,
+							Features[FeatureIndex],
+							ElevationM,
+							BuildingWorldMesh,
+							Centroid,
+							ExtrudeError))
+					{
+						++BuildingsSkipped;
+						UE_LOG(
+							LogBuildingExtruder,
+							Warning,
+							TEXT("Skipped record %d: %s"),
+							Features[FeatureIndex].RecordIndex,
+							*ExtrudeError);
+						continue;
+					}
+
+					AppendWorldMesh(TileWorldMesh, BuildingWorldMesh, FVector::ZeroVector);
+					++BuildingsMeshed;
+					++TileBuildingCount;
+				}
+
+				if (TileBuildingCount == 0)
+				{
+					continue;
+				}
+
+				AStaticMeshActor* SpawnedActor = nullptr;
+				FString SpawnError;
+				if (!SpawnTileStaticMeshActor(
+						*World,
+						TileWorldMesh,
+						TileLabel,
+						LayerFolder,
+						LayerMaterial,
+						LayerTags,
+						SpawnedActor,
+						SpawnError))
+				{
+					UE_LOG(LogBuildingExtruder, Error, TEXT("Tile %s failed: %s"), *TileLabel, *SpawnError);
+					BuildingsSkipped += TileBuildingCount;
+					BuildingsMeshed -= TileBuildingCount;
+					continue;
+				}
+				if (bCollectForFbx)
+				{
+					SpawnedTileActors.Add(SpawnedActor);
+				}
+				++TilesSpawned;
 			}
-			SpawnedTileActors.Add(SpawnedActor);
-			++TilesSpawned;
 		}
+		return true;
+	};
+
+	if (!SpawnLayer(LabelPrefix, Pass1Folder, CorrectMaterial, TileTags, /*bUseDeepElevation*/ false, /*bCollectForFbx*/ true))
+	{
+		return Result;
 	}
 
+	if (bHaveDeepLayer)
+	{
+		const FString DeepLabelPrefix = LabelPrefix + TEXT("_Deep98");
+		if (!SpawnLayer(
+				DeepLabelPrefix,
+				Pass2Folder,
+				DeepMaterial,
+				DeepTileTags,
+				/*bUseDeepElevation*/ true,
+				/*bCollectForFbx*/ false))
+		{
+			return Result;
+		}
+	}
 
 	SlowTask.EnterProgressFrame(1.0f, NSLOCTEXT("BuildingExtruder", "WriteFbx", "Writing FBX..."));
 
@@ -1098,11 +1171,11 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		WrittenFbxPath += TEXT(".fbx");
 	}
 
-	if (TilesSpawned <= 0)
+	if (SpawnedTileActors.Num() <= 0)
 	{
 		Result.BuildingsSpawned = 0;
 		Result.BuildingsSkipped = BuildingsSkipped;
-		Result.TilesSpawned = 0;
+		Result.TilesSpawned = TilesSpawned;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		Result.Message = FString::Printf(
 			TEXT("No tiles spawned (%d buildings skipped). FBX not written. Elapsed: %.2fs."),
@@ -1141,6 +1214,10 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		BuildingsSkipped,
 		*WrittenFbxPath,
 		Result.ElapsedSeconds);
+	if (bHaveDeepLayer)
+	{
+		Result.Message += TEXT(" Diagnose: Pass1_Normal_95 (FBX) + Pass2_Deep_98_30s (preview only).");
+	}
 
 	World->MarkPackageDirty();
 	UE_LOG(LogBuildingExtruder, Display, TEXT("%s"), *Result.Message);

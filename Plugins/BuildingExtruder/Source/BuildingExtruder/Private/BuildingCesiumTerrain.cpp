@@ -53,6 +53,37 @@ ACesium3DTileset* BuildingCesiumTerrain::FindTerrainTileset(UWorld* World)
 	return Fallback;
 }
 
+void BuildingCesiumTerrain::ColdReloadTileset(ACesium3DTileset& TerrainTileset, UWorld* World)
+{
+	UE_LOG(
+		LogBuildingExtruder,
+		Display,
+		TEXT("DTM cold reload: RefreshTileset on '%s' (clears in-memory tiles before next sample)"),
+		*TerrainTileset.GetActorNameOrLabel());
+
+	TerrainTileset.RefreshTileset();
+
+	ACesiumCameraManager* CameraManager =
+		World ? ACesiumCameraManager::GetDefaultCameraManager(World) : nullptr;
+
+	// RefreshTileset destroys the native tileset; Tick recreates an empty one.
+	for (int32 I = 0; I < 40; ++I)
+	{
+		if (CameraManager)
+		{
+			CameraManager->Tick(0.05f);
+		}
+		TerrainTileset.Tick(0.05f);
+		FPlatformProcess::Sleep(0.02f);
+	}
+
+	UE_LOG(
+		LogBuildingExtruder,
+		Display,
+		TEXT("DTM cold reload done (loadProgress=%.1f%%). HTTP cache may still accelerate downloads."),
+		TerrainTileset.GetLoadProgress());
+}
+
 namespace
 {
 	bool IsHitOnTerrainTileset(const FHitResult& Hit, const ACesium3DTileset& TerrainTileset)
@@ -447,7 +478,10 @@ bool BuildingCesiumTerrain::SampleHeightsBlocking(
 	}
 
 	constexpr double CameraHeightAboveGroundM = 80.0;
-	for (int32 I = 0; I < InLonLatPoints.Num(); ++I)
+	// Cap virtual cameras: one per vertex caused Slate/D3D12 RHI refcount overflows.
+	constexpr int32 MaxRefineCameras = 8;
+	const int32 CameraStride = FMath::Max(1, FMath::DivideAndRoundUp(InLonLatPoints.Num(), MaxRefineCameras));
+	for (int32 I = 0; I < InLonLatPoints.Num(); I += CameraStride)
 	{
 		const double Lon = InLonLatPoints[I].X;
 		const double Lat = InLonLatPoints[I].Y;
