@@ -67,6 +67,11 @@ public:
 	 * Console: BuildingExtruder.DiagnoseDtmLoadConsistency 1
 	 * Cold-reloads DTM before each pass, samples normal (95%/~8-11s) then deep (98%/30s),
 	 * spawns BOTH layers in the level (FBX = normal layer only), and logs floor-min deltas.
+	 *
+	 * Per-tile adaptive timeout (no BP pin):
+	 * Console: BuildingExtruder.UsePerTileStableTimeout 1
+	 * Per tile: hardest shapefile footprint -> time-to-stable-height (+ margin) as refine timeout.
+	 * 0 = constant ~8-11s timeout (default).
 	 */
 	UFUNCTION(
 		BlueprintCallable,

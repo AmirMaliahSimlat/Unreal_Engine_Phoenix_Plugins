@@ -569,3 +569,183 @@ bool BuildingCesiumTerrain::SampleHeightsBlocking(
 	return true;
 }
 
+bool BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
+	UWorld& World,
+	ACesiumGeoreference& Georeference,
+	ACesium3DTileset& TerrainTileset,
+	const TArray<FVector>& InLonLatPoints,
+	double MaxProbeSeconds,
+	double HoldSeconds,
+	double EpsilonM,
+	double& OutTimeToStableSeconds,
+	double& OutStableFloorHeightM,
+	bool& OutHitMaxProbe,
+	FString& OutError,
+	const FDtmShouldCancelCallback& ShouldCancel)
+{
+	OutTimeToStableSeconds = 0.0;
+	OutStableFloorHeightM = 0.0;
+	OutHitMaxProbe = false;
+
+	if (InLonLatPoints.Num() == 0)
+	{
+		OutError = TEXT("MeasureTimeToStableFloorHeight: no footprint vertices.");
+		return false;
+	}
+
+	ACesiumCameraManager* CameraManager = ACesiumCameraManager::GetDefaultCameraManager(&World);
+	if (!CameraManager)
+	{
+		OutError = TEXT("Could not get CesiumCameraManager for stable-height probe.");
+		return false;
+	}
+
+	MaxProbeSeconds = FMath::Clamp(MaxProbeSeconds, 1.0, 180.0);
+	HoldSeconds = FMath::Clamp(HoldSeconds, 0.5, 30.0);
+	EpsilonM = FMath::Max(EpsilonM, 0.01);
+
+	const double OldSSE = TerrainTileset.MaximumScreenSpaceError;
+	TerrainTileset.SetMaximumScreenSpaceError(1.0);
+
+	TArray<int32> CameraIds;
+	TArray<FActorIsolateRestore> IsolateRestore;
+	IsolateDtmForSampling(World, TerrainTileset, IsolateRestore);
+
+	auto CleanupProbe = [&]()
+	{
+		for (const int32 CamId : CameraIds)
+		{
+			CameraManager->RemoveCamera(CamId);
+		}
+		TerrainTileset.SetMaximumScreenSpaceError(OldSSE);
+		RestoreIsolatedActors(IsolateRestore);
+	};
+
+	TArray<AActor*> DtmIgnoredActors;
+	BuildDtmTraceIgnoreList(World, TerrainTileset, DtmIgnoredActors);
+
+	TArray<double> CoarseHeights;
+	CoarseHeights.SetNum(InLonLatPoints.Num());
+	for (int32 I = 0; I < InLonLatPoints.Num(); ++I)
+	{
+		double H = 0.0;
+		if (!TraceHeightAtLonLat(
+				World,
+				Georeference,
+				TerrainTileset,
+				DtmIgnoredActors,
+				InLonLatPoints[I].X,
+				InLonLatPoints[I].Y,
+				H))
+		{
+			H = 500.0;
+		}
+		CoarseHeights[I] = H;
+	}
+
+	constexpr double CameraHeightAboveGroundM = 80.0;
+	constexpr int32 MaxRefineCameras = 8;
+	const int32 CameraStride = FMath::Max(1, FMath::DivideAndRoundUp(InLonLatPoints.Num(), MaxRefineCameras));
+	for (int32 I = 0; I < InLonLatPoints.Num(); I += CameraStride)
+	{
+		const double Lon = InLonLatPoints[I].X;
+		const double Lat = InLonLatPoints[I].Y;
+		const double GroundH = CoarseHeights[I];
+		const FVector CamLoc = BuildingCesiumPlacement::LonLatHeightToUnreal(
+			Georeference, Lon, Lat, GroundH + CameraHeightAboveGroundM);
+		const FVector LookAt = BuildingCesiumPlacement::LonLatHeightToUnreal(
+			Georeference, Lon, Lat, GroundH - 5.0);
+		const FRotator CamRot = UKismetMathLibrary::FindLookAtRotation(CamLoc, LookAt);
+		FCesiumCamera Cam(FVector2D(256.0, 256.0), CamLoc, CamRot, 60.0);
+		const int32 CamId = CameraManager->AddCamera(Cam);
+		if (CamId >= 0)
+		{
+			CameraIds.Add(CamId);
+		}
+	}
+
+	const double Start = FPlatformTime::Seconds();
+	double LastFloorMin = TNumericLimits<double>::Max();
+	bool bHaveLast = false;
+	double StableSince = -1.0;
+	double LastSampleTime = -1.0;
+	constexpr double SampleIntervalSeconds = 0.5;
+
+	auto SampleFloorMin = [&](double& OutMin, int32& OutOkCount) -> void
+	{
+		OutMin = TNumericLimits<double>::Max();
+		OutOkCount = 0;
+		for (int32 I = 0; I < InLonLatPoints.Num(); ++I)
+		{
+			double H = 0.0;
+			if (TraceHeightAtLonLat(
+					World,
+					Georeference,
+					TerrainTileset,
+					DtmIgnoredActors,
+					InLonLatPoints[I].X,
+					InLonLatPoints[I].Y,
+					H))
+			{
+				OutMin = FMath::Min(OutMin, H);
+				++OutOkCount;
+			}
+		}
+	};
+
+	while (true)
+	{
+		const double Now = FPlatformTime::Seconds();
+		const double Elapsed = Now - Start;
+		if (Elapsed >= MaxProbeSeconds)
+		{
+			OutHitMaxProbe = true;
+			OutTimeToStableSeconds = MaxProbeSeconds;
+			double MinH = 0.0;
+			int32 OkCount = 0;
+			SampleFloorMin(MinH, OkCount);
+			OutStableFloorHeightM = (OkCount > 0) ? MinH : 0.0;
+			CleanupProbe();
+			return OkCount > 0;
+		}
+
+		if (ShouldCancel && ShouldCancel())
+		{
+			CleanupProbe();
+			OutError = TEXT("Cancelled during per-tile stable-height probe.");
+			return false;
+		}
+
+		PumpCesiumOnly(TerrainTileset, *CameraManager, 0.05f);
+
+		if (LastSampleTime < 0.0 || (Now - LastSampleTime) >= SampleIntervalSeconds)
+		{
+			LastSampleTime = Now;
+			double MinH = 0.0;
+			int32 OkCount = 0;
+			SampleFloorMin(MinH, OkCount);
+			if (OkCount == 0)
+			{
+				StableSince = -1.0;
+				bHaveLast = false;
+				continue;
+			}
+
+			OutStableFloorHeightM = MinH;
+			if (!bHaveLast || FMath::Abs(MinH - LastFloorMin) > EpsilonM)
+			{
+				LastFloorMin = MinH;
+				bHaveLast = true;
+				StableSince = Now;
+			}
+			else if (StableSince >= 0.0 && (Now - StableSince) >= HoldSeconds)
+			{
+				OutTimeToStableSeconds = Elapsed;
+				OutHitMaxProbe = false;
+				CleanupProbe();
+				return true;
+			}
+		}
+	}
+}
+

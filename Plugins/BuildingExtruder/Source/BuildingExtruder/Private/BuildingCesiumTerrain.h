@@ -29,6 +29,28 @@ namespace BuildingCesiumTerrain
 	void ColdReloadTileset(ACesium3DTileset& TerrainTileset, UWorld* World);
 
 	/**
+	 * Refines DTM near the given footprint vertices and measures how long until the floor
+	 * min height stops changing (within EpsilonM for HoldSeconds). Used to calibrate
+	 * per-tile sample timeouts.
+	 *
+	 * @param OutTimeToStableSeconds Elapsed seconds when stability was reached, or MaxProbeSeconds if not.
+	 * @param OutHitMaxProbe True if MaxProbeSeconds was reached without stability.
+	 */
+	bool MeasureTimeToStableFloorHeight(
+		UWorld& World,
+		ACesiumGeoreference& Georeference,
+		ACesium3DTileset& TerrainTileset,
+		const TArray<FVector>& InLonLatPoints,
+		double MaxProbeSeconds,
+		double HoldSeconds,
+		double EpsilonM,
+		double& OutTimeToStableSeconds,
+		double& OutStableFloorHeightM,
+		bool& OutHitMaxProbe,
+		FString& OutError,
+		const FDtmShouldCancelCallback& ShouldCancel = FDtmShouldCancelCallback());
+
+	/**
 	 * Samples ellipsoid heights (meters) at lon/lat points (X=lon, Y=lat) using DTM tileset only.
 	 * Forces high-detail Cesium terrain tiles to load near each point, then line-traces.
 	 *
