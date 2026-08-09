@@ -38,7 +38,8 @@ struct FBuildingExtrudeResult
 
 /**
  * Blueprint API for the Building Extruder editor plugin.
- * Requires an ACesiumGeoreference and a Cesium terrain/DTM tileset in the open editor map.
+ * Requires an ACesiumGeoreference in the open editor map.
+ * Cesium DTM tileset is required only when not using shapefile altitudes.
  */
 UCLASS()
 class BUILDINGEXTRUDER_API UBuildingExtruderBPLibrary : public UBlueprintFunctionLibrary
@@ -48,13 +49,8 @@ class BUILDINGEXTRUDER_API UBuildingExtruderBPLibrary : public UBlueprintFunctio
 public:
 	/**
 	 * Reads EPSG:4326 building footprints from a shapefile (.shp + .dbf),
-	 * samples Cesium DTM height at each outer-ring vertex (DTM tileset only), places each
-	 * flat floor at the minimum terrain height under that footprint, merges into tiles
-	 * (one StaticMeshActor per tile), and writes a combined FBX.
-	 *
-	 * Tip: for fast-vs-slow A/B, run twice with different DtmTimeoutSeconds / DtmDoneProgressPercent
-	 * and different ActorLabelPrefix or EditorFolderPath (separate outputs; no shared dual-pass).
-	 * Restart editor or Refresh the DTM tileset between runs if you need a colder cache.
+	 * places floors from either Cesium DTM sampling or a shapefile altitude field,
+	 * extrudes tiled StaticMeshActors, and writes a combined FBX.
 	 *
 	 * @param ShapefilePath Path to .shp (with or without extension; .dbf required beside it).
 	 * @param FbxOutputPath Required output path for the combined FBX.
@@ -63,15 +59,15 @@ public:
 	 * @param EditorFolderPath World Outliner folder.
 	 * @param TargetTileCount Exact tile slot count; XxY chosen from factor pairs for square cells.
 	 * @param TileIndices Optional comma-separated linear tile indices (Y*TilesX+X), e.g. "0,6,12".
-	 * @param bEnableDtmLoadTimeout If true, stop refine at DtmTimeoutSeconds (or default formula).
-	 *        If false, wait until done % or stall (safety cap 600s).
-	 * @param DtmTimeoutSeconds Refine wait cap in seconds when timeout is enabled.
-	 *        <=0 means default 8 + 0.05*batchPointCount (~8-11s).
-	 * @param DtmDoneProgressPercent Cesium GetLoadProgress() threshold to treat refine as done (1-99).
-	 * @param bUsePerTileStableTimeout If true, per tile: (1) hardest footprint -> timeout T,
-	 *        (2) warm tile center (+4 midpoints if diagonal>=450m) under T, (3) sample with T.
-	 * @param bDiagnoseDtmLoadConsistency If true: Pass1 = OLD timeout/done% (BP values),
-	 *        Pass2 = NEW per-tile stable; spawn both layers for visual A/B (FBX = Pass1/OLD).
+	 * @param bUseShapefileAltitude If true, use AltitudeFieldName from the DBF as floor Z and
+	 *        skip Cesium DTM sampling. If false, sample DTM as before.
+	 * @param AltitudeFieldName DBF column for floor altitude when bUseShapefileAltitude is true
+	 *        (default "altitude"). Ignored when bUseShapefileAltitude is false.
+	 * @param bEnableDtmLoadTimeout DTM refine timeout enable (ignored if shapefile altitude).
+	 * @param DtmTimeoutSeconds DTM refine wait cap seconds; <=0 = default ~8-11s (ignored if shapefile altitude).
+	 * @param DtmDoneProgressPercent Cesium load %% done threshold (ignored if shapefile altitude).
+	 * @param bUsePerTileStableTimeout Per-tile stable DTM mode (ignored if shapefile altitude).
+	 * @param bDiagnoseDtmLoadConsistency OLD vs STABLE dual layer (ignored if shapefile altitude).
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -83,6 +79,8 @@ public:
 			CPP_Default_EditorFolderPath = "ExtrudedBuildings",
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_TileIndices = "",
+			CPP_Default_bUseShapefileAltitude = "false",
+			CPP_Default_AltitudeFieldName = "altitude",
 			CPP_Default_bEnableDtmLoadTimeout = "true",
 			CPP_Default_DtmTimeoutSeconds = "0.0",
 			CPP_Default_DtmDoneProgressPercent = "95.0",
@@ -97,6 +95,8 @@ public:
 		const FString& EditorFolderPath,
 		int32 TargetTileCount,
 		const FString& TileIndices,
+		bool bUseShapefileAltitude,
+		const FString& AltitudeFieldName,
 		bool bEnableDtmLoadTimeout,
 		float DtmTimeoutSeconds,
 		float DtmDoneProgressPercent,

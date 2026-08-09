@@ -426,6 +426,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
 	const FString& TileIndices,
+	bool bUseShapefileAltitude,
+	const FString& AltitudeFieldName,
 	bool bEnableDtmLoadTimeout,
 	float DtmTimeoutSeconds,
 	float DtmDoneProgressPercent,
@@ -436,6 +438,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const double StartTime = FPlatformTime::Seconds();
 	const float ClampedDonePercent = FMath::Clamp(DtmDoneProgressPercent, 1.0f, 99.0f);
 	const double TimeoutOverrideSeconds = (DtmTimeoutSeconds > 0.0f) ? static_cast<double>(DtmTimeoutSeconds) : 0.0;
+	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
@@ -444,10 +447,13 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' heightField='%s' targetTiles=%d tileFilter='%s' dtmTimeout=%s timeoutSec=%s done%%=%.1f perTileStable=%s diagnose=%s"),
+		TEXT("shp='%s' fbx='%s' heightField='%s' useShpAltitude=%s altitudeField='%s' targetTiles=%d tileFilter='%s' "
+			 "dtmTimeout=%s timeoutSec=%s done%%=%.1f perTileStable=%s diagnose=%s"),
 		*CleanInputPath,
 		*CleanFbxPath,
 		*HeightFieldName,
+		bUseShapefileAltitude ? TEXT("ON") : TEXT("OFF"),
+		*AltitudeField,
 		TargetTileCount,
 		*TileIndices,
 		bEnableDtmLoadTimeout ? TEXT("ON") : TEXT("OFF"),
@@ -479,12 +485,16 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		return Result;
 	}
 
-	ACesium3DTileset* TerrainTileset = BuildingCesiumTerrain::FindTerrainTileset(World);
-	if (!TerrainTileset)
+	ACesium3DTileset* TerrainTileset = nullptr;
+	if (!bUseShapefileAltitude)
 	{
-		Result.Message = TEXT("No ACesium3DTileset found for DTM sampling. Add Cesium World Terrain (or your DTM tileset) to the level.");
-		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-		return Result;
+		TerrainTileset = BuildingCesiumTerrain::FindTerrainTileset(World);
+		if (!TerrainTileset)
+		{
+			Result.Message = TEXT("No ACesium3DTileset found for DTM sampling. Add Cesium World Terrain (or your DTM tileset) to the level.");
+			UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
 	}
 
 	if (CleanInputPath.IsEmpty())
@@ -502,10 +512,12 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	}
 
 	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("RELATIVE_F") : HeightFieldName;
+	const FString ElevationFieldForRead = bUseShapefileAltitude ? AltitudeField : FString();
 
 	TArray<FBuildingShapefileFeature> Features;
 	FString ReadError;
-	if (!BuildingShapefileReader::ReadPolygonBuildings(CleanInputPath, HeightField, TEXT(""), Features, ReadError))
+	if (!BuildingShapefileReader::ReadPolygonBuildings(
+			CleanInputPath, HeightField, ElevationFieldForRead, Features, ReadError))
 	{
 		Result.Message = ReadError;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
@@ -701,6 +713,45 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		return Result;
 	}
 
+	TArray<double> DeepFeatureElevationM;
+	TArray<bool> DeepFeatureOk;
+	bool bHaveDeepLayer = false;
+	DeepFeatureElevationM.Init(0.0, ToImport);
+	DeepFeatureOk.Init(false, ToImport);
+
+	if (bUseShapefileAltitude)
+	{
+		int32 AltOk = 0;
+		double AltMin = TNumericLimits<double>::Max();
+		double AltMax = TNumericLimits<double>::Lowest();
+		for (int32 TileIndex = 0; TileIndex < TileFeatureIndices.Num(); ++TileIndex)
+		{
+			for (const int32 FeatureIndex : TileFeatureIndices[TileIndex])
+			{
+				const double Z = Features[FeatureIndex].ElevationM;
+				AltMin = FMath::Min(AltMin, Z);
+				AltMax = FMath::Max(AltMax, Z);
+				++AltOk;
+			}
+		}
+		UE_LOG(
+			LogBuildingExtruder,
+			Display,
+			TEXT("Using shapefile altitude field '%s' for %d buildings (skip Cesium DTM). Z range [%.3f, %.3f] m"),
+			*AltitudeField,
+			AltOk,
+			AltOk > 0 ? AltMin : 0.0,
+			AltOk > 0 ? AltMax : 0.0);
+		if (bDiagnoseDtmLoadConsistency || bUsePerTileStableTimeout)
+		{
+			UE_LOG(
+				LogBuildingExtruder,
+				Display,
+				TEXT("Note: diagnose/per-tile-stable DTM options are ignored when Use Shapefile Altitude is ON."));
+		}
+	}
+	else
+	{
 	// --- Sample DTM only for buildings in tiles we will process ---
 	TArray<FVector> SamplePoints;
 	TArray<int32> SamplePointTileIndices;
@@ -1183,13 +1234,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		BuildingsInSelectedTiles - DtmFailBuildings,
 		DtmFailBuildings);
 
-	// Prove load/LOD timing with a COLD second pass + spawn both layers when diagnose is on.
-	TArray<double> DeepFeatureElevationM;
-	TArray<bool> DeepFeatureOk;
-	bool bHaveDeepLayer = false;
-	DeepFeatureElevationM.Init(0.0, ToImport);
-	DeepFeatureOk.Init(false, ToImport);
-
+	// Diagnose dual-layer (OLD vs STABLE) when enabled.
 	if (bDiagnoseDtmLoadConsistency && SamplePoints.Num() > 0)
 	{
 		BuildingCesiumTerrain::ColdReloadTileset(*TerrainTileset, World);
@@ -1501,6 +1546,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			FloorDeltaEpsM,
 			BuildingsWideSpread,
 			VertexSpreadWarnM);
+	}
+
 	}
 
 	const float SpawnTileWork = static_cast<float>(FMath::Max(NonEmptyTiles, 1));

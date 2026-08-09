@@ -279,6 +279,13 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 		OutError = FString::Printf(TEXT("DBF height field '%s' not found."), *HeightFieldName);
 		return false;
 	}
+	if (!ElevationFieldName.IsEmpty() && !ElevField)
+	{
+		OutError = FString::Printf(
+			TEXT("DBF elevation/altitude field '%s' not found."),
+			*ElevationFieldName);
+		return false;
+	}
 
 	int32 Offset = 100;
 	int32 RecordIndex = 0;

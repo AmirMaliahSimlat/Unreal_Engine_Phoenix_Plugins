@@ -23,6 +23,7 @@ namespace BuildingShapefileReader
 	 * Coordinates are interpreted as EPSG:4326 lon/lat degrees (no reprojection).
 	 * HeightField is required (extrusion). ElevationField is optional and unused for placement
 	 * when empty (DTM sampling sets base altitude instead).
+	 * If ElevationFieldName is non-empty, the field must exist in the DBF.
 	 */
 	bool ReadPolygonBuildings(
 		const FString& ShapefilePath,
