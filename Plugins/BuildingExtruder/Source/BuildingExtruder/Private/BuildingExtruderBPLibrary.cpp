@@ -368,11 +368,15 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	int32 TargetTileCount,
 	const FString& TileIndices,
 	bool bEnableDtmLoadTimeout,
+	float DtmTimeoutSeconds,
+	float DtmDoneProgressPercent,
 	bool bUsePerTileStableTimeout,
 	bool bDiagnoseDtmLoadConsistency)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
+	const float ClampedDonePercent = FMath::Clamp(DtmDoneProgressPercent, 1.0f, 99.0f);
+	const double TimeoutOverrideSeconds = (DtmTimeoutSeconds > 0.0f) ? static_cast<double>(DtmTimeoutSeconds) : 0.0;
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
@@ -381,13 +385,15 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' heightField='%s' targetTiles=%d tileFilter='%s' dtmTimeout=%s perTileStableTimeout=%s diagnoseDtmLoad=%s (base Z from DTM min)"),
+		TEXT("shp='%s' fbx='%s' heightField='%s' targetTiles=%d tileFilter='%s' dtmTimeout=%s timeoutSec=%s done%%=%.1f perTileStable=%s diagnose=%s"),
 		*CleanInputPath,
 		*CleanFbxPath,
 		*HeightFieldName,
 		TargetTileCount,
 		*TileIndices,
 		bEnableDtmLoadTimeout ? TEXT("ON") : TEXT("OFF"),
+		TimeoutOverrideSeconds > 0.0 ? *FString::Printf(TEXT("%.1f"), TimeoutOverrideSeconds) : TEXT("default(~8-11)"),
+		ClampedDonePercent,
 		bUsePerTileStableTimeout ? TEXT("ON") : TEXT("OFF"),
 		bDiagnoseDtmLoadConsistency ? TEXT("ON") : TEXT("OFF"));
 
@@ -677,7 +683,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	constexpr int32 BatchSize = 64;
 	const int32 NumBatches = FMath::DivideAndRoundUp(FMath::Max(SamplePoints.Num(), 1), BatchSize);
 	constexpr float SampleTotalWork = 100.0f;
-	constexpr float DtmDoneThresholdPercent = 95.0f;
+	const float DtmDoneThresholdPercent = ClampedDonePercent;
 
 	FScopedSlowTask SampleTask(
 		SampleTotalWork,
@@ -961,7 +967,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					BatchTileIndices,
 					bEnableDtmLoadTimeout,
 					DtmDoneThresholdPercent,
-					/*TimeoutSecondsOverride*/ 0.0,
+					TimeoutOverrideSeconds,
 					BatchHeights,
 					BatchOk,
 					SampleError,

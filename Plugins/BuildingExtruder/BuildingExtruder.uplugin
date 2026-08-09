@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 5,
-	"VersionName": "1.3.1",
+	"Version": 6,
+	"VersionName": "1.4.0",
 	"FriendlyName": "Building Extruder",
 	"Description": "Editor tool that reads EPSG:4326 building footprint shapefiles (.shp), extrudes tiled StaticMeshActors for in-editor QA, and writes a combined FBX.",
 	"Category": "Editor",
