@@ -16,23 +16,8 @@
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
 #include "Materials/MaterialInterface.h"
-#include "HAL/IConsoleManager.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
-
-static TAutoConsoleVariable<int32> CVarBuildingExtruderDiagnoseDtmLoad(
-	TEXT("BuildingExtruder.DiagnoseDtmLoadConsistency"),
-	0,
-	TEXT("If 1: cold-reload DTM, sample normal (95%/~8-11s), cold-reload again, sample deep (98%/30s), ")
-	TEXT("spawn BOTH layers in the level, and log floor-min deltas. FBX uses the normal layer only. Default 0."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarBuildingExtruderPerTileStableTimeout(
-	TEXT("BuildingExtruder.UsePerTileStableTimeout"),
-	0,
-	TEXT("If 1: per tile, pick hardest shapefile footprint, measure time-to-stable-height, use that ")
-	TEXT("(+ margin) as the DTM refine timeout for the rest of the tile. If 0: use constant ~8-11s timeout. Default 0."),
-	ECVF_Default);
 
 namespace
 {
@@ -382,12 +367,12 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
 	const FString& TileIndices,
-	bool bEnableDtmLoadTimeout)
+	bool bEnableDtmLoadTimeout,
+	bool bUsePerTileStableTimeout,
+	bool bDiagnoseDtmLoadConsistency)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
-	const bool bDiagnoseDtmLoadConsistency = CVarBuildingExtruderDiagnoseDtmLoad.GetValueOnGameThread() != 0;
-	const bool bUsePerTileStableTimeout = CVarBuildingExtruderPerTileStableTimeout.GetValueOnGameThread() != 0;
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);

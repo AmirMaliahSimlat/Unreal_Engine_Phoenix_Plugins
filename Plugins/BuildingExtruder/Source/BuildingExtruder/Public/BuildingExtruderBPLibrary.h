@@ -60,18 +60,12 @@ public:
 	 * @param TargetTileCount Exact tile slot count; X×Y chosen from factor pairs for square cells.
 	 * @param TileIndices Optional comma-separated linear tile indices (Y*TilesX+X), e.g. "0,6,12".
 	 *        Empty = all tiles. Same TargetTileCount + full dataset → same indices as a full run.
-	 * @param bEnableDtmLoadTimeout If true, DTM refine waits with a short timeout (faster).
+	 * @param bEnableDtmLoadTimeout If true, DTM refine waits with a timeout (faster).
 	 *        If false, waits until load progress ~95% or progress stalls (better for bad tiles).
-	 *
-	 * Temporary diagnose (no BP pin — keeps node signature stable):
-	 * Console: BuildingExtruder.DiagnoseDtmLoadConsistency 1
-	 * Cold-reloads DTM before each pass, samples normal (95%/~8-11s) then deep (98%/30s),
-	 * spawns BOTH layers in the level (FBX = normal layer only), and logs floor-min deltas.
-	 *
-	 * Per-tile adaptive timeout (no BP pin):
-	 * Console: BuildingExtruder.UsePerTileStableTimeout 1
-	 * Per tile: hardest shapefile footprint -> time-to-stable-height (+ margin) as refine timeout.
-	 * 0 = constant ~8-11s timeout (default).
+	 * @param bUsePerTileStableTimeout If true, per tile: hardest shapefile footprint ->
+	 *        time-to-stable-height (+ margin) as refine timeout. If false, constant ~8-11s.
+	 * @param bDiagnoseDtmLoadConsistency If true, cold-reload between passes, sample deep
+	 *        (98%/30s), spawn BOTH layers (FBX = normal only), log floor-min deltas.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -83,7 +77,9 @@ public:
 			CPP_Default_EditorFolderPath = "ExtrudedBuildings",
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_TileIndices = "",
-			CPP_Default_bEnableDtmLoadTimeout = "true"))
+			CPP_Default_bEnableDtmLoadTimeout = "true",
+			CPP_Default_bUsePerTileStableTimeout = "false",
+			CPP_Default_bDiagnoseDtmLoadConsistency = "false"))
 	static FBuildingExtrudeResult ImportAndExtrudeBuildingsFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -93,5 +89,7 @@ public:
 		const FString& EditorFolderPath,
 		int32 TargetTileCount,
 		const FString& TileIndices,
-		bool bEnableDtmLoadTimeout);
+		bool bEnableDtmLoadTimeout,
+		bool bUsePerTileStableTimeout,
+		bool bDiagnoseDtmLoadConsistency);
 };
