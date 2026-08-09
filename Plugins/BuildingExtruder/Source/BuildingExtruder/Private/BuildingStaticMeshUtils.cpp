@@ -25,25 +25,6 @@ UMaterialInterface* BuildingStaticMeshUtils::GetTwoSidedBuildingMaterial()
 	return Mat;
 }
 
-UMaterialInterface* BuildingStaticMeshUtils::GetDiagnoseDeepCompareMaterial()
-{
-	static TWeakObjectPtr<UMaterial> CachedMaterial;
-	if (CachedMaterial.IsValid())
-	{
-		return CachedMaterial.Get();
-	}
-
-	UMaterial* Mat = NewObject<UMaterial>(
-		GetTransientPackage(),
-		TEXT("M_BuildingExtruder_DiagnoseDeep"),
-		RF_Public | RF_Transient);
-	Mat->TwoSided = true;
-	Mat->BlendMode = BLEND_Translucent;
-	Mat->MaterialDomain = MD_Surface;
-	CachedMaterial = Mat;
-	return Mat;
-}
-
 UStaticMesh* BuildingStaticMeshUtils::CreateTransientStaticMesh(
 	UObject* Outer,
 	FName MeshName,

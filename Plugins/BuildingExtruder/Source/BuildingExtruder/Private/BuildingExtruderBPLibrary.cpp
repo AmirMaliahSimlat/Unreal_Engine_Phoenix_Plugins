@@ -1,14 +1,12 @@
 #include "BuildingExtruderBPLibrary.h"
 
 #include "BuildingCesiumPlacement.h"
-#include "BuildingCesiumTerrain.h"
 #include "BuildingExtrudeUtils.h"
 #include "BuildingExtruderLog.h"
 #include "BuildingFbxExporter.h"
 #include "BuildingShapefileReader.h"
 #include "BuildingStaticMeshUtils.h"
 
-#include "Cesium3DTileset.h"
 #include "CesiumGeoreference.h"
 #include "Editor.h"
 #include "Engine/StaticMeshActor.h"
@@ -56,127 +54,6 @@ namespace
 		return Sum / static_cast<double>(FMath::Max(Feature.OuterRingLonLat.Num(), 1));
 	}
 
-	/** Shapefile-only "hardest" score: bbox diagonal (m) + vertex count + area (m^2). */
-	double ShapefileHardestScore(const FBuildingShapefileFeature& Feature)
-	{
-		const TArray<FVector2D>& Ring = Feature.OuterRingLonLat;
-		if (Ring.Num() < 3)
-		{
-			return -1.0;
-		}
-
-		double MinLon = Ring[0].X;
-		double MaxLon = Ring[0].X;
-		double MinLat = Ring[0].Y;
-		double MaxLat = Ring[0].Y;
-		for (int32 I = 1; I < Ring.Num(); ++I)
-		{
-			MinLon = FMath::Min(MinLon, Ring[I].X);
-			MaxLon = FMath::Max(MaxLon, Ring[I].X);
-			MinLat = FMath::Min(MinLat, Ring[I].Y);
-			MaxLat = FMath::Max(MaxLat, Ring[I].Y);
-		}
-
-		const double MidLatRad = FMath::DegreesToRadians(0.5 * (MinLat + MaxLat));
-		constexpr double MetersPerDegLat = 110540.0;
-		const double MetersPerDegLon = FMath::Max(111320.0 * FMath::Cos(MidLatRad), 1.0);
-		const double WidthM = (MaxLon - MinLon) * MetersPerDegLon;
-		const double HeightM = (MaxLat - MinLat) * MetersPerDegLat;
-		const double DiagonalM = FMath::Sqrt(WidthM * WidthM + HeightM * HeightM);
-
-		double Area2 = 0.0;
-		for (int32 I = 0; I < Ring.Num(); ++I)
-		{
-			const FVector2D& A = Ring[I];
-			const FVector2D& B = Ring[(I + 1) % Ring.Num()];
-			Area2 += A.X * B.Y - B.X * A.Y;
-		}
-		const double AreaM2 = 0.5 * FMath::Abs(Area2) * MetersPerDegLon * MetersPerDegLat;
-
-		return DiagonalM * 10.0 + static_cast<double>(Ring.Num()) + AreaM2 * 0.01;
-	}
-
-	int32 PickHardestFeatureInTile(
-		const TArray<FBuildingShapefileFeature>& Features,
-		const TArray<int32>& FeatureIndices)
-	{
-		int32 BestIdx = INDEX_NONE;
-		double BestScore = -1.0;
-		for (const int32 FeatureIndex : FeatureIndices)
-		{
-			if (!Features.IsValidIndex(FeatureIndex))
-			{
-				continue;
-			}
-			const double Score = ShapefileHardestScore(Features[FeatureIndex]);
-			if (Score > BestScore)
-			{
-				BestScore = Score;
-				BestIdx = FeatureIndex;
-			}
-		}
-		return BestIdx;
-	}
-
-	/** Lon/lat warm points for a tile: always center; +4 midpoints toward corners if tile is large. */
-	void BuildTileWarmSamplePoints(
-		int32 TileIndex,
-		int32 TilesX,
-		int32 TilesY,
-		double MinLon,
-		double LonSpan,
-		double MinLat,
-		double LatSpan,
-		TArray<FVector>& OutLonLatPoints,
-		double& OutTileDiagonalM,
-		bool& OutUsedExtraMidpoints)
-	{
-		OutLonLatPoints.Reset();
-		OutUsedExtraMidpoints = false;
-		OutTileDiagonalM = 0.0;
-
-		if (TilesX <= 0 || TilesY <= 0)
-		{
-			return;
-		}
-
-		const int32 TileX = TileIndex % TilesX;
-		const int32 TileY = TileIndex / TilesX;
-		const double Lon0 = MinLon + (static_cast<double>(TileX) / static_cast<double>(TilesX)) * LonSpan;
-		const double Lon1 = MinLon + (static_cast<double>(TileX + 1) / static_cast<double>(TilesX)) * LonSpan;
-		const double Lat0 = MinLat + (static_cast<double>(TileY) / static_cast<double>(TilesY)) * LatSpan;
-		const double Lat1 = MinLat + (static_cast<double>(TileY + 1) / static_cast<double>(TilesY)) * LatSpan;
-		const double CenterLon = 0.5 * (Lon0 + Lon1);
-		const double CenterLat = 0.5 * (Lat0 + Lat1);
-
-		const double MidLatRad = FMath::DegreesToRadians(CenterLat);
-		constexpr double MetersPerDegLat = 110540.0;
-		const double MetersPerDegLon = FMath::Max(111320.0 * FMath::Cos(MidLatRad), 1.0);
-		const double WidthM = (Lon1 - Lon0) * MetersPerDegLon;
-		const double HeightM = (Lat1 - Lat0) * MetersPerDegLat;
-		OutTileDiagonalM = FMath::Sqrt(WidthM * WidthM + HeightM * HeightM);
-
-		OutLonLatPoints.Add(FVector(CenterLon, CenterLat, 0.0));
-
-		// Large tiles: also warm halfway from center toward each corner.
-		constexpr double LargeTileDiagonalM = 450.0;
-		if (OutTileDiagonalM >= LargeTileDiagonalM)
-		{
-			OutUsedExtraMidpoints = true;
-			const FVector2D Corners[4] = {
-				FVector2D(Lon0, Lat0),
-				FVector2D(Lon1, Lat0),
-				FVector2D(Lon0, Lat1),
-				FVector2D(Lon1, Lat1)};
-			for (int32 C = 0; C < 4; ++C)
-			{
-				const double MidLon = 0.5 * (CenterLon + Corners[C].X);
-				const double MidLat = 0.5 * (CenterLat + Corners[C].Y);
-				OutLonLatPoints.Add(FVector(MidLon, MidLat, 0.0));
-			}
-		}
-	}
-
 	/**
 	 * Chooses TXxTY with TX*TY == TargetTileCount (exact factor pair).
 	 * Picks the pair whose cells are closest to square in meters.
@@ -203,7 +80,6 @@ namespace
 		int32 BestY = 1;
 		double BestAspectError = TNumericLimits<double>::Max();
 
-		// Exact factor pairs only: for 24 -> 1x24, 2x12, 3x8, 4x6, 6x4, 8x3, 12x2, 24x1.
 		for (int32 Y = 1; Y <= Target; ++Y)
 		{
 			if (Target % Y != 0)
@@ -214,7 +90,7 @@ namespace
 			const double CellW = WidthM / static_cast<double>(X);
 			const double CellH = HeightM / static_cast<double>(Y);
 			const double CellAspect = CellW / FMath::Max(CellH, 1.0);
-			const double AspectError = FMath::Abs(FMath::Loge(CellAspect)); // 0 when square
+			const double AspectError = FMath::Abs(FMath::Loge(CellAspect));
 			if (AspectError < BestAspectError)
 			{
 				BestAspectError = AspectError;
@@ -421,24 +297,17 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UObject* WorldContextObject,
 	const FString& ShapefilePath,
 	const FString& FbxOutputPath,
+	const FString& AltitudeFieldName,
 	const FString& HeightFieldName,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
-	const FString& TileIndices,
-	bool bUseShapefileAltitude,
-	const FString& AltitudeFieldName,
-	bool bEnableDtmLoadTimeout,
-	float DtmTimeoutSeconds,
-	float DtmDoneProgressPercent,
-	bool bUsePerTileStableTimeout,
-	bool bDiagnoseDtmLoadConsistency)
+	const FString& TileIndices)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
-	const float ClampedDonePercent = FMath::Clamp(DtmDoneProgressPercent, 1.0f, 99.0f);
-	const double TimeoutOverrideSeconds = (DtmTimeoutSeconds > 0.0f) ? static_cast<double>(DtmTimeoutSeconds) : 0.0;
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
+	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("RELATIVE_F") : HeightFieldName;
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
@@ -447,20 +316,13 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' heightField='%s' useShpAltitude=%s altitudeField='%s' targetTiles=%d tileFilter='%s' "
-			 "dtmTimeout=%s timeoutSec=%s done%%=%.1f perTileStable=%s diagnose=%s"),
+		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' targetTiles=%d tileFilter='%s'"),
 		*CleanInputPath,
 		*CleanFbxPath,
-		*HeightFieldName,
-		bUseShapefileAltitude ? TEXT("ON") : TEXT("OFF"),
 		*AltitudeField,
+		*HeightField,
 		TargetTileCount,
-		*TileIndices,
-		bEnableDtmLoadTimeout ? TEXT("ON") : TEXT("OFF"),
-		TimeoutOverrideSeconds > 0.0 ? *FString::Printf(TEXT("%.1f"), TimeoutOverrideSeconds) : TEXT("default(~8-11)"),
-		ClampedDonePercent,
-		bUsePerTileStableTimeout ? TEXT("ON") : TEXT("OFF"),
-		bDiagnoseDtmLoadConsistency ? TEXT("ON") : TEXT("OFF"));
+		*TileIndices);
 
 	if (CleanFbxPath.IsEmpty())
 	{
@@ -485,18 +347,6 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		return Result;
 	}
 
-	ACesium3DTileset* TerrainTileset = nullptr;
-	if (!bUseShapefileAltitude)
-	{
-		TerrainTileset = BuildingCesiumTerrain::FindTerrainTileset(World);
-		if (!TerrainTileset)
-		{
-			Result.Message = TEXT("No ACesium3DTileset found for DTM sampling. Add Cesium World Terrain (or your DTM tileset) to the level.");
-			UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-			return Result;
-		}
-	}
-
 	if (CleanInputPath.IsEmpty())
 	{
 		Result.Message = TEXT("ShapefilePath is empty (provide a .shp path).");
@@ -511,13 +361,10 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		return Result;
 	}
 
-	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("RELATIVE_F") : HeightFieldName;
-	const FString ElevationFieldForRead = bUseShapefileAltitude ? AltitudeField : FString();
-
 	TArray<FBuildingShapefileFeature> Features;
 	FString ReadError;
 	if (!BuildingShapefileReader::ReadPolygonBuildings(
-			CleanInputPath, HeightField, ElevationFieldForRead, Features, ReadError))
+			CleanInputPath, HeightField, AltitudeField, Features, ReadError))
 	{
 		Result.Message = ReadError;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
@@ -563,7 +410,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("RELATIVE_F sanitize: valid=%d anomalies=%d average=%.3f m"),
+		TEXT("Height sanitize (%s): valid=%d anomalies=%d average=%.3f m"),
+		*HeightField,
 		ValidCount,
 		AnomalyCount,
 		AverageHeightM);
@@ -571,8 +419,6 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const int32 ToImport = Features.Num();
 	UE_LOG(LogBuildingExtruder, Display, TEXT("Will process %d footprints"), ToImport);
 
-	// Lon/lat bounds for tiling BEFORE DTM so tile indices match a full run with the same
-	// TargetTileCount + dataset (linear index = TY * TilesX + TX).
 	double MinLon = TNumericLimits<double>::Max();
 	double MaxLon = TNumericLimits<double>::Lowest();
 	double MinLat = TNumericLimits<double>::Max();
@@ -713,13 +559,6 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		return Result;
 	}
 
-	TArray<double> DeepFeatureElevationM;
-	TArray<bool> DeepFeatureOk;
-	bool bHaveDeepLayer = false;
-	DeepFeatureElevationM.Init(0.0, ToImport);
-	DeepFeatureOk.Init(false, ToImport);
-
-	if (bUseShapefileAltitude)
 	{
 		int32 AltOk = 0;
 		double AltMin = TNumericLimits<double>::Max();
@@ -737,834 +576,21 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		UE_LOG(
 			LogBuildingExtruder,
 			Display,
-			TEXT("Using shapefile altitude field '%s' for %d buildings (skip Cesium DTM). Z range [%.3f, %.3f] m"),
+			TEXT("Using shapefile altitude field '%s' for %d buildings. Z range [%.3f, %.3f] m"),
 			*AltitudeField,
 			AltOk,
 			AltOk > 0 ? AltMin : 0.0,
 			AltOk > 0 ? AltMax : 0.0);
-		if (bDiagnoseDtmLoadConsistency || bUsePerTileStableTimeout)
-		{
-			UE_LOG(
-				LogBuildingExtruder,
-				Display,
-				TEXT("Note: diagnose/per-tile-stable DTM options are ignored when Use Shapefile Altitude is ON."));
-		}
-	}
-	else
-	{
-	// --- Sample DTM only for buildings in tiles we will process ---
-	TArray<FVector> SamplePoints;
-	TArray<int32> SamplePointTileIndices;
-	TArray<int32> FeatureSampleStart;
-	TArray<int32> FeatureSampleCount;
-	FeatureSampleStart.Init(-1, ToImport);
-	FeatureSampleCount.Init(0, ToImport);
-	SamplePoints.Reserve(BuildingsInSelectedTiles * 8);
-	SamplePointTileIndices.Reserve(BuildingsInSelectedTiles * 8);
-
-	for (int32 TileIndex = 0; TileIndex < TileFeatureIndices.Num(); ++TileIndex)
-	{
-		for (const int32 FeatureIndex : TileFeatureIndices[TileIndex])
-		{
-			FeatureSampleStart[FeatureIndex] = SamplePoints.Num();
-			for (const FVector2D& LonLat : Features[FeatureIndex].OuterRingLonLat)
-			{
-				SamplePoints.Add(FVector(LonLat.X, LonLat.Y, 0.0));
-				SamplePointTileIndices.Add(TileIndex);
-			}
-			FeatureSampleCount[FeatureIndex] = SamplePoints.Num() - FeatureSampleStart[FeatureIndex];
-		}
-	}
-
-	UE_LOG(
-		LogBuildingExtruder,
-		Display,
-		TEXT("Sampling DTM at %d footprint vertices for %d buildings (timeout=%s)..."),
-		SamplePoints.Num(),
-		BuildingsInSelectedTiles,
-		bEnableDtmLoadTimeout ? TEXT("ON") : TEXT("OFF"));
-
-	if (bDiagnoseDtmLoadConsistency && TerrainTileset)
-	{
-		BuildingCesiumTerrain::ColdReloadTileset(*TerrainTileset, World);
-	}
-
-	// DTM-only sampling (other actors hidden / unticked / no collision inside SampleHeightsBlocking).
-	constexpr int32 BatchSize = 64;
-	const int32 NumBatches = FMath::DivideAndRoundUp(FMath::Max(SamplePoints.Num(), 1), BatchSize);
-	constexpr float SampleTotalWork = 100.0f;
-	const float DtmDoneThresholdPercent = ClampedDonePercent;
-
-	FScopedSlowTask SampleTask(
-		SampleTotalWork,
-		NSLOCTEXT("BuildingExtruder", "SampleDtm", "Sampling Cesium DTM heights..."));
-	SampleTask.MakeDialog(true);
-
-	TArray<double> SampleHeights;
-	TArray<bool> SampleOk;
-	SampleHeights.SetNum(SamplePoints.Num());
-	SampleOk.SetNum(SamplePoints.Num());
-	float SampleWorkDone = 0.0f;
-
-	auto SetSampleProgress = [&SampleTask, &SampleWorkDone, SampleTotalWork](float Overall01)
-	{
-		Overall01 = FMath::Clamp(Overall01, 0.0f, 1.0f);
-		const float Target = Overall01 * SampleTotalWork;
-		const float Delta = Target - SampleWorkDone;
-		if (Delta > KINDA_SMALL_NUMBER)
-		{
-			SampleTask.EnterProgressFrame(Delta);
-			SampleWorkDone = Target;
-		}
-		else
-		{
-			SampleTask.EnterProgressFrame(0.0f);
-		}
-	};
-
-	const bool bPrimaryUseStable = bUsePerTileStableTimeout && !bDiagnoseDtmLoadConsistency;
-	if (bDiagnoseDtmLoadConsistency)
-	{
-		UE_LOG(
-			LogBuildingExtruder,
-			Display,
-			TEXT("Diagnose ON: Pass1 = OLD timeout/done%% (BP values), Pass2 = NEW per-tile stable (hard+center warm)"));
-	}
-	if (bPrimaryUseStable)
-	{
-		constexpr double StableEpsilonM = 0.05;
-		constexpr double StableHoldSeconds = 2.0;
-		constexpr double MaxProbeSeconds = 60.0;
-		constexpr double TimeoutMarginSeconds = 3.0;
-		constexpr double MinTileTimeoutSeconds = 5.0;
-
-		UE_LOG(
-			LogBuildingExtruder,
-			Display,
-			TEXT("Per-tile stable timeout ON: (1) hard footprint -> timeout T  (2) warm tile center"
-				 "%s under T  (3) sample tile with timeout T+margin"),
-			TEXT(" (+4 midpoints if tile diagonal>=450m)"));
-
-		TArray<int32> NonEmptyTileList;
-		NonEmptyTileList.Reserve(NonEmptyTiles);
-		for (int32 TileIndex = 0; TileIndex < TileFeatureIndices.Num(); ++TileIndex)
-		{
-			if (TileFeatureIndices[TileIndex].Num() > 0)
-			{
-				NonEmptyTileList.Add(TileIndex);
-			}
-		}
-
-		for (int32 TileOrd = 0; TileOrd < NonEmptyTileList.Num(); ++TileOrd)
-		{
-			const int32 TileIndex = NonEmptyTileList[TileOrd];
-			SetSampleProgress(static_cast<float>(TileOrd) / static_cast<float>(FMath::Max(NonEmptyTileList.Num(), 1)));
-			if (SampleTask.ShouldCancel())
-			{
-				Result.bCancelled = true;
-				Result.Message = TEXT("Cancelled during DTM sampling.");
-				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-				UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-				return Result;
-			}
-
-			const TArray<int32>& Bucket = TileFeatureIndices[TileIndex];
-			const int32 HardFeature = PickHardestFeatureInTile(Features, Bucket);
-
-			double TimeToStable = 8.0;
-			bool bHitMaxProbe = false;
-			int32 ProbeRecord = INDEX_NONE;
-
-			if (HardFeature != INDEX_NONE && FeatureSampleStart[HardFeature] >= 0)
-			{
-				TArray<FVector> ProbePoints;
-				const int32 ProbeStart = FeatureSampleStart[HardFeature];
-				const int32 ProbeCount = FeatureSampleCount[HardFeature];
-				ProbePoints.Reserve(ProbeCount);
-				for (int32 V = 0; V < ProbeCount; ++V)
-				{
-					ProbePoints.Add(SamplePoints[ProbeStart + V]);
-				}
-				ProbeRecord = Features[HardFeature].RecordIndex;
-
-				double StableFloor = 0.0;
-				FString ProbeError;
-				if (!BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
-						*World,
-						*Georeference,
-						*TerrainTileset,
-						ProbePoints,
-						MaxProbeSeconds,
-						StableHoldSeconds,
-						StableEpsilonM,
-						TimeToStable,
-						StableFloor,
-						bHitMaxProbe,
-						ProbeError,
-						[&SampleTask]() { return SampleTask.ShouldCancel(); }))
-				{
-					if (ProbeError.Contains(TEXT("Cancelled")))
-					{
-						Result.bCancelled = true;
-						Result.Message = ProbeError;
-						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-						return Result;
-					}
-					UE_LOG(
-						LogBuildingExtruder,
-						Warning,
-						TEXT("Per-tile stable probe failed tile=%d record=%d: %s (fallback TimeToStable=8s)"),
-						TileIndex,
-						ProbeRecord,
-						*ProbeError);
-					TimeToStable = 8.0;
-					bHitMaxProbe = false;
-				}
-			}
-			else
-			{
-				UE_LOG(
-					LogBuildingExtruder,
-					Warning,
-					TEXT("Per-tile stable: tile=%d has no usable hardest footprint; fallback TimeToStable=8s"),
-					TileIndex);
-			}
-
-			const double TileTimeout = FMath::Max(MinTileTimeoutSeconds, TimeToStable + TimeoutMarginSeconds);
-			UE_LOG(
-				LogBuildingExtruder,
-				Display,
-				TEXT("Per-tile stable: tile=%d hardRecord=%d timeToStableHeight=%.2fs%s margin=+%.1fs -> tileTimeout=%.2fs (buildings=%d)"),
-				TileIndex,
-				ProbeRecord,
-				TimeToStable,
-				bHitMaxProbe ? TEXT(" [HIT_MAX_PROBE]") : TEXT(""),
-				TimeoutMarginSeconds,
-				TileTimeout,
-				Bucket.Num());
-
-			// Warm DTM at tile center (and midpoints toward corners if the tile is large).
-			TArray<FVector> WarmPoints;
-			double TileDiagonalM = 0.0;
-			bool bUsedExtraMidpoints = false;
-			BuildTileWarmSamplePoints(
-				TileIndex,
-				TilesX,
-				TilesY,
-				MinLon,
-				LonSpan,
-				MinLat,
-				LatSpan,
-				WarmPoints,
-				TileDiagonalM,
-				bUsedExtraMidpoints);
-
-			if (WarmPoints.Num() > 0)
-			{
-				double WarmStableTime = 0.0;
-				double WarmHeight = 0.0;
-				bool bWarmHitMax = false;
-				FString WarmError;
-				if (!BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
-						*World,
-						*Georeference,
-						*TerrainTileset,
-						WarmPoints,
-						TileTimeout,
-						StableHoldSeconds,
-						StableEpsilonM,
-						WarmStableTime,
-						WarmHeight,
-						bWarmHitMax,
-						WarmError,
-						[&SampleTask]() { return SampleTask.ShouldCancel(); }))
-				{
-					if (WarmError.Contains(TEXT("Cancelled")))
-					{
-						Result.bCancelled = true;
-						Result.Message = WarmError;
-						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-						return Result;
-					}
-					UE_LOG(
-						LogBuildingExtruder,
-						Warning,
-						TEXT("Per-tile warm failed tile=%d diagonal=%.0fm points=%d: %s (continuing to sample)"),
-						TileIndex,
-						TileDiagonalM,
-						WarmPoints.Num(),
-						*WarmError);
-				}
-				else
-				{
-					UE_LOG(
-						LogBuildingExtruder,
-						Display,
-						TEXT("Per-tile warm: tile=%d diagonal=%.0fm points=%d%s warmStable=%.2fs%s (budget=%.2fs)"),
-						TileIndex,
-						TileDiagonalM,
-						WarmPoints.Num(),
-						bUsedExtraMidpoints ? TEXT(" (center+4 midpoints)") : TEXT(" (center only)"),
-						WarmStableTime,
-						bWarmHitMax ? TEXT(" [HIT_MAX]") : TEXT(""),
-						TileTimeout);
-				}
-			}
-
-			int32 TileSampleStart = INDEX_NONE;
-			int32 TileSampleEnd = INDEX_NONE;
-			for (int32 I = 0; I < SamplePointTileIndices.Num(); ++I)
-			{
-				if (SamplePointTileIndices[I] == TileIndex)
-				{
-					if (TileSampleStart == INDEX_NONE)
-					{
-						TileSampleStart = I;
-					}
-					TileSampleEnd = I + 1;
-				}
-			}
-			if (TileSampleStart == INDEX_NONE)
-			{
-				continue;
-			}
-
-			const int32 TilePointCount = TileSampleEnd - TileSampleStart;
-			const int32 TileBatches = FMath::DivideAndRoundUp(TilePointCount, BatchSize);
-			for (int32 Batch = 0; Batch < TileBatches; ++Batch)
-			{
-				if (SampleTask.ShouldCancel())
-				{
-					Result.bCancelled = true;
-					Result.Message = TEXT("Cancelled during DTM sampling.");
-					Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-					UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-					return Result;
-				}
-
-				const int32 StartIdx = TileSampleStart + Batch * BatchSize;
-				const int32 Count = FMath::Min(BatchSize, TileSampleEnd - StartIdx);
-				TArray<FVector> BatchPoints;
-				TArray<int32> BatchTileIndices;
-				BatchPoints.Reserve(Count);
-				BatchTileIndices.Reserve(Count);
-				for (int32 I = 0; I < Count; ++I)
-				{
-					BatchPoints.Add(SamplePoints[StartIdx + I]);
-					BatchTileIndices.Add(SamplePointTileIndices[StartIdx + I]);
-				}
-
-				TArray<double> BatchHeights;
-				TArray<bool> BatchOk;
-				FString SampleError;
-				if (!BuildingCesiumTerrain::SampleHeightsBlocking(
-						*World,
-						*Georeference,
-						*TerrainTileset,
-						BatchPoints,
-						BatchTileIndices,
-						/*bEnableDtmLoadTimeout*/ true,
-						DtmDoneThresholdPercent,
-						TileTimeout,
-						BatchHeights,
-						BatchOk,
-						SampleError,
-						BuildingCesiumTerrain::FDtmProgressCallback(),
-						[&SampleTask]() { return SampleTask.ShouldCancel(); }))
-				{
-					if (SampleError.Contains(TEXT("Cancelled")))
-					{
-						Result.bCancelled = true;
-					}
-					Result.Message = SampleError;
-					Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-					if (Result.bCancelled)
-					{
-						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-					}
-					else
-					{
-						UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-					}
-					return Result;
-				}
-
-				for (int32 I = 0; I < Count; ++I)
-				{
-					SampleHeights[StartIdx + I] = BatchHeights[I];
-					SampleOk[StartIdx + I] = BatchOk[I];
-				}
-			}
-		}
-	}
-	else
-	{
-		for (int32 Batch = 0; Batch < NumBatches; ++Batch)
-		{
-			if (SamplePoints.Num() == 0)
-			{
-				break;
-			}
-
-			SetSampleProgress(static_cast<float>(Batch) / static_cast<float>(FMath::Max(NumBatches, 1)));
-
-			if (SampleTask.ShouldCancel())
-			{
-				Result.bCancelled = true;
-				Result.Message = TEXT("Cancelled during DTM sampling.");
-				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-				UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-				return Result;
-			}
-
-			const int32 StartIdx = Batch * BatchSize;
-			const int32 Count = FMath::Min(BatchSize, SamplePoints.Num() - StartIdx);
-			TArray<FVector> BatchPoints;
-			TArray<int32> BatchTileIndices;
-			BatchPoints.Reserve(Count);
-			BatchTileIndices.Reserve(Count);
-			for (int32 I = 0; I < Count; ++I)
-			{
-				BatchPoints.Add(SamplePoints[StartIdx + I]);
-				BatchTileIndices.Add(SamplePointTileIndices[StartIdx + I]);
-			}
-
-			auto UpdateDtmUi = [Batch, NumBatches, SetSampleProgress, DtmDoneThresholdPercent](
-								   float LoadProgressPercent,
-								   bool bWaitFinished,
-								   bool /*bReachedTarget*/)
-			{
-				const float WithinBatch = bWaitFinished
-					? 1.0f
-					: FMath::Clamp(LoadProgressPercent / DtmDoneThresholdPercent, 0.0f, 1.0f);
-				const float Overall01 =
-					(static_cast<float>(Batch) + WithinBatch) / static_cast<float>(FMath::Max(NumBatches, 1));
-				SetSampleProgress(Overall01);
-			};
-
-			TArray<double> BatchHeights;
-			TArray<bool> BatchOk;
-			FString SampleError;
-			if (!BuildingCesiumTerrain::SampleHeightsBlocking(
-					*World,
-					*Georeference,
-					*TerrainTileset,
-					BatchPoints,
-					BatchTileIndices,
-					bEnableDtmLoadTimeout,
-					DtmDoneThresholdPercent,
-					TimeoutOverrideSeconds,
-					BatchHeights,
-					BatchOk,
-					SampleError,
-					UpdateDtmUi,
-					[&SampleTask]() { return SampleTask.ShouldCancel(); }))
-			{
-				if (SampleError.Contains(TEXT("Cancelled")))
-				{
-					Result.bCancelled = true;
-				}
-				Result.Message = SampleError;
-				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-				if (Result.bCancelled)
-				{
-					UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-				}
-				else
-				{
-					UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-				}
-				return Result;
-			}
-
-			for (int32 I = 0; I < Count; ++I)
-			{
-				SampleHeights[StartIdx + I] = BatchHeights[I];
-				SampleOk[StartIdx + I] = BatchOk[I];
-			}
-
-			SetSampleProgress(static_cast<float>(Batch + 1) / static_cast<float>(FMath::Max(NumBatches, 1)));
-		}
-	}
-
-	SetSampleProgress(1.0f);
-
-	// Lock DTM heights into features.
-	int32 DtmFailBuildings = 0;
-	for (int32 I = 0; I < ToImport; ++I)
-	{
-		if (FeatureSampleStart[I] < 0)
-		{
-			continue;
-		}
-		double MinH = TNumericLimits<double>::Max();
-		int32 OkCount = 0;
-		const int32 StartIdx = FeatureSampleStart[I];
-		const int32 Count = FeatureSampleCount[I];
-		for (int32 V = 0; V < Count; ++V)
-		{
-			const int32 Idx = StartIdx + V;
-			if (SampleOk[Idx])
-			{
-				MinH = FMath::Min(MinH, SampleHeights[Idx]);
-				++OkCount;
-			}
-		}
-		if (OkCount == 0)
-		{
-			++DtmFailBuildings;
-			// Keep rings when diagnosing so Pass2 (stable) can still mesh the same footprints.
-			if (!bDiagnoseDtmLoadConsistency)
-			{
-				Features[I].OuterRingLonLat.Reset();
-			}
-		}
-		else
-		{
-			Features[I].ElevationM = MinH;
-		}
-	}
-
-	UE_LOG(
-		LogBuildingExtruder,
-		Display,
-		TEXT("DTM base altitude: %d buildings OK, %d failed (no successful samples)"),
-		BuildingsInSelectedTiles - DtmFailBuildings,
-		DtmFailBuildings);
-
-	// Diagnose dual-layer (OLD vs STABLE) when enabled.
-	if (bDiagnoseDtmLoadConsistency && SamplePoints.Num() > 0)
-	{
-		BuildingCesiumTerrain::ColdReloadTileset(*TerrainTileset, World);
-
-		UE_LOG(
-			LogBuildingExtruder,
-			Display,
-			TEXT("DTM diagnose Pass2: COLD per-tile STABLE method (hard footprint + center warm), then compare to Pass1 OLD..."));
-
-		TArray<double> DeepHeights;
-		TArray<bool> DeepOk;
-		DeepHeights.SetNum(SamplePoints.Num());
-		DeepOk.SetNum(SamplePoints.Num());
-		for (int32 I = 0; I < DeepOk.Num(); ++I)
-		{
-			DeepHeights[I] = 0.0;
-			DeepOk[I] = false;
-		}
-
-		TArray<int32> DiagTileList;
-		DiagTileList.Reserve(NonEmptyTiles);
-		for (int32 TileIndex = 0; TileIndex < TileFeatureIndices.Num(); ++TileIndex)
-		{
-			if (TileFeatureIndices[TileIndex].Num() > 0)
-			{
-				DiagTileList.Add(TileIndex);
-			}
-		}
-
-		FScopedSlowTask DiagTask(
-			static_cast<float>(FMath::Max(DiagTileList.Num(), 1)),
-			NSLOCTEXT("BuildingExtruder", "DiagnoseDtmLoad", "Diagnose: stable per-tile DTM..."));
-		DiagTask.MakeDialog(true);
-
-		constexpr double StableEpsilonM = 0.05;
-		constexpr double StableHoldSeconds = 2.0;
-		constexpr double MaxProbeSeconds = 60.0;
-		constexpr double TimeoutMarginSeconds = 3.0;
-		constexpr double MinTileTimeoutSeconds = 5.0;
-
-		for (int32 TileOrd = 0; TileOrd < DiagTileList.Num(); ++TileOrd)
-		{
-			DiagTask.EnterProgressFrame(1.0f);
-			if (DiagTask.ShouldCancel())
-			{
-				Result.bCancelled = true;
-				Result.Message = TEXT("Cancelled during DTM load diagnose.");
-				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-				UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-				return Result;
-			}
-
-			const int32 TileIndex = DiagTileList[TileOrd];
-			const TArray<int32>& Bucket = TileFeatureIndices[TileIndex];
-			const int32 HardFeature = PickHardestFeatureInTile(Features, Bucket);
-
-			double TimeToStable = 8.0;
-			bool bHitMaxProbe = false;
-			int32 ProbeRecord = INDEX_NONE;
-
-			if (HardFeature != INDEX_NONE && FeatureSampleStart[HardFeature] >= 0)
-			{
-				TArray<FVector> ProbePoints;
-				const int32 ProbeStart = FeatureSampleStart[HardFeature];
-				const int32 ProbeCount = FeatureSampleCount[HardFeature];
-				ProbePoints.Reserve(ProbeCount);
-				for (int32 V = 0; V < ProbeCount; ++V)
-				{
-					ProbePoints.Add(SamplePoints[ProbeStart + V]);
-				}
-				ProbeRecord = Features[HardFeature].RecordIndex;
-
-				double StableFloor = 0.0;
-				FString ProbeError;
-				if (!BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
-						*World,
-						*Georeference,
-						*TerrainTileset,
-						ProbePoints,
-						MaxProbeSeconds,
-						StableHoldSeconds,
-						StableEpsilonM,
-						TimeToStable,
-						StableFloor,
-						bHitMaxProbe,
-						ProbeError,
-						[&DiagTask]() { return DiagTask.ShouldCancel(); }))
-				{
-					if (ProbeError.Contains(TEXT("Cancelled")))
-					{
-						Result.bCancelled = true;
-						Result.Message = ProbeError;
-						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-						return Result;
-					}
-					TimeToStable = 8.0;
-					bHitMaxProbe = false;
-				}
-			}
-
-			const double TileTimeout = FMath::Max(MinTileTimeoutSeconds, TimeToStable + TimeoutMarginSeconds);
-			UE_LOG(
-				LogBuildingExtruder,
-				Display,
-				TEXT("Diagnose stable: tile=%d hardRecord=%d timeToStable=%.2fs%s -> tileTimeout=%.2fs"),
-				TileIndex,
-				ProbeRecord,
-				TimeToStable,
-				bHitMaxProbe ? TEXT(" [HIT_MAX_PROBE]") : TEXT(""),
-				TileTimeout);
-
-			TArray<FVector> WarmPoints;
-			double TileDiagonalM = 0.0;
-			bool bUsedExtraMidpoints = false;
-			BuildTileWarmSamplePoints(
-				TileIndex, TilesX, TilesY, MinLon, LonSpan, MinLat, LatSpan,
-				WarmPoints, TileDiagonalM, bUsedExtraMidpoints);
-			if (WarmPoints.Num() > 0)
-			{
-				double WarmStableTime = 0.0;
-				double WarmHeight = 0.0;
-				bool bWarmHitMax = false;
-				FString WarmError;
-				if (!BuildingCesiumTerrain::MeasureTimeToStableFloorHeight(
-						*World, *Georeference, *TerrainTileset, WarmPoints, TileTimeout,
-						StableHoldSeconds, StableEpsilonM, WarmStableTime, WarmHeight, bWarmHitMax, WarmError,
-						[&DiagTask]() { return DiagTask.ShouldCancel(); }))
-				{
-					if (WarmError.Contains(TEXT("Cancelled")))
-					{
-						Result.bCancelled = true;
-						Result.Message = WarmError;
-						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-						return Result;
-					}
-				}
-				else
-				{
-					UE_LOG(
-						LogBuildingExtruder,
-						Display,
-						TEXT("Diagnose warm: tile=%d diagonal=%.0fm points=%d%s warmStable=%.2fs%s"),
-						TileIndex,
-						TileDiagonalM,
-						WarmPoints.Num(),
-						bUsedExtraMidpoints ? TEXT(" (center+4)") : TEXT(" (center)"),
-						WarmStableTime,
-						bWarmHitMax ? TEXT(" [HIT_MAX]") : TEXT(""));
-				}
-			}
-
-			int32 TileSampleStart = INDEX_NONE;
-			int32 TileSampleEnd = INDEX_NONE;
-			for (int32 I = 0; I < SamplePointTileIndices.Num(); ++I)
-			{
-				if (SamplePointTileIndices[I] == TileIndex)
-				{
-					if (TileSampleStart == INDEX_NONE)
-					{
-						TileSampleStart = I;
-					}
-					TileSampleEnd = I + 1;
-				}
-			}
-			if (TileSampleStart == INDEX_NONE)
-			{
-				continue;
-			}
-
-			const int32 TilePointCount = TileSampleEnd - TileSampleStart;
-			const int32 TileBatches = FMath::DivideAndRoundUp(TilePointCount, BatchSize);
-			for (int32 Batch = 0; Batch < TileBatches; ++Batch)
-			{
-				if (DiagTask.ShouldCancel())
-				{
-					Result.bCancelled = true;
-					Result.Message = TEXT("Cancelled during DTM load diagnose.");
-					Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-					UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-					return Result;
-				}
-
-				const int32 StartIdx = TileSampleStart + Batch * BatchSize;
-				const int32 Count = FMath::Min(BatchSize, TileSampleEnd - StartIdx);
-				TArray<FVector> BatchPoints;
-				TArray<int32> BatchTileIndices;
-				BatchPoints.Reserve(Count);
-				BatchTileIndices.Reserve(Count);
-				for (int32 I = 0; I < Count; ++I)
-				{
-					BatchPoints.Add(SamplePoints[StartIdx + I]);
-					BatchTileIndices.Add(SamplePointTileIndices[StartIdx + I]);
-				}
-
-				TArray<double> BatchHeights;
-				TArray<bool> BatchOk;
-				FString SampleError;
-				if (!BuildingCesiumTerrain::SampleHeightsBlocking(
-						*World, *Georeference, *TerrainTileset, BatchPoints, BatchTileIndices,
-						/*bEnableDtmLoadTimeout*/ true, DtmDoneThresholdPercent, TileTimeout,
-						BatchHeights, BatchOk, SampleError,
-						BuildingCesiumTerrain::FDtmProgressCallback(),
-						[&DiagTask]() { return DiagTask.ShouldCancel(); }))
-				{
-					if (SampleError.Contains(TEXT("Cancelled")))
-					{
-						Result.bCancelled = true;
-						Result.Message = SampleError;
-						Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-						UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-						return Result;
-					}
-					UE_LOG(LogBuildingExtruder, Warning, TEXT("Diagnose stable sample tile=%d batch failed: %s"), TileIndex, *SampleError);
-					continue;
-				}
-
-				for (int32 I = 0; I < Count; ++I)
-				{
-					DeepHeights[StartIdx + I] = BatchHeights[I];
-					DeepOk[StartIdx + I] = BatchOk[I];
-				}
-			}
-		}
-
-		constexpr double FloorDeltaEpsM = 0.05;
-		constexpr double VertexSpreadWarnM = 2.0;
-		int32 BuildingsFloorChanged = 0;
-		int32 BuildingsWideSpread = 0;
-
-		for (int32 I = 0; I < ToImport; ++I)
-		{
-			if (FeatureSampleStart[I] < 0 || Features[I].OuterRingLonLat.Num() < 3)
-			{
-				continue;
-			}
-
-			const int32 StartIdx = FeatureSampleStart[I];
-			const int32 Count = FeatureSampleCount[I];
-			const int32 TileIndex =
-				SamplePointTileIndices.IsValidIndex(StartIdx) ? SamplePointTileIndices[StartIdx] : INDEX_NONE;
-
-			double OldMin = TNumericLimits<double>::Max();
-			double OldMax = TNumericLimits<double>::Lowest();
-			int32 OldOk = 0;
-			double StableMin = TNumericLimits<double>::Max();
-			int32 StableOkCount = 0;
-
-			for (int32 V = 0; V < Count; ++V)
-			{
-				const int32 Idx = StartIdx + V;
-				if (SampleOk.IsValidIndex(Idx) && SampleOk[Idx])
-				{
-					OldMin = FMath::Min(OldMin, SampleHeights[Idx]);
-					OldMax = FMath::Max(OldMax, SampleHeights[Idx]);
-					++OldOk;
-				}
-				if (DeepOk.IsValidIndex(Idx) && DeepOk[Idx])
-				{
-					StableMin = FMath::Min(StableMin, DeepHeights[Idx]);
-					++StableOkCount;
-				}
-			}
-
-			if (StableOkCount > 0)
-			{
-				DeepFeatureElevationM[I] = StableMin;
-				DeepFeatureOk[I] = true;
-			}
-
-			if (OldOk > 0 && (OldMax - OldMin) > VertexSpreadWarnM)
-			{
-				++BuildingsWideSpread;
-			}
-
-			if (OldOk == 0 || StableOkCount == 0)
-			{
-				continue;
-			}
-
-			const double FloorDelta = StableMin - OldMin;
-			if (FMath::Abs(FloorDelta) <= FloorDeltaEpsM)
-			{
-				continue;
-			}
-
-			++BuildingsFloorChanged;
-			UE_LOG(
-				LogBuildingExtruder,
-				Warning,
-				TEXT("DTM diagnose: record=%d tile=%d floorMin OLD=%.3fm STABLE=%.3fm delta=%+.3fm "
-					 "-> methods disagree (inspect Pass1_Old vs Pass2_Stable in level)"),
-				Features[I].RecordIndex,
-				TileIndex,
-				OldMin,
-				StableMin,
-				FloorDelta);
-		}
-
-		bHaveDeepLayer = true;
-		UE_LOG(
-			LogBuildingExtruder,
-			Display,
-			TEXT("DTM diagnose summary: %d buildings OLD-vs-STABLE floor-min differ (eps=%.2fm); "
-				 "%d buildings had OLD vertex spread > %.1fm. "
-				 "Spawning Pass1_OldTimeoutPct + Pass2_StablePerTile."),
-			BuildingsFloorChanged,
-			FloorDeltaEpsM,
-			BuildingsWideSpread,
-			VertexSpreadWarnM);
-	}
-
 	}
 
 	const float SpawnTileWork = static_cast<float>(FMath::Max(NonEmptyTiles, 1));
-	const float SpawnTotalWork = SpawnTileWork * (bHaveDeepLayer ? 2.0f : 1.0f) + 1.0f;
 	FScopedSlowTask SlowTask(
-		SpawnTotalWork,
+		SpawnTileWork + 1.0f,
 		NSLOCTEXT("BuildingExtruder", "ImportProgress", "Extruding tiled buildings..."));
 	SlowTask.MakeDialog(true);
 
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("BldgTile") : ActorLabelPrefix;
-	const FString Pass1Folder = bHaveDeepLayer
-		? (EditorFolderPath.IsEmpty() ? FString(TEXT("ExtrudedBuildings/Pass1_OldTimeoutPct"))
-									  : (EditorFolderPath + TEXT("/Pass1_OldTimeoutPct")))
-		: EditorFolderPath;
-	const FString Pass2Folder = EditorFolderPath.IsEmpty()
-		? FString(TEXT("ExtrudedBuildings/Pass2_StablePerTile"))
-		: (EditorFolderPath + TEXT("/Pass2_StablePerTile"));
+	const FString FolderPath = EditorFolderPath;
 
 	int32 BuildingsMeshed = 0;
 	int32 BuildingsSkipped = 0;
@@ -1572,144 +598,97 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	TArray<AStaticMeshActor*> SpawnedTileActors;
 	SpawnedTileActors.Reserve(NonEmptyTiles);
 	UMaterialInterface* CorrectMaterial = BuildingStaticMeshUtils::GetTwoSidedBuildingMaterial();
-	UMaterialInterface* DeepMaterial = BuildingStaticMeshUtils::GetDiagnoseDeepCompareMaterial();
 	TArray<FName> TileTags;
 	TileTags.Add(FName(TEXT("BuildingExtruderTile")));
-	TArray<FName> DeepTileTags;
-	DeepTileTags.Add(FName(TEXT("BuildingExtruderTile")));
-	DeepTileTags.Add(FName(TEXT("BuildingExtruderDiagnoseDeep")));
 
-	auto SpawnLayer = [&](
-						  const FString& LayerLabelPrefix,
-						  const FString& LayerFolder,
-						  UMaterialInterface* LayerMaterial,
-						  const TArray<FName>& LayerTags,
-						  bool bUseDeepElevation,
-						  bool bCollectForFbx) -> bool
+	for (int32 TileY = 0; TileY < TilesY; ++TileY)
 	{
-		for (int32 TileY = 0; TileY < TilesY; ++TileY)
+		for (int32 TileX = 0; TileX < TilesX; ++TileX)
 		{
-			for (int32 TileX = 0; TileX < TilesX; ++TileX)
+			const TArray<int32>& Bucket = TileFeatureIndices[TileY * TilesX + TileX];
+			if (Bucket.Num() == 0)
 			{
-				const TArray<int32>& Bucket = TileFeatureIndices[TileY * TilesX + TileX];
-				if (Bucket.Num() == 0)
-				{
-					continue;
-				}
-
-				const FString TileLabel = FString::Printf(TEXT("%s_%d_%d"), *LayerLabelPrefix, TileX, TileY);
-				SlowTask.EnterProgressFrame(
-					1.0f,
-					FText::Format(
-						NSLOCTEXT("BuildingExtruder", "ImportProgressTile", "Tile {0} ({1} buildings)"),
-						FText::FromString(TileLabel),
-						FText::AsNumber(Bucket.Num())));
-
-				if (SlowTask.ShouldCancel())
-				{
-					Result.bCancelled = true;
-					Result.BuildingsSpawned = BuildingsMeshed;
-					Result.BuildingsSkipped = BuildingsSkipped + (ToImport - BuildingsMeshed - BuildingsSkipped);
-					Result.TilesSpawned = TilesSpawned;
-					Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-					Result.Message = FString::Printf(
-						TEXT("Cancelled. Tiles=%d buildings=%d. FBX not written. Elapsed: %.2fs."),
-						TilesSpawned,
-						BuildingsMeshed,
-						Result.ElapsedSeconds);
-					UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
-					return false;
-				}
-
-				FExtrudedPrismMesh TileWorldMesh;
-				int32 TileBuildingCount = 0;
-				for (const int32 FeatureIndex : Bucket)
-				{
-					if (bUseDeepElevation && (!DeepFeatureOk.IsValidIndex(FeatureIndex) || !DeepFeatureOk[FeatureIndex]))
-					{
-						++BuildingsSkipped;
-						continue;
-					}
-
-					const double ElevationM = bUseDeepElevation
-						? DeepFeatureElevationM[FeatureIndex]
-						: Features[FeatureIndex].ElevationM;
-
-					FExtrudedPrismMesh BuildingWorldMesh;
-					FVector Centroid;
-					FString ExtrudeError;
-					if (!BuildFeaturePrismWorld(
-							*Georeference,
-							Features[FeatureIndex],
-							ElevationM,
-							BuildingWorldMesh,
-							Centroid,
-							ExtrudeError))
-					{
-						++BuildingsSkipped;
-						UE_LOG(
-							LogBuildingExtruder,
-							Warning,
-							TEXT("Skipped record %d: %s"),
-							Features[FeatureIndex].RecordIndex,
-							*ExtrudeError);
-						continue;
-					}
-
-					AppendWorldMesh(TileWorldMesh, BuildingWorldMesh, FVector::ZeroVector);
-					++BuildingsMeshed;
-					++TileBuildingCount;
-				}
-
-				if (TileBuildingCount == 0)
-				{
-					continue;
-				}
-
-				AStaticMeshActor* SpawnedActor = nullptr;
-				FString SpawnError;
-				if (!SpawnTileStaticMeshActor(
-						*World,
-						TileWorldMesh,
-						TileLabel,
-						LayerFolder,
-						LayerMaterial,
-						LayerTags,
-						SpawnedActor,
-						SpawnError))
-				{
-					UE_LOG(LogBuildingExtruder, Error, TEXT("Tile %s failed: %s"), *TileLabel, *SpawnError);
-					BuildingsSkipped += TileBuildingCount;
-					BuildingsMeshed -= TileBuildingCount;
-					continue;
-				}
-				if (bCollectForFbx)
-				{
-					SpawnedTileActors.Add(SpawnedActor);
-				}
-				++TilesSpawned;
+				continue;
 			}
-		}
-		return true;
-	};
 
-	if (!SpawnLayer(LabelPrefix, Pass1Folder, CorrectMaterial, TileTags, /*bUseDeepElevation*/ false, /*bCollectForFbx*/ true))
-	{
-		return Result;
-	}
+			const FString TileLabel = FString::Printf(TEXT("%s_%d_%d"), *LabelPrefix, TileX, TileY);
+			SlowTask.EnterProgressFrame(
+				1.0f,
+				FText::Format(
+					NSLOCTEXT("BuildingExtruder", "ImportProgressTile", "Tile {0} ({1} buildings)"),
+					FText::FromString(TileLabel),
+					FText::AsNumber(Bucket.Num())));
 
-	if (bHaveDeepLayer)
-	{
-		const FString DeepLabelPrefix = LabelPrefix + TEXT("_Stable");
-		if (!SpawnLayer(
-				DeepLabelPrefix,
-				Pass2Folder,
-				DeepMaterial,
-				DeepTileTags,
-				/*bUseDeepElevation*/ true,
-				/*bCollectForFbx*/ false))
-		{
-			return Result;
+			if (SlowTask.ShouldCancel())
+			{
+				Result.bCancelled = true;
+				Result.BuildingsSpawned = BuildingsMeshed;
+				Result.BuildingsSkipped = BuildingsSkipped + (ToImport - BuildingsMeshed - BuildingsSkipped);
+				Result.TilesSpawned = TilesSpawned;
+				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+				Result.Message = FString::Printf(
+					TEXT("Cancelled. Tiles=%d buildings=%d. FBX not written. Elapsed: %.2fs."),
+					TilesSpawned,
+					BuildingsMeshed,
+					Result.ElapsedSeconds);
+				UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
+				return Result;
+			}
+
+			FExtrudedPrismMesh TileWorldMesh;
+			int32 TileBuildingCount = 0;
+			for (const int32 FeatureIndex : Bucket)
+			{
+				FExtrudedPrismMesh BuildingWorldMesh;
+				FVector Centroid;
+				FString ExtrudeError;
+				if (!BuildFeaturePrismWorld(
+						*Georeference,
+						Features[FeatureIndex],
+						Features[FeatureIndex].ElevationM,
+						BuildingWorldMesh,
+						Centroid,
+						ExtrudeError))
+				{
+					++BuildingsSkipped;
+					UE_LOG(
+						LogBuildingExtruder,
+						Warning,
+						TEXT("Skipped record %d: %s"),
+						Features[FeatureIndex].RecordIndex,
+						*ExtrudeError);
+					continue;
+				}
+
+				AppendWorldMesh(TileWorldMesh, BuildingWorldMesh, FVector::ZeroVector);
+				++BuildingsMeshed;
+				++TileBuildingCount;
+			}
+
+			if (TileBuildingCount == 0)
+			{
+				continue;
+			}
+
+			AStaticMeshActor* SpawnedActor = nullptr;
+			FString SpawnError;
+			if (!SpawnTileStaticMeshActor(
+					*World,
+					TileWorldMesh,
+					TileLabel,
+					FolderPath,
+					CorrectMaterial,
+					TileTags,
+					SpawnedActor,
+					SpawnError))
+			{
+				UE_LOG(LogBuildingExtruder, Error, TEXT("Tile %s failed: %s"), *TileLabel, *SpawnError);
+				BuildingsSkipped += TileBuildingCount;
+				BuildingsMeshed -= TileBuildingCount;
+				continue;
+			}
+			SpawnedTileActors.Add(SpawnedActor);
+			++TilesSpawned;
 		}
 	}
 
@@ -1764,10 +743,6 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		BuildingsSkipped,
 		*WrittenFbxPath,
 		Result.ElapsedSeconds);
-	if (bHaveDeepLayer)
-	{
-		Result.Message += TEXT(" Diagnose: Pass1_OldTimeoutPct (FBX) + Pass2_StablePerTile (preview only).");
-	}
 
 	World->MarkPackageDirty();
 	UE_LOG(LogBuildingExtruder, Display, TEXT("%s"), *Result.Message);

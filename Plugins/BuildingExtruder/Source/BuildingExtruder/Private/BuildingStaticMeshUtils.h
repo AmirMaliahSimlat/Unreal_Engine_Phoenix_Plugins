@@ -12,9 +12,6 @@ namespace BuildingStaticMeshUtils
 	/** Default two-sided preview material for extruded buildings. */
 	UMaterialInterface* GetTwoSidedBuildingMaterial();
 
-	/** Distinct translucent material for diagnose pass-2 (deep refine) preview tiles. */
-	UMaterialInterface* GetDiagnoseDeepCompareMaterial();
-
 	/** Builds a transient UStaticMesh from prism triangle data (editor preview). */
 	UStaticMesh* CreateTransientStaticMesh(
 		UObject* Outer,

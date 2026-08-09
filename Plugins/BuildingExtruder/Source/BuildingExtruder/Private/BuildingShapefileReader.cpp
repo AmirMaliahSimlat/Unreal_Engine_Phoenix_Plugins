@@ -271,15 +271,18 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 	}
 
 	const FDbfField* HeightField = FindField(DbfFields, HeightFieldName);
-	const FDbfField* ElevField = ElevationFieldName.IsEmpty()
-		? nullptr
-		: FindField(DbfFields, ElevationFieldName);
+	const FDbfField* ElevField = FindField(DbfFields, ElevationFieldName);
 	if (!HeightField)
 	{
 		OutError = FString::Printf(TEXT("DBF height field '%s' not found."), *HeightFieldName);
 		return false;
 	}
-	if (!ElevationFieldName.IsEmpty() && !ElevField)
+	if (ElevationFieldName.IsEmpty())
+	{
+		OutError = TEXT("DBF elevation/altitude field name is empty.");
+		return false;
+	}
+	if (!ElevField)
 	{
 		OutError = FString::Printf(
 			TEXT("DBF elevation/altitude field '%s' not found."),

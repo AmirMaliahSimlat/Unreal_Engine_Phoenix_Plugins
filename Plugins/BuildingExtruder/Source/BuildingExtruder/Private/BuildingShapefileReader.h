@@ -7,10 +7,10 @@ struct FBuildingShapefileFeature
 	/** Outer ring in EPSG:4326 (WGS84): X = longitude degrees, Y = latitude degrees. Not necessarily closed. */
 	TArray<FVector2D> OuterRingLonLat;
 
-	/** Extrusion / wall height in meters (RELATIVE_F). */
+	/** Extrusion / wall height in meters (HeightFieldName). */
 	double HeightM = 0.0;
 
-	/** Lowest-point base altitude in meters (ellipsoid). Filled from Cesium DTM sampling. */
+	/** Floor altitude in meters (AltitudeFieldName from DBF). */
 	double ElevationM = 0.0;
 
 	int32 RecordIndex = 0;
@@ -21,9 +21,7 @@ namespace BuildingShapefileReader
 	/**
 	 * Reads polygon shapefile (.shp + .dbf). Path may be with or without .shp extension.
 	 * Coordinates are interpreted as EPSG:4326 lon/lat degrees (no reprojection).
-	 * HeightField is required (extrusion). ElevationField is optional and unused for placement
-	 * when empty (DTM sampling sets base altitude instead).
-	 * If ElevationFieldName is non-empty, the field must exist in the DBF.
+	 * HeightFieldName and ElevationFieldName are both required DBF columns.
 	 */
 	bool ReadPolygonBuildings(
 		const FString& ShapefilePath,
