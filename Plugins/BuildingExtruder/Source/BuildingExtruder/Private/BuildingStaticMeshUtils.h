@@ -9,13 +9,19 @@ class UMaterialInterface;
 
 namespace BuildingStaticMeshUtils
 {
-	/** Default two-sided preview material for extruded buildings. */
-	UMaterialInterface* GetTwoSidedBuildingMaterial();
+	/**
+	 * Two-sided building material saved under /Game/BuildingExtruder/Materials.
+	 * Created once if missing; then loaded from disk.
+	 */
+	UMaterialInterface* GetOrCreateBuildingMaterial(FString& OutError);
 
-	/** Builds a transient UStaticMesh from prism triangle data (editor preview). */
-	UStaticMesh* CreateTransientStaticMesh(
-		UObject* Outer,
-		FName MeshName,
+	/**
+	 * Builds a UStaticMesh asset under PackagePath (e.g. /Game/BuildingExtruder/Meshes/BldgTile_0_0_Walls)
+	 * and saves the package so level references survive undo and map save.
+	 */
+	UStaticMesh* CreatePersistentStaticMesh(
+		const FString& PackagePath,
+		const FString& AssetName,
 		const FExtrudedPrismMesh& Mesh,
 		UMaterialInterface* Material,
 		FString& OutError);

@@ -49,8 +49,9 @@ class BUILDINGEXTRUDER_API UBuildingExtruderBPLibrary : public UBlueprintFunctio
 public:
 	/**
 	 * Reads EPSG:4326 building footprints from a shapefile (.shp + .dbf),
-	 * places floors from AltitudeFieldName, extrudes tiled StaticMeshActors
-	 * (walls+floor and roof as separate actors per tile), and writes a combined FBX.
+	 * places floors from AltitudeFieldName, saves tiled StaticMesh assets under
+	 * /Game/BuildingExtruder/Meshes (walls+floor and roof as separate actors per tile),
+	 * and writes a combined FBX.
 	 *
 	 * @param ShapefilePath Path to .shp (with or without extension; .dbf required beside it).
 	 * @param FbxOutputPath Required output path for the combined FBX.

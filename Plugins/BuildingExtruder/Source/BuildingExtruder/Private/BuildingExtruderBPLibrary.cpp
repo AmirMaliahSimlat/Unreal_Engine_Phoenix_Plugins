@@ -254,6 +254,18 @@ namespace
 			LocalMesh.Vertices.Add(V - Origin);
 		}
 
+		const FString AssetName = ActorLabel;
+		UStaticMesh* StaticMesh = BuildingStaticMeshUtils::CreatePersistentStaticMesh(
+			TEXT("/Game/BuildingExtruder/Meshes"),
+			AssetName,
+			LocalMesh,
+			Material,
+			OutError);
+		if (!StaticMesh)
+		{
+			return false;
+		}
+
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		SpawnParams.ObjectFlags |= RF_Transactional;
@@ -276,22 +288,12 @@ namespace
 			Actor->SetFolderPath(FName(*EditorFolderPath));
 		}
 
-		UStaticMesh* StaticMesh = BuildingStaticMeshUtils::CreateTransientStaticMesh(
-			Actor,
-			FName(*ActorLabel),
-			LocalMesh,
-			Material,
-			OutError);
-		if (!StaticMesh)
-		{
-			Actor->Destroy();
-			return false;
-		}
-
 		UStaticMeshComponent* Comp = Actor->GetStaticMeshComponent();
 		Comp->SetMobility(EComponentMobility::Static);
+		Comp->Modify();
 		Comp->SetStaticMesh(StaticMesh);
 		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Actor->Modify();
 		Actor->MarkPackageDirty();
 		OutActor = Actor;
 		return true;
@@ -602,7 +604,20 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	int32 TilesSpawned = 0;
 	TArray<AStaticMeshActor*> SpawnedTileActors;
 	SpawnedTileActors.Reserve(NonEmptyTiles * 2);
-	UMaterialInterface* CorrectMaterial = BuildingStaticMeshUtils::GetTwoSidedBuildingMaterial();
+	UMaterialInterface* CorrectMaterial = nullptr;
+	{
+		FString MaterialError;
+		CorrectMaterial = BuildingStaticMeshUtils::GetOrCreateBuildingMaterial(MaterialError);
+		if (!CorrectMaterial)
+		{
+			Result.Message = MaterialError.IsEmpty()
+				? TEXT("Failed to create /Game/BuildingExtruder building material.")
+				: MaterialError;
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
+	}
 	TArray<FName> WallsTags;
 	WallsTags.Add(FName(TEXT("BuildingExtruderTile")));
 	WallsTags.Add(FName(TEXT("BuildingExtruderWalls")));
@@ -778,7 +793,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	Result.FbxOutputPath = WrittenFbxPath;
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d tiles (%d walls + %d roof actors, %d buildings, %d skipped), wrote FBX '%s'. Elapsed: %.2fs."),
+		TEXT("Spawned %d tiles (%d walls + %d roof actors, %d buildings, %d skipped), "
+			 "saved meshes under /Game/BuildingExtruder/Meshes, wrote FBX '%s'. Elapsed: %.2fs."),
 		TilesSpawned,
 		TilesSpawned,
 		TilesSpawned,

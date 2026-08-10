@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 11,
-	"VersionName": "2.1.0",
+	"Version": 12,
+	"VersionName": "2.2.0",
 	"FriendlyName": "Building Extruder",
-	"Description": "Editor tool that reads EPSG:4326 building footprint shapefiles with altitude attributes, extrudes tiled walls/floor and roof StaticMeshActors for in-editor QA, and writes a combined FBX.",
+	"Description": "Editor tool that reads EPSG:4326 building footprint shapefiles with altitude attributes, saves tiled walls/floor and roof StaticMesh assets under /Game, and writes a combined FBX.",
 	"Category": "Editor",
 	"CreatedBy": "GeoSim Tools",
 	"CreatedByURL": "",
