@@ -103,8 +103,11 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 	}
 
 	TSet<UStaticMesh*> UniqueMeshes;
+	TMap<FName, int32> SeenAssetClasses;
 	for (const FAssetData& AssetData : Assets)
 	{
+		SeenAssetClasses.FindOrAdd(AssetData.AssetClassPath.GetAssetName())++;
+
 		UObject* Obj = AssetData.GetAsset();
 		if (!Obj)
 		{
@@ -117,11 +120,16 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 			continue;
 		}
 
-		if (UFoliageType* FoliageType = Cast<UFoliageType>(Obj))
+		// UE 5.1: GetStaticMesh / Mesh live on InstancedStaticMesh foliage types, not UFoliageType base.
+		if (UFoliageType_InstancedStaticMesh* FoliageISM = Cast<UFoliageType_InstancedStaticMesh>(Obj))
 		{
-			if (UStaticMesh* Mesh = FoliageType->GetStaticMesh())
+			if (UStaticMesh* Mesh = FoliageISM->GetStaticMesh())
 			{
 				UniqueMeshes.Add(Mesh);
+			}
+			else if (FoliageISM->Mesh)
+			{
+				UniqueMeshes.Add(FoliageISM->Mesh);
 			}
 		}
 	}
@@ -134,9 +142,22 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 
 	if (OutMeshes.Num() == 0)
 	{
+		FString ClassSummary;
+		for (const TPair<FName, int32>& Pair : SeenAssetClasses)
+		{
+			if (!ClassSummary.IsEmpty())
+			{
+				ClassSummary += TEXT(", ");
+			}
+			ClassSummary += FString::Printf(TEXT("%s=%d"), *Pair.Key.ToString(), Pair.Value);
+		}
 		OutError = FString::Printf(
-			TEXT("No StaticMesh or FoliageType_InstancedStaticMesh assets found under '%s'."),
-			*Folder);
+			TEXT("No StaticMesh or FoliageType_InstancedStaticMesh assets with a mesh found under '%s'. "
+				 "Assets scanned: %d%s%s"),
+			*Folder,
+			Assets.Num(),
+			ClassSummary.IsEmpty() ? TEXT("") : TEXT(" (classes: "),
+			ClassSummary.IsEmpty() ? TEXT("") : *(ClassSummary + TEXT(")")));
 		return false;
 	}
 
