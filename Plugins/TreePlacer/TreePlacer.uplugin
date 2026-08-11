@@ -1,0 +1,30 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Tree Placer",
+	"Description": "Editor tool that reads EPSG:4326 tree point shapefiles with altitude, places random tree meshes from a Content folder into tiled HISM actors, and writes a combined FBX.",
+	"Category": "Editor",
+	"CreatedBy": "GeoSim Tools",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "CesiumForUnreal",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "TreePlacer",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
