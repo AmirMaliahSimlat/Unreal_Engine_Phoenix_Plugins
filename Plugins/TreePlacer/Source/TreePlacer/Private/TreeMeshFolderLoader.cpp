@@ -5,7 +5,9 @@
 #include "Engine/StaticMesh.h"
 #include "FoliageType.h"
 #include "FoliageType_InstancedStaticMesh.h"
+#include "Interfaces/IPluginManager.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 
 namespace
 {
@@ -30,13 +32,13 @@ namespace
 			Folder = TEXT("/") + Folder.RightChop(4);
 		}
 
-		// If an object path is passed, convert to package path.
+		// If an object path is passed, convert to package path / folder.
 		if (Folder.Contains(TEXT(".")))
 		{
 			const FString PackageName = FPackageName::ObjectPathToPackageName(Folder);
 			if (!PackageName.IsEmpty())
 			{
-				Folder = PackageName;
+				Folder = FPackageName::GetLongPackagePath(PackageName);
 			}
 		}
 
@@ -46,6 +48,112 @@ namespace
 			Folder = TEXT("/") + Folder;
 		}
 		return Folder;
+	}
+
+	/**
+	 * Content Browser often shows plugin assets as /Game/Plugins/<ContentFolder>/...
+	 * while the Asset Registry mounts them at /<PluginName>/...
+	 * Example:
+	 *   /Game/Plugins/PhoenixMapProxyContent/SHP_PLUGIN/trees
+	 *     -> /PhoenixMapProxy/SHP_PLUGIN/trees
+	 */
+	FString ResolvePluginMountedFolder(const FString& Folder)
+	{
+		const FString Prefix = TEXT("/Game/Plugins/");
+		if (!Folder.StartsWith(Prefix))
+		{
+			return Folder;
+		}
+
+		FString Remainder = Folder.Mid(Prefix.Len());
+		FString PluginKey;
+		FString SubPath;
+		if (!Remainder.Split(TEXT("/"), &PluginKey, &SubPath))
+		{
+			PluginKey = Remainder;
+			SubPath.Reset();
+		}
+		if (PluginKey.IsEmpty())
+		{
+			return Folder;
+		}
+
+		for (const TSharedRef<IPlugin>& Plugin : IPluginManager::Get().GetDiscoveredPlugins())
+		{
+			if (!Plugin->CanContainContent())
+			{
+				continue;
+			}
+
+			const FString PluginName = Plugin->GetName();
+			FString MountedRoot = Plugin->GetMountedAssetPath(); // e.g. "/PhoenixMapProxy/"
+			MountedRoot.ReplaceInline(TEXT("\\"), TEXT("/"));
+			MountedRoot.RemoveFromEnd(TEXT("/"));
+
+			const FString ContentDirBase = FPaths::GetCleanFilename(Plugin->GetContentDir());
+			const bool bMatch =
+				PluginKey.Equals(PluginName, ESearchCase::IgnoreCase)
+				|| PluginKey.Equals(PluginName + TEXT("Content"), ESearchCase::IgnoreCase)
+				|| PluginKey.Equals(ContentDirBase, ESearchCase::IgnoreCase)
+				|| PluginKey.Equals(MountedRoot.RightChop(1), ESearchCase::IgnoreCase); // strip leading '/'
+
+			if (!bMatch || MountedRoot.IsEmpty())
+			{
+				continue;
+			}
+
+			FString Resolved = MountedRoot;
+			if (!SubPath.IsEmpty())
+			{
+				Resolved += TEXT("/");
+				Resolved += SubPath;
+			}
+
+			UE_LOG(
+				LogTreePlacer,
+				Display,
+				TEXT("Resolved plugin content path '%s' -> '%s' (plugin='%s')"),
+				*Folder,
+				*Resolved,
+				*PluginName);
+			return Resolved;
+		}
+
+		UE_LOG(
+			LogTreePlacer,
+			Warning,
+			TEXT("Could not resolve plugin mount for '%s' (key='%s'). Using path as-is."),
+			*Folder,
+			*PluginKey);
+		return Folder;
+	}
+
+	void GatherAssetsUnderFolder(IAssetRegistry& AssetRegistry, const FString& Folder, TArray<FAssetData>& OutAssets)
+	{
+		FARFilter Filter;
+		Filter.bRecursivePaths = true;
+		Filter.PackagePaths.Add(*Folder);
+		Filter.bIncludeOnlyOnDiskAssets = false;
+
+#if ENGINE_MAJOR_VERSION >= 5
+		Filter.ClassPaths.Add(UStaticMesh::StaticClass()->GetClassPathName());
+		Filter.ClassPaths.Add(UFoliageType::StaticClass()->GetClassPathName());
+		Filter.ClassPaths.Add(UFoliageType_InstancedStaticMesh::StaticClass()->GetClassPathName());
+#else
+		Filter.ClassNames.Add(UStaticMesh::StaticClass()->GetFName());
+		Filter.ClassNames.Add(UFoliageType::StaticClass()->GetFName());
+		Filter.ClassNames.Add(UFoliageType_InstancedStaticMesh::StaticClass()->GetFName());
+#endif
+
+		AssetRegistry.GetAssets(Filter, OutAssets);
+		if (OutAssets.Num() == 0)
+		{
+			FARFilter FolderOnly;
+			FolderOnly.bRecursivePaths = true;
+			FolderOnly.PackagePaths.Add(*Folder);
+			FolderOnly.bIncludeOnlyOnDiskAssets = false;
+			AssetRegistry.GetAssets(FolderOnly, OutAssets);
+		}
 	}
 }
 
@@ -57,18 +165,20 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 	OutMeshes.Reset();
 	OutError.Reset();
 
-	FString Folder = NormalizeContentFolderPath(ContentFolderPath);
-	if (Folder.IsEmpty())
+	const FString Normalized = NormalizeContentFolderPath(ContentFolderPath);
+	if (Normalized.IsEmpty() || Normalized == TEXT("/"))
 	{
-		OutError = TEXT("Tree mesh folder path is empty. Use a Content path like /Game/Trees.");
+		OutError = TEXT("Tree mesh folder path is empty. Use a Content path like /Game/Trees or /PhoenixMapProxy/SHP_PLUGIN/trees.");
 		return false;
 	}
-	if (!Folder.StartsWith(TEXT("/Game")) && !Folder.StartsWith(TEXT("/Engine")))
+
+	const FString Resolved = ResolvePluginMountedFolder(Normalized);
+
+	TArray<FString> CandidateFolders;
+	CandidateFolders.Add(Resolved);
+	if (!Normalized.Equals(Resolved, ESearchCase::IgnoreCase))
 	{
-		OutError = FString::Printf(
-			TEXT("Tree mesh folder must be a Content path under /Game or /Engine (e.g. /Game/Trees), got '%s'."),
-			*Folder);
-		return false;
+		CandidateFolders.Add(Normalized);
 	}
 
 	FAssetRegistryModule& AssetRegistryModule =
@@ -76,30 +186,28 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 	AssetRegistry.SearchAllAssets(true);
 
-	FARFilter Filter;
-	Filter.bRecursivePaths = true;
-	Filter.PackagePaths.Add(*Folder);
-	Filter.bIncludeOnlyOnDiskAssets = false;
-
-#if ENGINE_MAJOR_VERSION >= 5
-	Filter.ClassPaths.Add(UStaticMesh::StaticClass()->GetClassPathName());
-	Filter.ClassPaths.Add(UFoliageType::StaticClass()->GetClassPathName());
-	Filter.ClassPaths.Add(UFoliageType_InstancedStaticMesh::StaticClass()->GetClassPathName());
-#else
-	Filter.ClassNames.Add(UStaticMesh::StaticClass()->GetFName());
-	Filter.ClassNames.Add(UFoliageType::StaticClass()->GetFName());
-	Filter.ClassNames.Add(UFoliageType_InstancedStaticMesh::StaticClass()->GetFName());
-#endif
-
 	TArray<FAssetData> Assets;
-	AssetRegistry.GetAssets(Filter, Assets);
-	if (Assets.Num() == 0)
+	FString UsedFolder;
+	for (const FString& Candidate : CandidateFolders)
 	{
-		// Fallback without class filter in case foliage class path differs.
-		FARFilter FolderOnly;
-		FolderOnly.bRecursivePaths = true;
-		FolderOnly.PackagePaths.Add(*Folder);
-		AssetRegistry.GetAssets(FolderOnly, Assets);
+		Assets.Reset();
+		GatherAssetsUnderFolder(AssetRegistry, Candidate, Assets);
+		UE_LOG(
+			LogTreePlacer,
+			Display,
+			TEXT("Tree mesh folder scan '%s' -> %d assets"),
+			*Candidate,
+			Assets.Num());
+		if (Assets.Num() > 0)
+		{
+			UsedFolder = Candidate;
+			break;
+		}
+	}
+
+	if (UsedFolder.IsEmpty())
+	{
+		UsedFolder = Resolved;
 	}
 
 	TSet<UStaticMesh*> UniqueMeshes;
@@ -120,7 +228,7 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 			continue;
 		}
 
-		// UE 5.1: GetStaticMesh / Mesh live on InstancedStaticMesh foliage types, not UFoliageType base.
+		// UE 5.1: Mesh lives on InstancedStaticMesh foliage types ("Static Mesh Foliage" in Content Browser).
 		if (UFoliageType_InstancedStaticMesh* FoliageISM = Cast<UFoliageType_InstancedStaticMesh>(Obj))
 		{
 			if (UStaticMesh* Mesh = FoliageISM->GetStaticMesh())
@@ -152,9 +260,12 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 			ClassSummary += FString::Printf(TEXT("%s=%d"), *Pair.Key.ToString(), Pair.Value);
 		}
 		OutError = FString::Printf(
-			TEXT("No StaticMesh or FoliageType_InstancedStaticMesh assets with a mesh found under '%s'. "
-				 "Assets scanned: %d%s%s"),
-			*Folder,
+			TEXT("No StaticMesh or Static Mesh Foliage assets with a mesh found under '%s' "
+				 "(also tried plugin-mount resolution from '%s'). Assets scanned: %d%s%s. "
+				 "Tip: in Content Browser, right-click the trees folder -> Copy Path, or use "
+				 "'/PhoenixMapProxy/SHP_PLUGIN/trees' style mount path."),
+			*UsedFolder,
+			*Normalized,
 			Assets.Num(),
 			ClassSummary.IsEmpty() ? TEXT("") : TEXT(" (classes: "),
 			ClassSummary.IsEmpty() ? TEXT("") : *(ClassSummary + TEXT(")")));
@@ -166,6 +277,6 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 		Display,
 		TEXT("Loaded %d unique tree meshes from '%s'"),
 		OutMeshes.Num(),
-		*Folder);
+		*UsedFolder);
 	return true;
 }

@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0.0",
+	"Version": 2,
+	"VersionName": "1.0.1",
 	"FriendlyName": "Tree Placer",
 	"Description": "Editor tool that reads EPSG:4326 tree point shapefiles with altitude, places random tree meshes from a Content folder into tiled HISM actors, and writes a combined FBX.",
 	"Category": "Editor",

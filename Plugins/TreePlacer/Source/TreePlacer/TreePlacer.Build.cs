@@ -21,6 +21,7 @@ public class TreePlacer : ModuleRules
 			"Slate",
 			"SlateCore",
 			"AssetRegistry",
+			"Projects",
 			"Foliage",
 			"CesiumRuntime",
 			"Json",
