@@ -192,9 +192,11 @@ namespace
 			HISM->bHasPerInstanceHitProxies = false;
 			HISM->RegisterComponent();
 
+			// World-space instances: same Unreal positions as Building Extruder Cesium placement.
+			// (Manual local conversion was misplacing trees relative to buildings.)
 			for (const FTransform& Xform : Transforms)
 			{
-				HISM->AddInstance(Xform, /*bWorldSpace*/ false);
+				HISM->AddInstance(Xform, /*bWorldSpace*/ true);
 			}
 			HISM->Modify();
 		}
@@ -475,14 +477,8 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 			const FVector TileOrigin = OriginSum / static_cast<double>(OriginCount);
 
-			// Convert world transforms to root-local (component space).
-			for (TArray<FTransform>& Transforms : TransformsPerMesh)
-			{
-				for (FTransform& Xform : Transforms)
-				{
-					Xform.SetLocation(Xform.GetLocation() - TileOrigin);
-				}
-			}
+			// Keep transforms in world space (identical Cesium LonLatHeight -> Unreal as buildings).
+			// HISM AddInstance(..., bWorldSpace=true) converts to component space.
 
 			AActor* TileActor = nullptr;
 			FString SpawnError;
