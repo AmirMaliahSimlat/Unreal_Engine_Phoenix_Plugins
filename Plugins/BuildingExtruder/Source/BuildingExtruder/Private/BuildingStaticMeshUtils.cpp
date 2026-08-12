@@ -8,6 +8,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshOperations.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 
@@ -121,17 +122,15 @@ namespace
 			}
 			Slot = FMath::Clamp(Slot, 0, SlotCount - 1);
 
-			// Mesh was coming out inside-out (visible from inside only). Reverse winding
-			// and normals together so front faces + shading both point outside.
+			// Keep AddTri winding (already oriented to DesiredOutwardDir). Normals are
+			// recomputed from faces below — same idea as Maya "Mesh Display → Set to Face".
 			TArray<FVertexInstanceID, TInlineAllocator<3>> CornerIds;
-			const int32 Indices[3] = { I0, I2, I1 };
+			const int32 Indices[3] = { I0, I1, I2 };
 			for (int32 C = 0; C < 3; ++C)
 			{
 				const int32 Vi = Indices[C];
 				const FVertexInstanceID InstanceId = MeshDescription.CreateVertexInstance(VertexIds[Vi]);
-				InstanceNormals[InstanceId] = Mesh.Normals.IsValidIndex(Vi)
-					? -FVector3f(Mesh.Normals[Vi])
-					: FVector3f::UpVector;
+				InstanceNormals[InstanceId] = FVector3f::ZeroVector;
 				InstanceUVs.Set(InstanceId, 0, Mesh.UVs.IsValidIndex(Vi)
 					? FVector2f(Mesh.UVs[Vi])
 					: FVector2f::ZeroVector);
@@ -140,6 +139,20 @@ namespace
 
 			MeshDescription.CreatePolygon(Groups[Slot], CornerIds);
 		}
+
+		// Extrude math "outward" was rendering inside-out in UE; flip faces once, then
+		// rebuild hard face normals from the final winding (Maya Set to Face equivalent).
+		MeshDescription.ReverseAllPolygonFacing();
+
+		TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
+		for (const FEdgeID EdgeId : MeshDescription.Edges().GetElementIDs())
+		{
+			EdgeHardnesses[EdgeId] = true;
+		}
+
+		FStaticMeshOperations::ComputeTangentsAndNormals(
+			MeshDescription,
+			EComputeNTBsFlags::Normals | EComputeNTBsFlags::Tangents);
 	}
 }
 
@@ -283,7 +296,8 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
 	BuildParams.bBuildSimpleCollision = false;
 #if ENGINE_MAJOR_VERSION == 5
-	BuildParams.bFastBuild = true;
+	// Fast build can skip/simplify NTBs; we need real face normals like Maya Set to Face.
+	BuildParams.bFastBuild = false;
 #endif
 
 	TArray<const FMeshDescription*> Descriptions;
