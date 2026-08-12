@@ -130,26 +130,46 @@ namespace
 		const FVector2D& UvA,
 		const FVector2D& UvB,
 		const FVector2D& UvC,
+		const FVector& DesiredOutwardDir,
 		int32 MaterialSlotIndex = 0)
 	{
-		FVector Normal = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
+		// Ensure winding so the geometric normal faces DesiredOutwardDir.
+		FVector PA = A;
+		FVector PB = B;
+		FVector PC = C;
+		FVector2D UVA = UvA;
+		FVector2D UVB = UvB;
+		FVector2D UVC = UvC;
+
+		FVector Normal = FVector::CrossProduct(PB - PA, PC - PA).GetSafeNormal();
 		if (Normal.IsNearlyZero())
 		{
-			Normal = FVector::UpVector;
+			Normal = DesiredOutwardDir.GetSafeNormal();
+			if (Normal.IsNearlyZero())
+			{
+				Normal = FVector::UpVector;
+			}
 		}
-		const int32 Base = Mesh.Vertices.Num();
-		Mesh.Vertices.Add(A);
-		Mesh.Vertices.Add(B);
-		Mesh.Vertices.Add(C);
+		else if (!DesiredOutwardDir.IsNearlyZero() && FVector::DotProduct(Normal, DesiredOutwardDir) < 0.0)
+		{
+			Swap(PB, PC);
+			Swap(UVB, UVC);
+			Normal = -Normal;
+		}
+
+		const int32 BaseIdx = Mesh.Vertices.Num();
+		Mesh.Vertices.Add(PA);
+		Mesh.Vertices.Add(PB);
+		Mesh.Vertices.Add(PC);
 		Mesh.Normals.Add(Normal);
 		Mesh.Normals.Add(Normal);
 		Mesh.Normals.Add(Normal);
-		Mesh.UVs.Add(UvA);
-		Mesh.UVs.Add(UvB);
-		Mesh.UVs.Add(UvC);
-		Mesh.Triangles.Add(Base);
-		Mesh.Triangles.Add(Base + 1);
-		Mesh.Triangles.Add(Base + 2);
+		Mesh.UVs.Add(UVA);
+		Mesh.UVs.Add(UVB);
+		Mesh.UVs.Add(UVC);
+		Mesh.Triangles.Add(BaseIdx);
+		Mesh.Triangles.Add(BaseIdx + 1);
+		Mesh.Triangles.Add(BaseIdx + 2);
 		Mesh.TriangleMaterialIndices.Add(MaterialSlotIndex);
 	}
 
@@ -211,8 +231,23 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		return false;
 	}
 
-	const bool bCCW = SignedArea2XY(Base) > 0.0;
 	const double UvScaleCm = FMath::Max(MetersPerUv, 0.01) * 100.0;
+
+	// Orient against explicit outward dirs (CCW-in-XY guesses fail after Cesium frames).
+	FVector Up(0, 0, 0);
+	FVector Center(0, 0, 0);
+	for (int32 I = 0; I < Base.Num(); ++I)
+	{
+		Up += (Top[I] - Base[I]);
+		Center += Base[I];
+	}
+	Up = Up.GetSafeNormal();
+	if (Up.IsNearlyZero())
+	{
+		Up = FVector::UpVector;
+	}
+	Center /= static_cast<double>(Base.Num());
+	const FVector Down = -Up;
 
 	double MinX = Base[0].X;
 	double MinY = Base[0].Y;
@@ -239,46 +274,35 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 	const double ClosingSeg = static_cast<double>(FVector::Dist2D(Base.Last(), Base[0]));
 	const double Perimeter = FMath::Max(CumDist.Last() + ClosingSeg, 1.0);
 
-	// Floor (bottom cap) — normals face downward (outward).
+	// Floor — normals face down (outward).
 	for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
 	{
 		const FVector& A = Base[CapTris[I]];
 		const FVector& B = Base[CapTris[I + 1]];
 		const FVector& C = Base[CapTris[I + 2]];
-		const FVector2D UvA = CapUvFromXY(A);
-		const FVector2D UvB = CapUvFromXY(B);
-		const FVector2D UvC = CapUvFromXY(C);
-		// Previous winding faced inward (looked good from inside). Flip for outward.
-		if (bCCW)
-		{
-			AddTriWithUV(OutWallsAndFloor, A, B, C, UvA, UvB, UvC);
-		}
-		else
-		{
-			AddTriWithUV(OutWallsAndFloor, A, C, B, UvA, UvC, UvB);
-		}
+		AddTriWithUV(
+			OutWallsAndFloor,
+			A, B, C,
+			CapUvFromXY(A), CapUvFromXY(B), CapUvFromXY(C),
+			Down);
 	}
 
-	// Roof (top cap) — normals face upward (outward).
+	// Roof — normals face up (outward).
 	for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
 	{
 		const FVector& A = Top[CapTris[I]];
 		const FVector& B = Top[CapTris[I + 1]];
 		const FVector& C = Top[CapTris[I + 2]];
-		const FVector2D UvA = CapUvFromXY(Base[CapTris[I]]);
-		const FVector2D UvB = CapUvFromXY(Base[CapTris[I + 1]]);
-		const FVector2D UvC = CapUvFromXY(Base[CapTris[I + 2]]);
-		if (bCCW)
-		{
-			AddTriWithUV(OutRoof, A, C, B, UvA, UvC, UvB);
-		}
-		else
-		{
-			AddTriWithUV(OutRoof, A, B, C, UvA, UvB, UvC);
-		}
+		AddTriWithUV(
+			OutRoof,
+			A, B, C,
+			CapUvFromXY(Base[CapTris[I]]),
+			CapUvFromXY(Base[CapTris[I + 1]]),
+			CapUvFromXY(Base[CapTris[I + 2]]),
+			Up);
 	}
 
-	// Walls — normals face outward. No double-sided copies (those used broken UVs).
+	// Walls — normals face outward (horizontal, away from footprint center).
 	const int32 N = Base.Num();
 	for (int32 I = 0; I < N; ++I)
 	{
@@ -297,16 +321,17 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		const FVector2D UvT0(static_cast<float>(U0), static_cast<float>(Vt0));
 		const FVector2D UvT1(static_cast<float>(U1), static_cast<float>(Vt1));
 
-		if (bCCW)
+		const FVector EdgeMid = 0.5 * (B0 + B1);
+		FVector Outward = EdgeMid - Center;
+		Outward -= Up * FVector::DotProduct(Outward, Up);
+		Outward = Outward.GetSafeNormal();
+		if (Outward.IsNearlyZero())
 		{
-			AddTriWithUV(OutWallsAndFloor, B0, T1, B1, UvB0, UvT1, UvB1);
-			AddTriWithUV(OutWallsAndFloor, B0, T0, T1, UvB0, UvT0, UvT1);
+			Outward = FVector::CrossProduct(B1 - B0, Up).GetSafeNormal();
 		}
-		else
-		{
-			AddTriWithUV(OutWallsAndFloor, B0, B1, T1, UvB0, UvB1, UvT1);
-			AddTriWithUV(OutWallsAndFloor, B0, T1, T0, UvB0, UvT1, UvT0);
-		}
+
+		AddTriWithUV(OutWallsAndFloor, B0, B1, T1, UvB0, UvB1, UvT1, Outward);
+		AddTriWithUV(OutWallsAndFloor, B0, T1, T0, UvB0, UvT1, UvT0, Outward);
 	}
 
 	if (OutWallsAndFloor.Triangles.Num() < 3 || OutRoof.Triangles.Num() < 3)
