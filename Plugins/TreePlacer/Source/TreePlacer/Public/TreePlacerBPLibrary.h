@@ -56,10 +56,10 @@ public:
 	 * @param TargetTileCount Exact tile slot count; XxY chosen for near-square cells.
 	 * @param TileIndices Optional comma-separated linear tile indices (Y*TilesX+X).
 	 * @param RandomSeed RNG seed for mesh + yaw; 0 uses a non-deterministic seed.
-	 * @param TreeDisappearLOD Mesh LOD index at which trees cull (and stop drawing).
-	 *        Negative or above the mesh max LOD → use that mesh's maximum LOD.
-	 * @param ShadowDisappearLOD Mesh LOD index at which tree shadows stop casting.
-	 *        Negative or above the mesh max LOD → use that mesh's maximum LOD.
+	 * @param TreeCullDistanceMeters Camera distance in meters at which trees disappear.
+	 *        <= 0 disables tree distance culling.
+	 * @param ShadowCullDistanceMeters Camera distance in meters at which tree shadows disappear.
+	 *        <= 0 disables shadow distance culling.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -72,8 +72,8 @@ public:
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_TileIndices = "",
 			CPP_Default_RandomSeed = "0",
-			CPP_Default_TreeDisappearLOD = "-1",
-			CPP_Default_ShadowDisappearLOD = "-1"))
+			CPP_Default_TreeCullDistanceMeters = "0.0",
+			CPP_Default_ShadowCullDistanceMeters = "0.0"))
 	static FTreePlaceResult PlaceTreesFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -84,6 +84,6 @@ public:
 		int32 TargetTileCount,
 		const FString& TileIndices,
 		int32 RandomSeed,
-		int32 TreeDisappearLOD,
-		int32 ShadowDisappearLOD);
+		float TreeCullDistanceMeters,
+		float ShadowCullDistanceMeters);
 };

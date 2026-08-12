@@ -14,7 +14,6 @@
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
 #include "Misc/ScopedSlowTask.h"
-#include "StaticMeshResources.h"
 
 namespace
 {
@@ -119,73 +118,14 @@ namespace
 		return true;
 	}
 
-	int32 GetMeshMaxLODIndex(const UStaticMesh* Mesh)
+	/** Convert meters to Unreal cull cm. <= 0 means no distance culling (UE uses 0). */
+	int32 MetersToCullDistanceCm(float DistanceMeters)
 	{
-		if (!Mesh)
+		if (DistanceMeters <= 0.0f)
 		{
 			return 0;
 		}
-		return FMath::Max(Mesh->GetNumLODs() - 1, 0);
-	}
-
-	int32 ResolveDisappearLOD(int32 RequestedLOD, int32 MaxLOD)
-	{
-		// Negative or past the last available LOD → disappear at the mesh maximum LOD.
-		if (RequestedLOD < 0 || RequestedLOD > MaxLOD)
-		{
-			return MaxLOD;
-		}
-		return RequestedLOD;
-	}
-
-	float GetMeshLODScreenSize(const UStaticMesh* Mesh, int32 LODIndex)
-	{
-		if (!Mesh || LODIndex < 0 || LODIndex >= Mesh->GetNumLODs())
-		{
-			return 0.01f;
-		}
-
-		// Prefer cooked render data screen sizes when available.
-		// UE 5.1: ScreenSize is a fixed array (not TArray), so no IsValidIndex.
-		if (const FStaticMeshRenderData* RenderData = Mesh->GetRenderData())
-		{
-			const float ScreenSize = RenderData->ScreenSize[LODIndex].Default;
-			if (ScreenSize > KINDA_SMALL_NUMBER)
-			{
-				return ScreenSize;
-			}
-		}
-
-#if WITH_EDITORONLY_DATA
-		if (Mesh->GetNumSourceModels() > LODIndex)
-		{
-			const float ScreenSize = Mesh->GetSourceModel(LODIndex).ScreenSize.Default;
-			if (ScreenSize > KINDA_SMALL_NUMBER)
-			{
-				return ScreenSize;
-			}
-		}
-#endif
-
-		// Fallback: each successive LOD roughly halves screen size.
-		return FMath::Pow(0.5f, static_cast<float>(LODIndex));
-	}
-
-	/** Approximate camera distance (cm) where the mesh would switch to the given LOD. */
-	int32 EstimateCullDistanceForLOD(const UStaticMesh* Mesh, int32 LODIndex)
-	{
-		if (!Mesh)
-		{
-			return 0;
-		}
-
-		const float Radius = FMath::Max(Mesh->GetBounds().SphereRadius, 1.0f);
-		float ScreenSize = GetMeshLODScreenSize(Mesh, LODIndex);
-		// LOD0 screen size is often ~1.0 (near camera). Clamping avoids near-zero cull
-		// distances when disappearing at early/max LODs on simple meshes.
-		ScreenSize = FMath::Clamp(ScreenSize, 1.0e-4f, 0.08f);
-		const float DistanceCm = Radius / ScreenSize;
-		return FMath::Max(FMath::CeilToInt(DistanceCm), 1);
+		return FMath::Max(FMath::CeilToInt(DistanceMeters * 100.0f), 1);
 	}
 
 	void ConfigureHismCullDistance(UHierarchicalInstancedStaticMeshComponent* HISM, int32 EndCullDistanceCm)
@@ -195,8 +135,9 @@ namespace
 			return;
 		}
 		const int32 EndDist = FMath::Max(EndCullDistanceCm, 0);
+		// Fade starts at 35% of the end distance before full cull (min 1 m band).
 		const int32 StartDist = (EndDist > 0)
-			? FMath::Max(0, EndDist - FMath::Max(EndDist / 20, 100))
+			? FMath::Max(0, EndDist - FMath::Max((EndDist * 35) / 100, 100))
 			: 0;
 		HISM->InstanceStartCullDistance = StartDist;
 		HISM->InstanceEndCullDistance = EndDist;
@@ -253,8 +194,8 @@ namespace
 		const TArray<UStaticMesh*>& TreeMeshes,
 		const TArray<TArray<FTransform>>& TransformsPerMesh,
 		const FVector& TileOrigin,
-		int32 TreeDisappearLOD,
-		int32 ShadowDisappearLOD,
+		float TreeCullDistanceMeters,
+		float ShadowCullDistanceMeters,
 		AActor*& OutActor,
 		FString& OutError)
 	{
@@ -299,6 +240,9 @@ namespace
 		}
 		Root->SetWorldLocation(TileOrigin);
 
+		const int32 TreeCullCm = MetersToCullDistanceCm(TreeCullDistanceMeters);
+		const int32 ShadowCullCm = MetersToCullDistanceCm(ShadowCullDistanceMeters);
+
 		for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
 		{
 			const TArray<FTransform>& Transforms = TransformsPerMesh[MeshIndex];
@@ -307,23 +251,6 @@ namespace
 			{
 				continue;
 			}
-
-			const int32 MaxLOD = GetMeshMaxLODIndex(Mesh);
-			const int32 TreeLOD = ResolveDisappearLOD(TreeDisappearLOD, MaxLOD);
-			const int32 ShadowLOD = ResolveDisappearLOD(ShadowDisappearLOD, MaxLOD);
-			const int32 TreeCullCm = EstimateCullDistanceForLOD(Mesh, TreeLOD);
-			const int32 ShadowCullCm = EstimateCullDistanceForLOD(Mesh, ShadowLOD);
-
-			UE_LOG(
-				LogTreePlacer,
-				Verbose,
-				TEXT("HISM mesh '%s': maxLOD=%d treeLOD=%d (cull~%dcm) shadowLOD=%d (cull~%dcm)"),
-				*Mesh->GetName(),
-				MaxLOD,
-				TreeLOD,
-				TreeCullCm,
-				ShadowLOD,
-				ShadowCullCm);
 
 			if (TreeCullCm == ShadowCullCm)
 			{
@@ -340,7 +267,7 @@ namespace
 			}
 			else
 			{
-				// Split so mesh and shadows can disappear at different LODs/distances.
+				// Split so mesh and shadows can disappear at different distances.
 				CreateTreeHism(
 					*Actor,
 					*Root,
@@ -379,8 +306,8 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	int32 TargetTileCount,
 	const FString& TileIndices,
 	int32 RandomSeed,
-	int32 TreeDisappearLOD,
-	int32 ShadowDisappearLOD)
+	float TreeCullDistanceMeters,
+	float ShadowCullDistanceMeters)
 {
 	FTreePlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -391,15 +318,15 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeLOD=%d shadowLOD=%d"),
+		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeCullM=%.1f shadowCullM=%.1f"),
 		*CleanInputPath,
 		*TreeMeshFolder,
 		*AltitudeField,
 		TargetTileCount,
 		*TileIndices,
 		RandomSeed,
-		TreeDisappearLOD,
-		ShadowDisappearLOD);
+		TreeCullDistanceMeters,
+		ShadowCullDistanceMeters);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -642,8 +569,8 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 					TreeMeshes,
 					TransformsPerMesh,
 					TileOrigin,
-					TreeDisappearLOD,
-					ShadowDisappearLOD,
+					TreeCullDistanceMeters,
+					ShadowCullDistanceMeters,
 					TileActor,
 					SpawnError))
 			{
