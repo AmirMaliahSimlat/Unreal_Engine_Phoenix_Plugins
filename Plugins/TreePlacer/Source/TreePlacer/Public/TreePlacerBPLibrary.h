@@ -28,9 +28,6 @@ struct FTreePlaceResult
 	bool bCancelled = false;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Tree Placer")
-	FString FbxOutputPath;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Tree Placer")
 	FString Message;
 };
 
@@ -48,11 +45,10 @@ class TREEPLACER_API UTreePlacerBPLibrary : public UBlueprintFunctionLibrary
 
 public:
 	/**
-	 * Reads EPSG:4326 tree points from a shapefile, places random tree meshes from
-	 * TreeMeshFolder into tiled HISM actors, and writes a combined FBX.
+	 * Reads EPSG:4326 tree points from a shapefile and places random tree meshes from
+	 * TreeMeshFolder into tiled HISM actors in the open level.
 	 *
 	 * @param ShapefilePath Path to point .shp (.dbf required beside it).
-	 * @param FbxOutputPath Required output path for the combined FBX.
 	 * @param TreeMeshFolder Content folder with StaticMesh and/or FoliageType assets (e.g. /Game/Trees).
 	 * @param AltitudeFieldName DBF column for ground altitude in meters (default altitude).
 	 * @param ActorLabelPrefix Prefix for tile actor labels (e.g. TreeTile).
@@ -75,7 +71,6 @@ public:
 	static FTreePlaceResult PlaceTreesFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
-		const FString& FbxOutputPath,
 		const FString& TreeMeshFolder,
 		const FString& AltitudeFieldName,
 		const FString& ActorLabelPrefix,

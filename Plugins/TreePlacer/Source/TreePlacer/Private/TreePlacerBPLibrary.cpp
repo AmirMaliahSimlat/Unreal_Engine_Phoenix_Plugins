@@ -1,7 +1,6 @@
 #include "TreePlacerBPLibrary.h"
 
 #include "TreeCesiumPlacement.h"
-#include "TreeFbxExporter.h"
 #include "TreeMeshFolderLoader.h"
 #include "TreePlacerLog.h"
 #include "TreePlacerTileActor.h"
@@ -14,7 +13,6 @@
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
-#include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
 
 namespace
@@ -211,7 +209,6 @@ namespace
 FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	UObject* WorldContextObject,
 	const FString& ShapefilePath,
-	const FString& FbxOutputPath,
 	const FString& TreeMeshFolder,
 	const FString& AltitudeFieldName,
 	const FString& ActorLabelPrefix,
@@ -224,27 +221,18 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	const double StartTime = FPlatformTime::Seconds();
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
-	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
 
 	UE_LOG(LogTreePlacer, Display, TEXT("========== Tree Place START =========="));
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("shp='%s' fbx='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d"),
+		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d"),
 		*CleanInputPath,
-		*CleanFbxPath,
 		*TreeMeshFolder,
 		*AltitudeField,
 		TargetTileCount,
 		*TileIndices,
 		RandomSeed);
-
-	if (CleanFbxPath.IsEmpty())
-	{
-		Result.Message = TEXT("FbxOutputPath is required.");
-		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
-		return Result;
-	}
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -400,15 +388,13 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	const FString FolderPath = EditorFolderPath;
 
 	FScopedSlowTask SlowTask(
-		static_cast<float>(NonEmptyTiles) + 1.0f,
+		static_cast<float>(NonEmptyTiles),
 		NSLOCTEXT("TreePlacer", "PlaceProgress", "Placing tiled trees..."));
 	SlowTask.MakeDialog(true);
 
 	int32 TreesPlaced = 0;
 	int32 TreesSkipped = 0;
 	int32 TilesSpawned = 0;
-	TArray<AActor*> SpawnedTileActors;
-	SpawnedTileActors.Reserve(NonEmptyTiles);
 
 	for (int32 TileY = 0; TileY < TilesY; ++TileY)
 	{
@@ -436,7 +422,7 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 				Result.TilesSpawned = TilesSpawned;
 				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 				Result.Message = FString::Printf(
-					TEXT("Cancelled. Tiles=%d trees=%d. FBX not written. Elapsed: %.2fs."),
+					TEXT("Cancelled. Tiles=%d trees=%d. Elapsed: %.2fs."),
 					TilesSpawned,
 					TreesPlaced,
 					Result.ElapsedSeconds);
@@ -503,45 +489,20 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 				TileTrees += Transforms.Num();
 			}
 			TreesPlaced += TileTrees;
-			SpawnedTileActors.Add(TileActor);
 			++TilesSpawned;
 		}
 	}
 
-	SlowTask.EnterProgressFrame(1.0f, NSLOCTEXT("TreePlacer", "WriteFbx", "Writing FBX..."));
-
-	FString WrittenFbxPath = CleanFbxPath;
-	if (!WrittenFbxPath.EndsWith(TEXT(".fbx"), ESearchCase::IgnoreCase))
-	{
-		WrittenFbxPath += TEXT(".fbx");
-	}
-
-	if (SpawnedTileActors.Num() <= 0)
+	if (TilesSpawned <= 0)
 	{
 		Result.TreesPlaced = 0;
 		Result.TreesSkipped = TreesSkipped;
 		Result.TilesSpawned = 0;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		Result.Message = FString::Printf(
-			TEXT("No tiles spawned (%d trees skipped). FBX not written. Elapsed: %.2fs."),
+			TEXT("No tiles spawned (%d trees skipped). Elapsed: %.2fs."),
 			TreesSkipped,
 			Result.ElapsedSeconds);
-		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
-		return Result;
-	}
-
-	FString FbxError;
-	if (!TreeFbxExporter::ExportTileActors(*World, SpawnedTileActors, WrittenFbxPath, FbxError))
-	{
-		Result.TreesPlaced = TreesPlaced;
-		Result.TreesSkipped = TreesSkipped;
-		Result.TilesSpawned = TilesSpawned;
-		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-		Result.Message = FString::Printf(
-			TEXT("Spawned %d tiles (%d trees) for editor preview, but FBX write failed: %s"),
-			TilesSpawned,
-			TreesPlaced,
-			*FbxError);
 		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}
@@ -550,17 +511,14 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	Result.TreesPlaced = TreesPlaced;
 	Result.TreesSkipped = TreesSkipped;
 	Result.TilesSpawned = TilesSpawned;
-	Result.FbxOutputPath = WrittenFbxPath;
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d tree tiles (%d trees, %d skipped) using %d mesh types from '%s', "
-			 "wrote FBX '%s'. Elapsed: %.2fs."),
+		TEXT("Spawned %d tree tiles (%d trees, %d skipped) using %d mesh types from '%s'. Elapsed: %.2fs."),
 		TilesSpawned,
 		TreesPlaced,
 		TreesSkipped,
 		TreeMeshes.Num(),
 		*TreeMeshFolder,
-		*WrittenFbxPath,
 		Result.ElapsedSeconds);
 
 	World->MarkPackageDirty();
