@@ -148,6 +148,35 @@ namespace
 		Mesh.Triangles.Add(Base + 2);
 	}
 
+	void AddTriWithUV(
+		FExtrudedPrismMesh& Mesh,
+		const FVector& A,
+		const FVector& B,
+		const FVector& C,
+		const FVector2D& UvA,
+		const FVector2D& UvB,
+		const FVector2D& UvC)
+	{
+		FVector Normal = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
+		if (Normal.IsNearlyZero())
+		{
+			Normal = FVector::UpVector;
+		}
+		const int32 Base = Mesh.Vertices.Num();
+		Mesh.Vertices.Add(A);
+		Mesh.Vertices.Add(B);
+		Mesh.Vertices.Add(C);
+		Mesh.Normals.Add(Normal);
+		Mesh.Normals.Add(Normal);
+		Mesh.Normals.Add(Normal);
+		Mesh.UVs.Add(UvA);
+		Mesh.UVs.Add(UvB);
+		Mesh.UVs.Add(UvC);
+		Mesh.Triangles.Add(Base);
+		Mesh.Triangles.Add(Base + 1);
+		Mesh.Triangles.Add(Base + 2);
+	}
+
 	void AddDoubleSidedCopies(FExtrudedPrismMesh& Mesh)
 	{
 		const int32 OrigTriCount = Mesh.Triangles.Num();
@@ -177,6 +206,7 @@ namespace
 bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 	const TArray<FVector>& BaseRingLocal,
 	const TArray<FVector>& TopRingLocal,
+	double MetersPerUv,
 	FExtrudedPrismMesh& OutWallsAndFloor,
 	FExtrudedPrismMesh& OutRoof,
 	FString& OutError)
@@ -207,6 +237,44 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 	}
 
 	const bool bCCW = SignedArea2XY(Base) > 0.0;
+	const double UvScaleCm = FMath::Max(MetersPerUv, 0.01) * 100.0;
+
+	// Planar UV for roof/floor from XY bounds.
+	double MinX = Base[0].X;
+	double MaxX = Base[0].X;
+	double MinY = Base[0].Y;
+	double MaxY = Base[0].Y;
+	for (int32 I = 1; I < Base.Num(); ++I)
+	{
+		MinX = FMath::Min(MinX, static_cast<double>(Base[I].X));
+		MaxX = FMath::Max(MaxX, static_cast<double>(Base[I].X));
+		MinY = FMath::Min(MinY, static_cast<double>(Base[I].Y));
+		MaxY = FMath::Max(MaxY, static_cast<double>(Base[I].Y));
+	}
+	const double SpanX = FMath::Max(MaxX - MinX, 1.0);
+	const double SpanY = FMath::Max(MaxY - MinY, 1.0);
+
+	auto CapUvFromXY = [MinX, MinY, SpanX, SpanY, UvScaleCm](const FVector& P) -> FVector2D
+	{
+		const double Nx = (static_cast<double>(P.X) - MinX) / SpanX;
+		const double Ny = (static_cast<double>(P.Y) - MinY) / SpanY;
+		const double Xcm = Nx * SpanX;
+		const double Ycm = Ny * SpanY;
+		return FVector2D(
+			static_cast<float>(Xcm / UvScaleCm),
+			static_cast<float>(Ycm / UvScaleCm));
+	};
+
+	// Continuous U along perimeter for wall unwrap.
+	TArray<double> CumDist;
+	CumDist.SetNum(Base.Num());
+	CumDist[0] = 0.0;
+	for (int32 I = 1; I < Base.Num(); ++I)
+	{
+		CumDist[I] = CumDist[I - 1] + static_cast<double>(FVector::Dist2D(Base[I - 1], Base[I]));
+	}
+	const double ClosingSeg = static_cast<double>(FVector::Dist2D(Base.Last(), Base[0]));
+	const double Perimeter = FMath::Max(CumDist.Last() + ClosingSeg, 1.0);
 
 	// Floor (bottom cap).
 	for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
@@ -214,13 +282,16 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		const FVector& A = Base[CapTris[I]];
 		const FVector& B = Base[CapTris[I + 1]];
 		const FVector& C = Base[CapTris[I + 2]];
+		const FVector2D UvA = CapUvFromXY(A);
+		const FVector2D UvB = CapUvFromXY(B);
+		const FVector2D UvC = CapUvFromXY(C);
 		if (bCCW)
 		{
-			AddTri(OutWallsAndFloor, A, C, B);
+			AddTriWithUV(OutWallsAndFloor, A, C, B, UvA, UvC, UvB);
 		}
 		else
 		{
-			AddTri(OutWallsAndFloor, A, B, C);
+			AddTriWithUV(OutWallsAndFloor, A, B, C, UvA, UvB, UvC);
 		}
 	}
 
@@ -230,13 +301,16 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		const FVector& A = Top[CapTris[I]];
 		const FVector& B = Top[CapTris[I + 1]];
 		const FVector& C = Top[CapTris[I + 2]];
+		const FVector2D UvA = CapUvFromXY(Base[CapTris[I]]);
+		const FVector2D UvB = CapUvFromXY(Base[CapTris[I + 1]]);
+		const FVector2D UvC = CapUvFromXY(Base[CapTris[I + 2]]);
 		if (bCCW)
 		{
-			AddTri(OutRoof, A, B, C);
+			AddTriWithUV(OutRoof, A, B, C, UvA, UvB, UvC);
 		}
 		else
 		{
-			AddTri(OutRoof, A, C, B);
+			AddTriWithUV(OutRoof, A, C, B, UvA, UvC, UvB);
 		}
 	}
 
@@ -248,16 +322,26 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		const FVector& B1 = Base[(I + 1) % N];
 		const FVector& T0 = Top[I];
 		const FVector& T1 = Top[(I + 1) % N];
+		const double U0 = CumDist[I] / UvScaleCm;
+		const double U1 = (I + 1 < N)
+			? (CumDist[I + 1] / UvScaleCm)
+			: (Perimeter / UvScaleCm);
+		const double Vt0 = static_cast<double>(FVector::Distance(B0, T0)) / UvScaleCm;
+		const double Vt1 = static_cast<double>(FVector::Distance(B1, T1)) / UvScaleCm;
+		const FVector2D UvB0(static_cast<float>(U0), 0.0f);
+		const FVector2D UvB1(static_cast<float>(U1), 0.0f);
+		const FVector2D UvT0(static_cast<float>(U0), static_cast<float>(Vt0));
+		const FVector2D UvT1(static_cast<float>(U1), static_cast<float>(Vt1));
 
 		if (bCCW)
 		{
-			AddTri(OutWallsAndFloor, B0, B1, T1);
-			AddTri(OutWallsAndFloor, B0, T1, T0);
+			AddTriWithUV(OutWallsAndFloor, B0, B1, T1, UvB0, UvB1, UvT1);
+			AddTriWithUV(OutWallsAndFloor, B0, T1, T0, UvB0, UvT1, UvT0);
 		}
 		else
 		{
-			AddTri(OutWallsAndFloor, B0, T1, B1);
-			AddTri(OutWallsAndFloor, B0, T0, T1);
+			AddTriWithUV(OutWallsAndFloor, B0, T1, B1, UvB0, UvT1, UvB1);
+			AddTriWithUV(OutWallsAndFloor, B0, T0, T1, UvB0, UvT0, UvT1);
 		}
 	}
 
@@ -277,12 +361,19 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 bool BuildingExtrudeUtils::BuildPrismFromRings(
 	const TArray<FVector>& BaseRingLocal,
 	const TArray<FVector>& TopRingLocal,
+	double MetersPerUv,
 	FExtrudedPrismMesh& OutMesh,
 	FString& OutError)
 {
 	FExtrudedPrismMesh WallsAndFloor;
 	FExtrudedPrismMesh Roof;
-	if (!BuildPrismPartsFromRings(BaseRingLocal, TopRingLocal, WallsAndFloor, Roof, OutError))
+	if (!BuildPrismPartsFromRings(
+			BaseRingLocal,
+			TopRingLocal,
+			MetersPerUv,
+			WallsAndFloor,
+			Roof,
+			OutError))
 	{
 		OutMesh = FExtrudedPrismMesh();
 		return false;
@@ -319,5 +410,10 @@ bool BuildingExtrudeUtils::BuildPrism(
 		V.Z = HeightCm;
 	}
 
-	return BuildPrismFromRings(Base, Top, OutMesh, OutError);
+	return BuildPrismFromRings(
+		Base,
+		Top,
+		/*MetersPerUv*/ 3.0,
+		OutMesh,
+		OutError);
 }

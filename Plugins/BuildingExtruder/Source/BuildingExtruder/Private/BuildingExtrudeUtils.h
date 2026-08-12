@@ -20,6 +20,7 @@ namespace BuildingExtrudeUtils
 	bool BuildPrismPartsFromRings(
 		const TArray<FVector>& BaseRingLocal,
 		const TArray<FVector>& TopRingLocal,
+		double MetersPerUv,
 		FExtrudedPrismMesh& OutWallsAndFloor,
 		FExtrudedPrismMesh& OutRoof,
 		FString& OutError);
@@ -30,6 +31,7 @@ namespace BuildingExtrudeUtils
 	bool BuildPrismFromRings(
 		const TArray<FVector>& BaseRingLocal,
 		const TArray<FVector>& TopRingLocal,
+		double MetersPerUv,
 		FExtrudedPrismMesh& OutMesh,
 		FString& OutError);
 

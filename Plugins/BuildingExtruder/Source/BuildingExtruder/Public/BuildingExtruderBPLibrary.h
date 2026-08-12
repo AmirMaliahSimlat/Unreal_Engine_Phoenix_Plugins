@@ -61,6 +61,7 @@ public:
 	 * @param EditorFolderPath World Outliner folder.
 	 * @param TargetTileCount Exact tile slot count; XxY chosen from factor pairs for square cells.
 	 * @param TileIndices Optional comma-separated linear tile indices (Y*TilesX+X), e.g. "0,6,12".
+	 * @param MetersPerUv Texture mapping scale in meters per UV unit (applies to walls and roof/floor caps).
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -72,7 +73,8 @@ public:
 			CPP_Default_ActorLabelPrefix = "BldgTile",
 			CPP_Default_EditorFolderPath = "ExtrudedBuildings",
 			CPP_Default_TargetTileCount = "64",
-			CPP_Default_TileIndices = ""))
+			CPP_Default_TileIndices = "",
+			CPP_Default_MetersPerUv = "3.0"))
 	static FBuildingExtrudeResult ImportAndExtrudeBuildingsFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -82,5 +84,6 @@ public:
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath,
 		int32 TargetTileCount,
-		const FString& TileIndices);
+		const FString& TileIndices,
+		float MetersPerUv);
 };

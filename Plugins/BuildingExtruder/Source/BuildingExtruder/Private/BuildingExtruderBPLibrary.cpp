@@ -162,6 +162,7 @@ namespace
 		ACesiumGeoreference& Georeference,
 		const FBuildingShapefileFeature& Feature,
 		double BaseAltitudeM,
+		double MetersPerUv,
 		FExtrudedPrismMesh& OutWallsAndFloorWorld,
 		FExtrudedPrismMesh& OutRoofWorld,
 		FVector& OutCentroid,
@@ -208,7 +209,12 @@ namespace
 		FExtrudedPrismMesh LocalWalls;
 		FExtrudedPrismMesh LocalRoof;
 		if (!BuildingExtrudeUtils::BuildPrismPartsFromRings(
-				BaseLocal, TopLocal, LocalWalls, LocalRoof, OutError))
+				BaseLocal,
+				TopLocal,
+				MetersPerUv,
+				LocalWalls,
+				LocalRoof,
+				OutError))
 		{
 			return false;
 		}
@@ -309,12 +315,14 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
-	const FString& TileIndices)
+	const FString& TileIndices,
+	float MetersPerUv)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
 	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("RELATIVE_F") : HeightFieldName;
+	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.01);
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
@@ -323,13 +331,14 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' targetTiles=%d tileFilter='%s'"),
+		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' targetTiles=%d tileFilter='%s' metersPerUv=%.3f"),
 		*CleanInputPath,
 		*CleanFbxPath,
 		*AltitudeField,
 		*HeightField,
 		TargetTileCount,
-		*TileIndices);
+		*TileIndices,
+		UvMeters);
 
 	if (CleanFbxPath.IsEmpty())
 	{
@@ -675,6 +684,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 						*Georeference,
 						Features[FeatureIndex],
 						Features[FeatureIndex].ElevationM,
+						UvMeters,
 						BuildingWalls,
 						BuildingRoof,
 						Centroid,
