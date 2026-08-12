@@ -8,7 +8,6 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "StaticMeshAttributes.h"
-#include "StaticMeshOperations.h"
 #include "UObject/ObjectRedirector.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
@@ -178,6 +177,8 @@ namespace
 			MeshDescription.CreatePolygon(Groups[Slot], CornerIds);
 		}
 
+		MeshDescription.TriangulateMesh();
+
 		// Extrude math "outward" was rendering inside-out in UE; flip faces once, then
 		// rebuild hard face normals from the final winding (Maya Set to Face equivalent).
 		MeshDescription.ReverseAllPolygonFacing();
@@ -188,9 +189,32 @@ namespace
 			EdgeHardnesses[EdgeId] = true;
 		}
 
-		FStaticMeshOperations::ComputeTangentsAndNormals(
-			MeshDescription,
-			EComputeNTBsFlags::Normals | EComputeNTBsFlags::Tangents);
+		// Assign hard face normals from triangle winding. Avoid FStaticMeshOperations::
+		// ComputeTangentsAndNormals here — it asserts if triangle NTBs were not prebuilt.
+		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
+		{
+			const TArrayView<const FVertexInstanceID> Corners =
+				MeshDescription.GetTriangleVertexInstances(TriId);
+			if (Corners.Num() < 3)
+			{
+				continue;
+			}
+
+			const FVertexID V0 = MeshDescription.GetVertexInstanceVertex(Corners[0]);
+			const FVertexID V1 = MeshDescription.GetVertexInstanceVertex(Corners[1]);
+			const FVertexID V2 = MeshDescription.GetVertexInstanceVertex(Corners[2]);
+			const FVector3f PA = VertexPositions[V0];
+			const FVector3f PB = VertexPositions[V1];
+			const FVector3f PC = VertexPositions[V2];
+			FVector3f Normal = FVector3f::CrossProduct(PB - PA, PC - PA).GetSafeNormal();
+			if (Normal.IsNearlyZero())
+			{
+				Normal = FVector3f::UpVector;
+			}
+			InstanceNormals[Corners[0]] = Normal;
+			InstanceNormals[Corners[1]] = Normal;
+			InstanceNormals[Corners[2]] = Normal;
+		}
 	}
 }
 
