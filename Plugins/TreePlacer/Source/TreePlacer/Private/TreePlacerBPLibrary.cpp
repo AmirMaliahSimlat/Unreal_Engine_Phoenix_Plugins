@@ -182,20 +182,27 @@ namespace
 				Actor,
 				CompName,
 				RF_Transactional);
+			// Instance creation method + AddInstanceComponent are required so HISM
+			// components (and their instance transforms) serialize with the level.
+			HISM->CreationMethod = EComponentCreationMethod::Instance;
 			HISM->SetupAttachment(Root);
 			HISM->SetStaticMesh(TreeMeshes[MeshIndex]);
 			HISM->SetMobility(EComponentMobility::Static);
 			HISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			HISM->SetGenerateOverlapEvents(false);
 			HISM->bHasPerInstanceHitProxies = false;
+			Actor->AddInstanceComponent(HISM);
 			HISM->RegisterComponent();
 
 			// World-space instances: same Unreal positions as Building Extruder Cesium placement.
-			// (Manual local conversion was misplacing trees relative to buildings.)
 			for (const FTransform& Xform : Transforms)
 			{
 				HISM->AddInstance(Xform, /*bWorldSpace*/ true);
 			}
+#if ENGINE_MAJOR_VERSION >= 5
+			HISM->BuildTreeIfOutdated(/*bAsync*/ false, /*bForceUpdate*/ true);
+#endif
+			HISM->MarkRenderStateDirty();
 			HISM->Modify();
 		}
 
