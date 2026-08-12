@@ -9,6 +9,7 @@
 #include "Misc/Paths.h"
 #include "StaticMeshAttributes.h"
 #include "StaticMeshOperations.h"
+#include "UObject/ObjectRedirector.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 
@@ -70,6 +71,43 @@ namespace
 			return false;
 		}
 		return true;
+	}
+
+	/** Remove a leftover redirector so NewObject can reuse the asset name safely. */
+	void ClearRedirectorAt(UPackage* Package, const FString& AssetName)
+	{
+		if (!Package)
+		{
+			return;
+		}
+
+		UObjectRedirector* Redirector = FindObject<UObjectRedirector>(Package, *AssetName);
+		if (!Redirector)
+		{
+			// FullyLoad / SoftObjectPath may have loaded it under the package already.
+			const FString ObjectPath = Package->GetName() + TEXT(".") + AssetName;
+			Redirector = LoadObject<UObjectRedirector>(nullptr, *ObjectPath);
+		}
+		if (!Redirector)
+		{
+			return;
+		}
+
+		UE_LOG(
+			LogBuildingExtruder,
+			Warning,
+			TEXT("Removing ObjectRedirector at %s.%s so the building mesh can be recreated."),
+			*Package->GetName(),
+			*AssetName);
+
+		// Move the redirector out of the package name slot. Fixup alone is not enough when
+		// the destination asset was deleted — NewObject would still fatal on the name clash.
+		Redirector->ClearFlags(RF_Public | RF_Standalone);
+		Redirector->Rename(
+			nullptr,
+			GetTransientPackage(),
+			REN_DontCreateRedirectors | REN_NonTransactional | REN_DoNotDirty);
+		Redirector->MarkAsGarbage();
 	}
 
 	void FillMeshDescription(
@@ -255,10 +293,19 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 	}
 	Package->FullyLoad();
 
+	// Prior delete/move of these meshes often leaves redirectors; NewObject fatals on name clash.
+	ClearRedirectorAt(Package, SafeName);
+
 	UStaticMesh* StaticMesh = FindObject<UStaticMesh>(Package, *SafeName);
+	if (!StaticMesh)
+	{
+		StaticMesh = LoadObject<UStaticMesh>(nullptr, *(SafePackagePath + TEXT(".") + SafeName));
+	}
 	const bool bCreatedNew = (StaticMesh == nullptr);
 	if (!StaticMesh)
 	{
+		// One more redirector check after LoadObject (can pull redirector into memory).
+		ClearRedirectorAt(Package, SafeName);
 		StaticMesh = NewObject<UStaticMesh>(
 			Package,
 			*SafeName,
