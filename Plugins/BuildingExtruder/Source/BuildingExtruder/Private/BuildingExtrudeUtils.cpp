@@ -122,32 +122,6 @@ namespace
 		return false;
 	}
 
-	void AddTri(
-		FExtrudedPrismMesh& Mesh,
-		const FVector& A,
-		const FVector& B,
-		const FVector& C)
-	{
-		FVector Normal = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
-		if (Normal.IsNearlyZero())
-		{
-			Normal = FVector::UpVector;
-		}
-		const int32 Base = Mesh.Vertices.Num();
-		Mesh.Vertices.Add(A);
-		Mesh.Vertices.Add(B);
-		Mesh.Vertices.Add(C);
-		Mesh.Normals.Add(Normal);
-		Mesh.Normals.Add(Normal);
-		Mesh.Normals.Add(Normal);
-		Mesh.UVs.Add(FVector2D(0, 0));
-		Mesh.UVs.Add(FVector2D(1, 0));
-		Mesh.UVs.Add(FVector2D(0, 1));
-		Mesh.Triangles.Add(Base);
-		Mesh.Triangles.Add(Base + 1);
-		Mesh.Triangles.Add(Base + 2);
-	}
-
 	void AddTriWithUV(
 		FExtrudedPrismMesh& Mesh,
 		const FVector& A,
@@ -155,7 +129,8 @@ namespace
 		const FVector& C,
 		const FVector2D& UvA,
 		const FVector2D& UvB,
-		const FVector2D& UvC)
+		const FVector2D& UvC,
+		int32 MaterialSlotIndex = 0)
 	{
 		FVector Normal = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
 		if (Normal.IsNearlyZero())
@@ -175,18 +150,7 @@ namespace
 		Mesh.Triangles.Add(Base);
 		Mesh.Triangles.Add(Base + 1);
 		Mesh.Triangles.Add(Base + 2);
-	}
-
-	void AddDoubleSidedCopies(FExtrudedPrismMesh& Mesh)
-	{
-		const int32 OrigTriCount = Mesh.Triangles.Num();
-		for (int32 T = 0; T + 2 < OrigTriCount; T += 3)
-		{
-			const FVector VA = Mesh.Vertices[Mesh.Triangles[T]];
-			const FVector VB = Mesh.Vertices[Mesh.Triangles[T + 1]];
-			const FVector VC = Mesh.Vertices[Mesh.Triangles[T + 2]];
-			AddTri(Mesh, VA, VC, VB);
-		}
+		Mesh.TriangleMaterialIndices.Add(MaterialSlotIndex);
 	}
 
 	void AppendMesh(FExtrudedPrismMesh& Combined, const FExtrudedPrismMesh& Part)
@@ -195,11 +159,22 @@ namespace
 		Combined.Vertices.Append(Part.Vertices);
 		Combined.Normals.Append(Part.Normals);
 		Combined.UVs.Append(Part.UVs);
+		Combined.TriangleMaterialIndices.Append(Part.TriangleMaterialIndices);
 		Combined.Triangles.Reserve(Combined.Triangles.Num() + Part.Triangles.Num());
 		for (const int32 Index : Part.Triangles)
 		{
 			Combined.Triangles.Add(Index + VertexOffset);
 		}
+	}
+}
+
+void BuildingExtrudeUtils::AssignAllTrianglesMaterialSlot(FExtrudedPrismMesh& Mesh, int32 MaterialSlotIndex)
+{
+	const int32 NumTris = Mesh.Triangles.Num() / 3;
+	Mesh.TriangleMaterialIndices.SetNum(NumTris);
+	for (int32 I = 0; I < NumTris; ++I)
+	{
+		Mesh.TriangleMaterialIndices[I] = MaterialSlotIndex;
 	}
 }
 
@@ -239,33 +214,21 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 	const bool bCCW = SignedArea2XY(Base) > 0.0;
 	const double UvScaleCm = FMath::Max(MetersPerUv, 0.01) * 100.0;
 
-	// Planar UV for roof/floor from XY bounds.
 	double MinX = Base[0].X;
-	double MaxX = Base[0].X;
 	double MinY = Base[0].Y;
-	double MaxY = Base[0].Y;
 	for (int32 I = 1; I < Base.Num(); ++I)
 	{
 		MinX = FMath::Min(MinX, static_cast<double>(Base[I].X));
-		MaxX = FMath::Max(MaxX, static_cast<double>(Base[I].X));
 		MinY = FMath::Min(MinY, static_cast<double>(Base[I].Y));
-		MaxY = FMath::Max(MaxY, static_cast<double>(Base[I].Y));
 	}
-	const double SpanX = FMath::Max(MaxX - MinX, 1.0);
-	const double SpanY = FMath::Max(MaxY - MinY, 1.0);
 
-	auto CapUvFromXY = [MinX, MinY, SpanX, SpanY, UvScaleCm](const FVector& P) -> FVector2D
+	auto CapUvFromXY = [MinX, MinY, UvScaleCm](const FVector& P) -> FVector2D
 	{
-		const double Nx = (static_cast<double>(P.X) - MinX) / SpanX;
-		const double Ny = (static_cast<double>(P.Y) - MinY) / SpanY;
-		const double Xcm = Nx * SpanX;
-		const double Ycm = Ny * SpanY;
 		return FVector2D(
-			static_cast<float>(Xcm / UvScaleCm),
-			static_cast<float>(Ycm / UvScaleCm));
+			static_cast<float>((static_cast<double>(P.X) - MinX) / UvScaleCm),
+			static_cast<float>((static_cast<double>(P.Y) - MinY) / UvScaleCm));
 	};
 
-	// Continuous U along perimeter for wall unwrap.
 	TArray<double> CumDist;
 	CumDist.SetNum(Base.Num());
 	CumDist[0] = 0.0;
@@ -276,7 +239,7 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 	const double ClosingSeg = static_cast<double>(FVector::Dist2D(Base.Last(), Base[0]));
 	const double Perimeter = FMath::Max(CumDist.Last() + ClosingSeg, 1.0);
 
-	// Floor (bottom cap).
+	// Floor (bottom cap) — normals face downward (outward).
 	for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
 	{
 		const FVector& A = Base[CapTris[I]];
@@ -285,17 +248,18 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		const FVector2D UvA = CapUvFromXY(A);
 		const FVector2D UvB = CapUvFromXY(B);
 		const FVector2D UvC = CapUvFromXY(C);
+		// Previous winding faced inward (looked good from inside). Flip for outward.
 		if (bCCW)
-		{
-			AddTriWithUV(OutWallsAndFloor, A, C, B, UvA, UvC, UvB);
-		}
-		else
 		{
 			AddTriWithUV(OutWallsAndFloor, A, B, C, UvA, UvB, UvC);
 		}
+		else
+		{
+			AddTriWithUV(OutWallsAndFloor, A, C, B, UvA, UvC, UvB);
+		}
 	}
 
-	// Roof (top cap).
+	// Roof (top cap) — normals face upward (outward).
 	for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
 	{
 		const FVector& A = Top[CapTris[I]];
@@ -306,15 +270,15 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		const FVector2D UvC = CapUvFromXY(Base[CapTris[I + 2]]);
 		if (bCCW)
 		{
-			AddTriWithUV(OutRoof, A, B, C, UvA, UvB, UvC);
+			AddTriWithUV(OutRoof, A, C, B, UvA, UvC, UvB);
 		}
 		else
 		{
-			AddTriWithUV(OutRoof, A, C, B, UvA, UvC, UvB);
+			AddTriWithUV(OutRoof, A, B, C, UvA, UvB, UvC);
 		}
 	}
 
-	// Walls (sides).
+	// Walls — normals face outward. No double-sided copies (those used broken UVs).
 	const int32 N = Base.Num();
 	for (int32 I = 0; I < N; ++I)
 	{
@@ -335,20 +299,15 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 
 		if (bCCW)
 		{
-			AddTriWithUV(OutWallsAndFloor, B0, B1, T1, UvB0, UvB1, UvT1);
-			AddTriWithUV(OutWallsAndFloor, B0, T1, T0, UvB0, UvT1, UvT0);
-		}
-		else
-		{
 			AddTriWithUV(OutWallsAndFloor, B0, T1, B1, UvB0, UvT1, UvB1);
 			AddTriWithUV(OutWallsAndFloor, B0, T0, T1, UvB0, UvT0, UvT1);
 		}
+		else
+		{
+			AddTriWithUV(OutWallsAndFloor, B0, B1, T1, UvB0, UvB1, UvT1);
+			AddTriWithUV(OutWallsAndFloor, B0, T1, T0, UvB0, UvT1, UvT0);
+		}
 	}
-
-	// Duplicate every triangle with reversed winding so the solid is closed/visible from both sides
-	// (Unreal and FBX viewers typically cull back faces).
-	AddDoubleSidedCopies(OutWallsAndFloor);
-	AddDoubleSidedCopies(OutRoof);
 
 	if (OutWallsAndFloor.Triangles.Num() < 3 || OutRoof.Triangles.Num() < 3)
 	{

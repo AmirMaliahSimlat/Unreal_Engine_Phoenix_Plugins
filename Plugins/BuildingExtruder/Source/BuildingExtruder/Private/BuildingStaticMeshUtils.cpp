@@ -71,7 +71,11 @@ namespace
 		return true;
 	}
 
-	void FillMeshDescription(const FExtrudedPrismMesh& Mesh, FMeshDescription& MeshDescription, FString& OutError)
+	void FillMeshDescription(
+		const FExtrudedPrismMesh& Mesh,
+		int32 NumMaterialSlots,
+		FMeshDescription& MeshDescription,
+		FString& OutError)
 	{
 		FStaticMeshAttributes Attributes(MeshDescription);
 		Attributes.Register();
@@ -90,7 +94,14 @@ namespace
 			VertexIds.Add(Vid);
 		}
 
-		const FPolygonGroupID GroupId = MeshDescription.CreatePolygonGroup();
+		const int32 SlotCount = FMath::Max(NumMaterialSlots, 1);
+		TArray<FPolygonGroupID> Groups;
+		Groups.Reserve(SlotCount);
+		for (int32 S = 0; S < SlotCount; ++S)
+		{
+			Groups.Add(MeshDescription.CreatePolygonGroup());
+		}
+
 		const int32 NumTris = Mesh.Triangles.Num() / 3;
 		for (int32 T = 0; T < NumTris; ++T)
 		{
@@ -102,6 +113,13 @@ namespace
 				OutError = TEXT("Triangle index out of range while building StaticMesh.");
 				return;
 			}
+
+			int32 Slot = 0;
+			if (Mesh.TriangleMaterialIndices.IsValidIndex(T))
+			{
+				Slot = Mesh.TriangleMaterialIndices[T];
+			}
+			Slot = FMath::Clamp(Slot, 0, SlotCount - 1);
 
 			TArray<FVertexInstanceID, TInlineAllocator<3>> CornerIds;
 			const int32 Indices[3] = { I0, I1, I2 };
@@ -118,7 +136,7 @@ namespace
 				CornerIds.Add(InstanceId);
 			}
 
-			MeshDescription.CreatePolygon(GroupId, CornerIds);
+			MeshDescription.CreatePolygon(Groups[Slot], CornerIds);
 		}
 	}
 }
@@ -126,11 +144,19 @@ namespace
 UMaterialInterface* BuildingStaticMeshUtils::GetOrCreateBuildingMaterial(FString& OutError)
 {
 	OutError.Reset();
-	constexpr TCHAR MaterialPackagePath[] = TEXT("/Game/BuildingExtruder/Materials/M_BuildingExtruder_TwoSided");
-	constexpr TCHAR MaterialAssetName[] = TEXT("M_BuildingExtruder_TwoSided");
+	constexpr TCHAR MaterialPackagePath[] = TEXT("/Game/BuildingExtruder/Materials/M_BuildingExtruder_Default");
+	constexpr TCHAR MaterialAssetName[] = TEXT("M_BuildingExtruder_Default");
 
 	if (UMaterial* Existing = LoadObject<UMaterial>(nullptr, *(FString(MaterialPackagePath) + TEXT(".") + MaterialAssetName)))
 	{
+		if (Existing->TwoSided)
+		{
+			Existing->Modify();
+			Existing->TwoSided = false;
+			Existing->PostEditChange();
+			SaveAssetPackage(Existing->GetOutermost(), Existing, OutError);
+			OutError.Reset();
+		}
 		return Existing;
 	}
 
@@ -152,7 +178,8 @@ UMaterialInterface* BuildingStaticMeshUtils::GetOrCreateBuildingMaterial(FString
 		return nullptr;
 	}
 
-	Mat->TwoSided = true;
+	// One-sided: meshes now have outward normals. Two-sided caused dark double-shadowing.
+	Mat->TwoSided = false;
 	Mat->BlendMode = BLEND_Opaque;
 	Mat->MaterialDomain = MD_Surface;
 	Mat->PostEditChange();
@@ -172,6 +199,7 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 	const FString& AssetName,
 	const FExtrudedPrismMesh& Mesh,
 	UMaterialInterface* Material,
+	int32 NumMaterialSlots,
 	FString& OutError)
 {
 	OutError.Reset();
@@ -181,6 +209,7 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 		return nullptr;
 	}
 
+	const int32 SlotCount = FMath::Max(NumMaterialSlots, 1);
 	const FString SafeName = SanitizeAssetName(AssetName);
 	FString Folder = PackagePath.TrimStartAndEnd();
 	Folder.RemoveFromEnd(TEXT("/"));
@@ -193,7 +222,6 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 		Folder = TEXT("/") + Folder;
 	}
 
-	// If caller passed a full package path ending in the asset name, treat it as the package.
 	FString SafePackagePath;
 	if (Folder.EndsWith(SafeName) || Folder.EndsWith(AssetName))
 	{
@@ -228,7 +256,7 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 	}
 
 	FMeshDescription MeshDescription;
-	FillMeshDescription(Mesh, MeshDescription, OutError);
+	FillMeshDescription(Mesh, SlotCount, MeshDescription, OutError);
 	if (!OutError.IsEmpty())
 	{
 		return nullptr;
@@ -245,7 +273,10 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 			return nullptr;
 		}
 	}
-	StaticMesh->GetStaticMaterials().Add(FStaticMaterial(Mat));
+	for (int32 S = 0; S < SlotCount; ++S)
+	{
+		StaticMesh->GetStaticMaterials().Add(FStaticMaterial(Mat));
+	}
 
 	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
 	BuildParams.bBuildSimpleCollision = false;

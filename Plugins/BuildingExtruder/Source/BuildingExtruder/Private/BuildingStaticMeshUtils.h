@@ -10,19 +10,20 @@ class UMaterialInterface;
 namespace BuildingStaticMeshUtils
 {
 	/**
-	 * Two-sided building material saved under /Game/BuildingExtruder/Materials.
-	 * Created once if missing; then loaded from disk.
+	 * Default building material under /Game/BuildingExtruder/Materials.
+	 * One-sided (outward normals) for correct lighting/shadows.
 	 */
 	UMaterialInterface* GetOrCreateBuildingMaterial(FString& OutError);
 
 	/**
-	 * Builds a UStaticMesh asset under PackagePath (e.g. /Game/BuildingExtruder/Meshes/BldgTile_0_0_Walls)
-	 * and saves the package so level references survive undo and map save.
+	 * Builds a UStaticMesh asset with NumMaterialSlots sections.
+	 * Triangles use Mesh.TriangleMaterialIndices; unused slots still exist so materials can be assigned later.
 	 */
 	UStaticMesh* CreatePersistentStaticMesh(
 		const FString& PackagePath,
 		const FString& AssetName,
 		const FExtrudedPrismMesh& Mesh,
 		UMaterialInterface* Material,
+		int32 NumMaterialSlots,
 		FString& OutError);
 }

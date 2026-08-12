@@ -8,14 +8,21 @@ struct FExtrudedPrismMesh
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
 	TArray<FVector2D> UVs;
+
+	/** One entry per triangle (Triangles.Num()/3). Material slot / section index. */
+	TArray<int32> TriangleMaterialIndices;
 };
 
 namespace BuildingExtrudeUtils
 {
+	/** Assigns every triangle in the mesh to MaterialSlotIndex. */
+	void AssignAllTrianglesMaterialSlot(FExtrudedPrismMesh& Mesh, int32 MaterialSlotIndex);
+
 	/**
 	 * Builds separate wall+floor and roof meshes from matching base/top rings in actor-local space.
 	 * Triangulates using base ring XY (ear clipping). Side faces connect base[i]→top[i].
 	 * WallsAndFloor = bottom cap + vertical sides. Roof = top cap only.
+	 * Normals face outward; UVs use MetersPerUv density.
 	 */
 	bool BuildPrismPartsFromRings(
 		const TArray<FVector>& BaseRingLocal,

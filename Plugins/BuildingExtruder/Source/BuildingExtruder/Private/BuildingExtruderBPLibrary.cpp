@@ -145,6 +145,8 @@ namespace
 		Combined.Normals.Reserve(Combined.Normals.Num() + LocalMesh.Normals.Num());
 		Combined.UVs.Reserve(Combined.UVs.Num() + LocalMesh.UVs.Num());
 		Combined.Triangles.Reserve(Combined.Triangles.Num() + LocalMesh.Triangles.Num());
+		Combined.TriangleMaterialIndices.Reserve(
+			Combined.TriangleMaterialIndices.Num() + LocalMesh.TriangleMaterialIndices.Num());
 
 		for (const FVector& V : LocalMesh.Vertices)
 		{
@@ -152,6 +154,7 @@ namespace
 		}
 		Combined.Normals.Append(LocalMesh.Normals);
 		Combined.UVs.Append(LocalMesh.UVs);
+		Combined.TriangleMaterialIndices.Append(LocalMesh.TriangleMaterialIndices);
 		for (const int32 Index : LocalMesh.Triangles)
 		{
 			Combined.Triangles.Add(Index + VertexOffset);
@@ -232,6 +235,7 @@ namespace
 		const FString& ActorLabel,
 		const FString& EditorFolderPath,
 		UMaterialInterface* Material,
+		int32 NumMaterialSlots,
 		const TArray<FName>& ExtraTags,
 		AStaticMeshActor*& OutActor,
 		FString& OutError)
@@ -254,6 +258,7 @@ namespace
 		LocalMesh.Normals = WorldMesh.Normals;
 		LocalMesh.UVs = WorldMesh.UVs;
 		LocalMesh.Triangles = WorldMesh.Triangles;
+		LocalMesh.TriangleMaterialIndices = WorldMesh.TriangleMaterialIndices;
 		LocalMesh.Vertices.Reserve(WorldMesh.Vertices.Num());
 		for (const FVector& V : WorldMesh.Vertices)
 		{
@@ -266,6 +271,7 @@ namespace
 			AssetName,
 			LocalMesh,
 			Material,
+			NumMaterialSlots,
 			OutError);
 		if (!StaticMesh)
 		{
@@ -316,13 +322,18 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
 	const FString& TileIndices,
-	float MetersPerUv)
+	float MetersPerUv,
+	int32 WallMaterialSlotCount,
+	int32 RoofMaterialSlotCount,
+	int32 MaterialRandomSeed)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
 	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("RELATIVE_F") : HeightFieldName;
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.01);
+	const int32 WallSlots = FMath::Clamp(WallMaterialSlotCount, 1, 64);
+	const int32 RoofSlots = FMath::Clamp(RoofMaterialSlotCount, 1, 64);
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
@@ -331,14 +342,18 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' targetTiles=%d tileFilter='%s' metersPerUv=%.3f"),
+		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' targetTiles=%d tileFilter='%s' "
+			 "metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d"),
 		*CleanInputPath,
 		*CleanFbxPath,
 		*AltitudeField,
 		*HeightField,
 		TargetTileCount,
 		*TileIndices,
-		UvMeters);
+		UvMeters,
+		WallSlots,
+		RoofSlots,
+		MaterialRandomSeed);
 
 	if (CleanFbxPath.IsEmpty())
 	{
@@ -637,6 +652,16 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString WallsFolder = FolderPath.IsEmpty() ? FString(TEXT("Walls")) : (FolderPath + TEXT("/Walls"));
 	const FString RoofFolder = FolderPath.IsEmpty() ? FString(TEXT("Roofs")) : (FolderPath + TEXT("/Roofs"));
 
+	FRandomStream MaterialRng;
+	if (MaterialRandomSeed == 0)
+	{
+		MaterialRng.GenerateNewSeed();
+	}
+	else
+	{
+		MaterialRng.Initialize(MaterialRandomSeed);
+	}
+
 	for (int32 TileY = 0; TileY < TilesY; ++TileY)
 	{
 		for (int32 TileX = 0; TileX < TilesX; ++TileX)
@@ -700,6 +725,12 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					continue;
 				}
 
+				// Same building -> same wall slot and same roof slot; random across buildings.
+				const int32 WallSlot = MaterialRng.RandRange(0, WallSlots - 1);
+				const int32 RoofSlot = MaterialRng.RandRange(0, RoofSlots - 1);
+				BuildingExtrudeUtils::AssignAllTrianglesMaterialSlot(BuildingWalls, WallSlot);
+				BuildingExtrudeUtils::AssignAllTrianglesMaterialSlot(BuildingRoof, RoofSlot);
+
 				AppendWorldMesh(TileWallsMesh, BuildingWalls, FVector::ZeroVector);
 				AppendWorldMesh(TileRoofMesh, BuildingRoof, FVector::ZeroVector);
 				++BuildingsMeshed;
@@ -723,6 +754,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					WallsLabel,
 					WallsFolder,
 					CorrectMaterial,
+					WallSlots,
 					WallsTags,
 					WallsActor,
 					SpawnError))
@@ -738,6 +770,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					RoofLabel,
 					RoofFolder,
 					CorrectMaterial,
+					RoofSlots,
 					RoofTags,
 					RoofActor,
 					SpawnError))

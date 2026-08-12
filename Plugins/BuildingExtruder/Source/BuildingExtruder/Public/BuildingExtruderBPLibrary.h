@@ -61,7 +61,10 @@ public:
 	 * @param EditorFolderPath World Outliner folder.
 	 * @param TargetTileCount Exact tile slot count; XxY chosen from factor pairs for square cells.
 	 * @param TileIndices Optional comma-separated linear tile indices (Y*TilesX+X), e.g. "0,6,12".
-	 * @param MetersPerUv Texture mapping scale in meters per UV unit (applies to walls and roof/floor caps).
+	 * @param MetersPerUv Texture mapping scale in meters per UV unit (walls and roof/floor).
+	 * @param WallMaterialSlotCount Number of material slots on wall/floor meshes (random per building).
+	 * @param RoofMaterialSlotCount Number of material slots on roof meshes (random per building).
+	 * @param MaterialRandomSeed RNG for material slots; 0 = non-deterministic each run.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -74,7 +77,10 @@ public:
 			CPP_Default_EditorFolderPath = "ExtrudedBuildings",
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_TileIndices = "",
-			CPP_Default_MetersPerUv = "3.0"))
+			CPP_Default_MetersPerUv = "3.0",
+			CPP_Default_WallMaterialSlotCount = "1",
+			CPP_Default_RoofMaterialSlotCount = "1",
+			CPP_Default_MaterialRandomSeed = "0"))
 	static FBuildingExtrudeResult ImportAndExtrudeBuildingsFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -85,5 +91,8 @@ public:
 		const FString& EditorFolderPath,
 		int32 TargetTileCount,
 		const FString& TileIndices,
-		float MetersPerUv);
+		float MetersPerUv,
+		int32 WallMaterialSlotCount,
+		int32 RoofMaterialSlotCount,
+		int32 MaterialRandomSeed);
 };
