@@ -140,21 +140,19 @@ namespace
 
 	float GetMeshLODScreenSize(const UStaticMesh* Mesh, int32 LODIndex)
 	{
-		if (!Mesh)
+		if (!Mesh || LODIndex < 0 || LODIndex >= Mesh->GetNumLODs())
 		{
 			return 0.01f;
 		}
 
 		// Prefer cooked render data screen sizes when available.
+		// UE 5.1: ScreenSize is a fixed array (not TArray), so no IsValidIndex.
 		if (const FStaticMeshRenderData* RenderData = Mesh->GetRenderData())
 		{
-			if (RenderData->ScreenSize.IsValidIndex(LODIndex))
+			const float ScreenSize = RenderData->ScreenSize[LODIndex].Default;
+			if (ScreenSize > KINDA_SMALL_NUMBER)
 			{
-				const float ScreenSize = RenderData->ScreenSize[LODIndex].Default;
-				if (ScreenSize > KINDA_SMALL_NUMBER)
-				{
-					return ScreenSize;
-				}
+				return ScreenSize;
 			}
 		}
 
@@ -170,7 +168,7 @@ namespace
 #endif
 
 		// Fallback: each successive LOD roughly halves screen size.
-		return FMath::Pow(0.5f, static_cast<float>(FMath::Max(LODIndex, 0)));
+		return FMath::Pow(0.5f, static_cast<float>(LODIndex));
 	}
 
 	/** Approximate camera distance (cm) where the mesh would switch to the given LOD. */
