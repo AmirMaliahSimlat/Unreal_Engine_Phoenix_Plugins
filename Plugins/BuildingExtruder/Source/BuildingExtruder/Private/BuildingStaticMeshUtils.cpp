@@ -121,14 +121,16 @@ namespace
 			}
 			Slot = FMath::Clamp(Slot, 0, SlotCount - 1);
 
+			// Mesh was coming out inside-out (visible from inside only). Reverse winding
+			// and normals together so front faces + shading both point outside.
 			TArray<FVertexInstanceID, TInlineAllocator<3>> CornerIds;
-			const int32 Indices[3] = { I0, I1, I2 };
+			const int32 Indices[3] = { I0, I2, I1 };
 			for (int32 C = 0; C < 3; ++C)
 			{
 				const int32 Vi = Indices[C];
 				const FVertexInstanceID InstanceId = MeshDescription.CreateVertexInstance(VertexIds[Vi]);
 				InstanceNormals[InstanceId] = Mesh.Normals.IsValidIndex(Vi)
-					? FVector3f(Mesh.Normals[Vi])
+					? -FVector3f(Mesh.Normals[Vi])
 					: FVector3f::UpVector;
 				InstanceUVs.Set(InstanceId, 0, Mesh.UVs.IsValidIndex(Vi)
 					? FVector2f(Mesh.UVs[Vi])
