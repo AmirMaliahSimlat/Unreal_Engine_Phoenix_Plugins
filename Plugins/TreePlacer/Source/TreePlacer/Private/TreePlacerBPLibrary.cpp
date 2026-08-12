@@ -14,6 +14,7 @@
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
 #include "Misc/ScopedSlowTask.h"
+#include "StaticMeshResources.h"
 
 namespace
 {
@@ -118,6 +119,135 @@ namespace
 		return true;
 	}
 
+	int32 GetMeshMaxLODIndex(const UStaticMesh* Mesh)
+	{
+		if (!Mesh)
+		{
+			return 0;
+		}
+		return FMath::Max(Mesh->GetNumLODs() - 1, 0);
+	}
+
+	int32 ResolveDisappearLOD(int32 RequestedLOD, int32 MaxLOD)
+	{
+		// Negative or past the last available LOD → disappear at the mesh maximum LOD.
+		if (RequestedLOD < 0 || RequestedLOD > MaxLOD)
+		{
+			return MaxLOD;
+		}
+		return RequestedLOD;
+	}
+
+	float GetMeshLODScreenSize(const UStaticMesh* Mesh, int32 LODIndex)
+	{
+		if (!Mesh)
+		{
+			return 0.01f;
+		}
+
+		// Prefer cooked render data screen sizes when available.
+		if (const FStaticMeshRenderData* RenderData = Mesh->GetRenderData())
+		{
+			if (RenderData->ScreenSize.IsValidIndex(LODIndex))
+			{
+				const float ScreenSize = RenderData->ScreenSize[LODIndex].Default;
+				if (ScreenSize > KINDA_SMALL_NUMBER)
+				{
+					return ScreenSize;
+				}
+			}
+		}
+
+#if WITH_EDITORONLY_DATA
+		if (Mesh->GetNumSourceModels() > LODIndex)
+		{
+			const float ScreenSize = Mesh->GetSourceModel(LODIndex).ScreenSize.Default;
+			if (ScreenSize > KINDA_SMALL_NUMBER)
+			{
+				return ScreenSize;
+			}
+		}
+#endif
+
+		// Fallback: each successive LOD roughly halves screen size.
+		return FMath::Pow(0.5f, static_cast<float>(FMath::Max(LODIndex, 0)));
+	}
+
+	/** Approximate camera distance (cm) where the mesh would switch to the given LOD. */
+	int32 EstimateCullDistanceForLOD(const UStaticMesh* Mesh, int32 LODIndex)
+	{
+		if (!Mesh)
+		{
+			return 0;
+		}
+
+		const float Radius = FMath::Max(Mesh->GetBounds().SphereRadius, 1.0f);
+		float ScreenSize = GetMeshLODScreenSize(Mesh, LODIndex);
+		// LOD0 screen size is often ~1.0 (near camera). Clamping avoids near-zero cull
+		// distances when disappearing at early/max LODs on simple meshes.
+		ScreenSize = FMath::Clamp(ScreenSize, 1.0e-4f, 0.08f);
+		const float DistanceCm = Radius / ScreenSize;
+		return FMath::Max(FMath::CeilToInt(DistanceCm), 1);
+	}
+
+	void ConfigureHismCullDistance(UHierarchicalInstancedStaticMeshComponent* HISM, int32 EndCullDistanceCm)
+	{
+		if (!HISM)
+		{
+			return;
+		}
+		const int32 EndDist = FMath::Max(EndCullDistanceCm, 0);
+		const int32 StartDist = (EndDist > 0)
+			? FMath::Max(0, EndDist - FMath::Max(EndDist / 20, 100))
+			: 0;
+		HISM->InstanceStartCullDistance = StartDist;
+		HISM->InstanceEndCullDistance = EndDist;
+	}
+
+	UHierarchicalInstancedStaticMeshComponent* CreateTreeHism(
+		AActor& Actor,
+		USceneComponent& Root,
+		UStaticMesh* Mesh,
+		FName CompName,
+		bool bVisibleMesh,
+		bool bCastShadows,
+		int32 EndCullDistanceCm,
+		const TArray<FTransform>& WorldTransforms)
+	{
+		UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(
+			&Actor,
+			CompName,
+			RF_Transactional);
+		HISM->CreationMethod = EComponentCreationMethod::Instance;
+		HISM->SetupAttachment(&Root);
+		HISM->SetStaticMesh(Mesh);
+		HISM->SetMobility(EComponentMobility::Static);
+		HISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		HISM->SetGenerateOverlapEvents(false);
+		HISM->bHasPerInstanceHitProxies = false;
+
+		HISM->SetVisibility(bVisibleMesh, /*bPropagateToChildren*/ false);
+		HISM->SetHiddenInGame(!bVisibleMesh);
+		HISM->SetCastShadow(bCastShadows);
+		HISM->bCastHiddenShadow = bCastShadows && !bVisibleMesh;
+
+		ConfigureHismCullDistance(HISM, EndCullDistanceCm);
+
+		Actor.AddInstanceComponent(HISM);
+		HISM->RegisterComponent();
+
+		for (const FTransform& Xform : WorldTransforms)
+		{
+			HISM->AddInstance(Xform, /*bWorldSpace*/ true);
+		}
+#if ENGINE_MAJOR_VERSION >= 5
+		HISM->BuildTreeIfOutdated(/*bAsync*/ false, /*bForceUpdate*/ true);
+#endif
+		HISM->MarkRenderStateDirty();
+		HISM->Modify();
+		return HISM;
+	}
+
 	bool SpawnTreeTileActor(
 		UWorld& World,
 		const FString& ActorLabel,
@@ -125,6 +255,8 @@ namespace
 		const TArray<UStaticMesh*>& TreeMeshes,
 		const TArray<TArray<FTransform>>& TransformsPerMesh,
 		const FVector& TileOrigin,
+		int32 TreeDisappearLOD,
+		int32 ShadowDisappearLOD,
 		AActor*& OutActor,
 		FString& OutError)
 	{
@@ -172,38 +304,64 @@ namespace
 		for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
 		{
 			const TArray<FTransform>& Transforms = TransformsPerMesh[MeshIndex];
-			if (Transforms.Num() == 0 || !TreeMeshes[MeshIndex])
+			UStaticMesh* Mesh = TreeMeshes[MeshIndex];
+			if (Transforms.Num() == 0 || !Mesh)
 			{
 				continue;
 			}
 
-			const FName CompName = *FString::Printf(TEXT("HISM_%d"), MeshIndex);
-			UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(
-				Actor,
-				CompName,
-				RF_Transactional);
-			// Instance creation method + AddInstanceComponent are required so HISM
-			// components (and their instance transforms) serialize with the level.
-			HISM->CreationMethod = EComponentCreationMethod::Instance;
-			HISM->SetupAttachment(Root);
-			HISM->SetStaticMesh(TreeMeshes[MeshIndex]);
-			HISM->SetMobility(EComponentMobility::Static);
-			HISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			HISM->SetGenerateOverlapEvents(false);
-			HISM->bHasPerInstanceHitProxies = false;
-			Actor->AddInstanceComponent(HISM);
-			HISM->RegisterComponent();
+			const int32 MaxLOD = GetMeshMaxLODIndex(Mesh);
+			const int32 TreeLOD = ResolveDisappearLOD(TreeDisappearLOD, MaxLOD);
+			const int32 ShadowLOD = ResolveDisappearLOD(ShadowDisappearLOD, MaxLOD);
+			const int32 TreeCullCm = EstimateCullDistanceForLOD(Mesh, TreeLOD);
+			const int32 ShadowCullCm = EstimateCullDistanceForLOD(Mesh, ShadowLOD);
 
-			// World-space instances: same Unreal positions as Building Extruder Cesium placement.
-			for (const FTransform& Xform : Transforms)
+			UE_LOG(
+				LogTreePlacer,
+				Verbose,
+				TEXT("HISM mesh '%s': maxLOD=%d treeLOD=%d (cull~%dcm) shadowLOD=%d (cull~%dcm)"),
+				*Mesh->GetName(),
+				MaxLOD,
+				TreeLOD,
+				TreeCullCm,
+				ShadowLOD,
+				ShadowCullCm);
+
+			if (TreeCullCm == ShadowCullCm)
 			{
-				HISM->AddInstance(Xform, /*bWorldSpace*/ true);
+				// Same cutoff: one component draws mesh + shadows.
+				CreateTreeHism(
+					*Actor,
+					*Root,
+					Mesh,
+					*FString::Printf(TEXT("HISM_%d"), MeshIndex),
+					/*bVisibleMesh*/ true,
+					/*bCastShadows*/ true,
+					TreeCullCm,
+					Transforms);
 			}
-#if ENGINE_MAJOR_VERSION >= 5
-			HISM->BuildTreeIfOutdated(/*bAsync*/ false, /*bForceUpdate*/ true);
-#endif
-			HISM->MarkRenderStateDirty();
-			HISM->Modify();
+			else
+			{
+				// Split so mesh and shadows can disappear at different LODs/distances.
+				CreateTreeHism(
+					*Actor,
+					*Root,
+					Mesh,
+					*FString::Printf(TEXT("HISM_%d_Mesh"), MeshIndex),
+					/*bVisibleMesh*/ true,
+					/*bCastShadows*/ false,
+					TreeCullCm,
+					Transforms);
+				CreateTreeHism(
+					*Actor,
+					*Root,
+					Mesh,
+					*FString::Printf(TEXT("HISM_%d_Shadow"), MeshIndex),
+					/*bVisibleMesh*/ false,
+					/*bCastShadows*/ true,
+					ShadowCullCm,
+					Transforms);
+			}
 		}
 
 		Actor->Modify();
@@ -222,7 +380,9 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
 	const FString& TileIndices,
-	int32 RandomSeed)
+	int32 RandomSeed,
+	int32 TreeDisappearLOD,
+	int32 ShadowDisappearLOD)
 {
 	FTreePlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -233,13 +393,15 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d"),
+		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeLOD=%d shadowLOD=%d"),
 		*CleanInputPath,
 		*TreeMeshFolder,
 		*AltitudeField,
 		TargetTileCount,
 		*TileIndices,
-		RandomSeed);
+		RandomSeed,
+		TreeDisappearLOD,
+		ShadowDisappearLOD);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -482,6 +644,8 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 					TreeMeshes,
 					TransformsPerMesh,
 					TileOrigin,
+					TreeDisappearLOD,
+					ShadowDisappearLOD,
 					TileActor,
 					SpawnError))
 			{
