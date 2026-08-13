@@ -186,6 +186,517 @@ namespace
 			Combined.Triangles.Add(Index + VertexOffset);
 		}
 	}
+
+	void AddQuadWithUV(
+		FExtrudedPrismMesh& Mesh,
+		const FVector& A,
+		const FVector& B,
+		const FVector& C,
+		const FVector& D,
+		const FVector2D& UvA,
+		const FVector2D& UvB,
+		const FVector2D& UvC,
+		const FVector2D& UvD,
+		const FVector& DesiredOutwardDir)
+	{
+		AddTriWithUV(Mesh, A, B, C, UvA, UvB, UvC, DesiredOutwardDir);
+		AddTriWithUV(Mesh, A, C, D, UvA, UvC, UvD, DesiredOutwardDir);
+	}
+
+	FVector2D InwardNormalXY(const FVector& From, const FVector& To, bool bCCW)
+	{
+		const double Dx = To.X - From.X;
+		const double Dy = To.Y - From.Y;
+		const double Len = FMath::Sqrt(Dx * Dx + Dy * Dy);
+		if (Len < 1.0e-9)
+		{
+			return FVector2D::ZeroVector;
+		}
+		if (bCCW)
+		{
+			return FVector2D(-Dy / Len, Dx / Len);
+		}
+		return FVector2D(Dy / Len, -Dx / Len);
+	}
+
+	FVector2D VertexOffsetVelXY(const FVector& Prev, const FVector& Curr, const FVector& Next, bool bCCW)
+	{
+		const FVector2D N0 = InwardNormalXY(Prev, Curr, bCCW);
+		const FVector2D N1 = InwardNormalXY(Curr, Next, bCCW);
+		if (N0.IsNearlyZero() && N1.IsNearlyZero())
+		{
+			return FVector2D::ZeroVector;
+		}
+		if (N0.IsNearlyZero())
+		{
+			return N1;
+		}
+		if (N1.IsNearlyZero())
+		{
+			return N0;
+		}
+		const double Denom = 1.0 + FVector2D::DotProduct(N0, N1);
+		if (FMath::Abs(Denom) < 1.0e-6)
+		{
+			return (N0 + N1) * 0.5;
+		}
+		return (N0 + N1) / Denom;
+	}
+
+	double RingAreaAbsXY(const TArray<FVector>& Ring)
+	{
+		return FMath::Abs(SignedArea2XY(Ring)) * 0.5;
+	}
+
+	double RingPerimeterXY(const TArray<FVector>& Ring)
+	{
+		double Peri = 0.0;
+		for (int32 I = 0; I < Ring.Num(); ++I)
+		{
+			Peri += FVector::Dist2D(Ring[I], Ring[(I + 1) % Ring.Num()]);
+		}
+		return Peri;
+	}
+
+	double InradiusEstimateXY(const TArray<FVector>& Ring)
+	{
+		const double Peri = RingPerimeterXY(Ring);
+		if (Peri < 1.0e-6)
+		{
+			return 0.0;
+		}
+		return (2.0 * RingAreaAbsXY(Ring)) / Peri;
+	}
+
+	bool InsetRingXY(const TArray<FVector>& Ring, double Width, TArray<FVector>& OutInset)
+	{
+		OutInset.Reset();
+		const int32 N = Ring.Num();
+		if (N < 3 || Width <= 1.0e-4)
+		{
+			return false;
+		}
+		const bool bCCW = SignedArea2XY(Ring) > 0.0;
+		OutInset.SetNum(N);
+		for (int32 I = 0; I < N; ++I)
+		{
+			const FVector& Prev = Ring[(I + N - 1) % N];
+			const FVector& Curr = Ring[I];
+			const FVector& Next = Ring[(I + 1) % N];
+			const FVector2D Vel = VertexOffsetVelXY(Prev, Curr, Next, bCCW);
+			if (Vel.SizeSquared() > 1.0e8)
+			{
+				return false;
+			}
+			OutInset[I] = FVector(Curr.X + Vel.X * Width, Curr.Y + Vel.Y * Width, Curr.Z);
+		}
+
+		const double AreaIn = SignedArea2XY(OutInset);
+		const double AreaOut = SignedArea2XY(Ring);
+		if (AreaIn * AreaOut <= 0.0 || FMath::Abs(AreaIn) < 1.0e-2)
+		{
+			return false;
+		}
+		for (int32 I = 0; I < N; ++I)
+		{
+			const FVector2D E0(Ring[(I + 1) % N].X - Ring[I].X, Ring[(I + 1) % N].Y - Ring[I].Y);
+			const FVector2D E1(
+				OutInset[(I + 1) % N].X - OutInset[I].X,
+				OutInset[(I + 1) % N].Y - OutInset[I].Y);
+			if (FVector2D::DotProduct(E0, E1) <= 0.0)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	FVector PointOnEavePlane(const FVector2D& XY, const FVector& PlanePoint, const FVector& Up)
+	{
+		FVector P(XY.X, XY.Y, PlanePoint.Z);
+		if (FMath::Abs(Up.Z) > 1.0e-6)
+		{
+			const double Dz =
+				-((XY.X - PlanePoint.X) * Up.X + (XY.Y - PlanePoint.Y) * Up.Y) / Up.Z;
+			P.Z = PlanePoint.Z + Dz;
+		}
+		return P;
+	}
+
+	struct FRoofTri2D
+	{
+		FVector2D A, B, C;
+		double DA = 0.0;
+		double DB = 0.0;
+		double DC = 0.0;
+	};
+
+	void AddRoofTri2D(
+		TArray<FRoofTri2D>& Tris,
+		const FVector2D& A,
+		double DA,
+		const FVector2D& B,
+		double DB,
+		const FVector2D& C,
+		double DC)
+	{
+		const double Cross = (B.X - A.X) * (C.Y - A.Y) - (B.Y - A.Y) * (C.X - A.X);
+		if (FMath::Abs(Cross) < 1.0e-8)
+		{
+			return;
+		}
+		FRoofTri2D Tri;
+		Tri.A = A;
+		Tri.B = B;
+		Tri.C = C;
+		Tri.DA = DA;
+		Tri.DB = DB;
+		Tri.DC = DC;
+		Tris.Add(Tri);
+	}
+
+	struct FWaveVert
+	{
+		FVector2D P0;
+		FVector2D Vel;
+		int32 LeftEdge = 0;
+		int32 RightEdge = 0;
+	};
+
+	FVector2D WaveAt(const FWaveVert& V, double D)
+	{
+		return V.P0 + V.Vel * D;
+	}
+
+	double Cross2(const FVector2D& U, const FVector2D& V)
+	{
+		return U.X * V.Y - U.Y * V.X;
+	}
+
+	bool WaveMeet(const FWaveVert& A, const FWaveVert& B, double DMin, double& OutD, FVector2D& OutP)
+	{
+		const FVector2D RelV = A.Vel - B.Vel;
+		const double Denom = RelV.SizeSquared();
+		if (Denom < 1.0e-14)
+		{
+			return false;
+		}
+		const double D = FVector2D::DotProduct(B.P0 - A.P0, RelV) / Denom;
+		if (D <= DMin + 1.0e-7)
+		{
+			return false;
+		}
+		const FVector2D PA = WaveAt(A, D);
+		const FVector2D PB = WaveAt(B, D);
+		if ((PA - PB).SizeSquared() > 1.0e-4)
+		{
+			return false;
+		}
+		OutD = D;
+		OutP = (PA + PB) * 0.5;
+		return true;
+	}
+
+	bool WaveHitEdge(
+		const FWaveVert& V,
+		const FWaveVert& E0,
+		const FWaveVert& E1,
+		double DMin,
+		double& OutD,
+		FVector2D& OutP)
+	{
+		const FVector2D AB = V.P0 - E0.P0;
+		const FVector2D Vab = V.Vel - E0.Vel;
+		const FVector2D C = E1.P0 - E0.P0;
+		const FVector2D Vd = E1.Vel - E0.Vel;
+		const double Qa = Cross2(Vab, Vd);
+		const double Qb = Cross2(AB, Vd) + Cross2(Vab, C);
+		const double Qc = Cross2(AB, C);
+		double Roots[2];
+		int32 NumRoots = 0;
+		if (FMath::Abs(Qa) < 1.0e-14)
+		{
+			if (FMath::Abs(Qb) < 1.0e-14)
+			{
+				return false;
+			}
+			Roots[NumRoots++] = -Qc / Qb;
+		}
+		else
+		{
+			const double Disc = Qb * Qb - 4.0 * Qa * Qc;
+			if (Disc < 0.0)
+			{
+				return false;
+			}
+			const double S = FMath::Sqrt(Disc);
+			Roots[NumRoots++] = (-Qb - S) / (2.0 * Qa);
+			Roots[NumRoots++] = (-Qb + S) / (2.0 * Qa);
+		}
+
+		bool bFound = false;
+		double BestD = 0.0;
+		FVector2D BestP = FVector2D::ZeroVector;
+		for (int32 R = 0; R < NumRoots; ++R)
+		{
+			const double D = Roots[R];
+			if (D <= DMin + 1.0e-7)
+			{
+				continue;
+			}
+			const FVector2D P = WaveAt(V, D);
+			const FVector2D Q0 = WaveAt(E0, D);
+			const FVector2D Q1 = WaveAt(E1, D);
+			const FVector2D Edge = Q1 - Q0;
+			const double EdgeLenSq = Edge.SizeSquared();
+			if (EdgeLenSq < 1.0e-12)
+			{
+				continue;
+			}
+			const double U = FVector2D::DotProduct(P - Q0, Edge) / EdgeLenSq;
+			if (U < 1.0e-4 || U > 1.0 - 1.0e-4)
+			{
+				continue;
+			}
+			const FVector2D Closest = Q0 + Edge * U;
+			if ((P - Closest).SizeSquared() > 1.0e-4)
+			{
+				continue;
+			}
+			if (!bFound || D < BestD)
+			{
+				bFound = true;
+				BestD = D;
+				BestP = P;
+			}
+		}
+		if (!bFound)
+		{
+			return false;
+		}
+		OutD = BestD;
+		OutP = BestP;
+		return true;
+	}
+
+	FWaveVert MakeWaveVert(
+		const FVector2D& PAtD,
+		double D,
+		const FVector2D& LeftN,
+		const FVector2D& RightN,
+		int32 LeftEdge,
+		int32 RightEdge)
+	{
+		const double Denom = 1.0 + FVector2D::DotProduct(LeftN, RightN);
+		const FVector2D Vel = (FMath::Abs(Denom) < 1.0e-6)
+			? (LeftN + RightN) * 0.5
+			: (LeftN + RightN) / Denom;
+		FWaveVert W;
+		W.Vel = Vel;
+		W.P0 = PAtD - Vel * D;
+		W.LeftEdge = LeftEdge;
+		W.RightEdge = RightEdge;
+		return W;
+	}
+
+	bool IsReflexWave(const TArray<FWaveVert>& Loop, int32 I, double D, bool bCCW)
+	{
+		const int32 N = Loop.Num();
+		const FVector2D Prev = WaveAt(Loop[(I + N - 1) % N], D);
+		const FVector2D Curr = WaveAt(Loop[I], D);
+		const FVector2D Next = WaveAt(Loop[(I + 1) % N], D);
+		const double CrossVal = (Curr.X - Prev.X) * (Next.Y - Curr.Y) - (Curr.Y - Prev.Y) * (Next.X - Curr.X);
+		return bCCW ? (CrossVal < -1.0e-8) : (CrossVal > 1.0e-8);
+	}
+
+	void EmitLoft(TArray<FRoofTri2D>& OutTris, const TArray<FWaveVert>& Loop, double D0, double D1)
+	{
+		if (D1 <= D0 + 1.0e-9)
+		{
+			return;
+		}
+		const int32 N = Loop.Num();
+		for (int32 I = 0; I < N; ++I)
+		{
+			const int32 J = (I + 1) % N;
+			const FVector2D A = WaveAt(Loop[I], D0);
+			const FVector2D B = WaveAt(Loop[J], D0);
+			const FVector2D C = WaveAt(Loop[J], D1);
+			const FVector2D Dv = WaveAt(Loop[I], D1);
+			AddRoofTri2D(OutTris, A, D0, B, D0, C, D1);
+			AddRoofTri2D(OutTris, A, D0, C, D1, Dv, D1);
+		}
+	}
+
+	bool ShrinkLoop(
+		TArray<FWaveVert> Loop,
+		double DCurrent,
+		bool bCCW,
+		const TArray<FVector2D>& EdgeNormals,
+		TArray<FRoofTri2D>& OutTris,
+		int32 Depth)
+	{
+		if (Depth > 64 || Loop.Num() < 3)
+		{
+			return true;
+		}
+
+		for (int32 Guard = 0; Guard < 256 && Loop.Num() >= 3; ++Guard)
+		{
+			double BestD = TNumericLimits<double>::Max();
+			int32 EventType = 0;
+			int32 IA = INDEX_NONE;
+			int32 IB = INDEX_NONE;
+			FVector2D HitP = FVector2D::ZeroVector;
+			const int32 N = Loop.Num();
+
+			for (int32 I = 0; I < N; ++I)
+			{
+				const int32 J = (I + 1) % N;
+				double D = 0.0;
+				FVector2D P;
+				if (WaveMeet(Loop[I], Loop[J], DCurrent, D, P) && D < BestD)
+				{
+					BestD = D;
+					EventType = 1;
+					IA = I;
+					IB = J;
+					HitP = P;
+				}
+			}
+			for (int32 I = 0; I < N; ++I)
+			{
+				if (!IsReflexWave(Loop, I, DCurrent, bCCW))
+				{
+					continue;
+				}
+				for (int32 E = 0; E < N; ++E)
+				{
+					const int32 E1 = (E + 1) % N;
+					if (E == I || E1 == I || E == (I + N - 1) % N)
+					{
+						continue;
+					}
+					double D = 0.0;
+					FVector2D P;
+					if (WaveHitEdge(Loop[I], Loop[E], Loop[E1], DCurrent, D, P) && D < BestD)
+					{
+						BestD = D;
+						EventType = 2;
+						IA = I;
+						IB = E;
+						HitP = P;
+					}
+				}
+			}
+
+			if (EventType == 0 || !FMath::IsFinite(BestD) || BestD > 1.0e8)
+			{
+				break;
+			}
+
+			EmitLoft(OutTris, Loop, DCurrent, BestD);
+
+			if (EventType == 1)
+			{
+				TArray<FWaveVert> NextLoop;
+				NextLoop.Reserve(N - 1);
+				for (int32 I = 0; I < N; ++I)
+				{
+					if (I == IA)
+					{
+						const int32 Left = Loop[IA].LeftEdge;
+						const int32 Right = Loop[IB].RightEdge;
+						NextLoop.Add(MakeWaveVert(
+							HitP, BestD, EdgeNormals[Left], EdgeNormals[Right], Left, Right));
+					}
+					else if (I != IB)
+					{
+						NextLoop.Add(Loop[I]);
+					}
+				}
+				Loop = MoveTemp(NextLoop);
+				DCurrent = BestD;
+			}
+			else
+			{
+				const int32 E1 = (IB + 1) % N;
+				TArray<FWaveVert> LoopA;
+				TArray<FWaveVert> LoopB;
+				{
+					int32 K = (IA + 1) % N;
+					int32 Walk = 0;
+					while (K != E1 && Walk++ < N + 2)
+					{
+						LoopA.Add(Loop[K]);
+						K = (K + 1) % N;
+					}
+					LoopA.Add(MakeWaveVert(
+						HitP,
+						BestD,
+						EdgeNormals[Loop[IB].RightEdge],
+						EdgeNormals[Loop[IA].RightEdge],
+						Loop[IB].RightEdge,
+						Loop[IA].RightEdge));
+				}
+				{
+					int32 K = E1;
+					int32 Walk = 0;
+					while (K != IA && Walk++ < N + 2)
+					{
+						LoopB.Add(Loop[K]);
+						K = (K + 1) % N;
+					}
+					LoopB.Add(MakeWaveVert(
+						HitP,
+						BestD,
+						EdgeNormals[Loop[IA].LeftEdge],
+						EdgeNormals[Loop[IB].RightEdge],
+						Loop[IA].LeftEdge,
+						Loop[IB].RightEdge));
+				}
+
+				bool bOk = true;
+				if (LoopA.Num() >= 3)
+				{
+					bOk = ShrinkLoop(MoveTemp(LoopA), BestD, bCCW, EdgeNormals, OutTris, Depth + 1) && bOk;
+				}
+				if (LoopB.Num() >= 3)
+				{
+					bOk = ShrinkLoop(MoveTemp(LoopB), BestD, bCCW, EdgeNormals, OutTris, Depth + 1) && bOk;
+				}
+				return bOk;
+			}
+		}
+
+		return OutTris.Num() > 0;
+	}
+
+	bool BuildHippedRoofTris(const TArray<FVector>& Top, TArray<FRoofTri2D>& OutTris)
+	{
+		OutTris.Reset();
+		const int32 N = Top.Num();
+		if (N < 3)
+		{
+			return false;
+		}
+		const bool bCCW = SignedArea2XY(Top) > 0.0;
+		TArray<FVector2D> EdgeNormals;
+		EdgeNormals.SetNum(N);
+		TArray<FWaveVert> Loop;
+		Loop.SetNum(N);
+		for (int32 I = 0; I < N; ++I)
+		{
+			const int32 J = (I + 1) % N;
+			EdgeNormals[I] = InwardNormalXY(Top[I], Top[J], bCCW);
+			const FVector& Prev = Top[(I + N - 1) % N];
+			Loop[I].P0 = FVector2D(Top[I].X, Top[I].Y);
+			Loop[I].Vel = VertexOffsetVelXY(Prev, Top[I], Top[J], bCCW);
+			Loop[I].LeftEdge = (I + N - 1) % N;
+			Loop[I].RightEdge = I;
+		}
+		return ShrinkLoop(MoveTemp(Loop), 0.0, bCCW, EdgeNormals, OutTris, 0) && OutTris.Num() > 0;
+	}
 }
 
 void BuildingExtrudeUtils::AssignAllTrianglesMaterialSlot(FExtrudedPrismMesh& Mesh, int32 MaterialSlotIndex)
@@ -340,6 +851,354 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		return false;
 	}
 	return true;
+}
+
+EBuildingRoofType BuildingExtrudeUtils::ResolveRoofType(
+	int32 RoofTypeCode,
+	int32 FlatIndex,
+	int32 HippedIndex,
+	int32 ParapetIndex)
+{
+	if (RoofTypeCode == HippedIndex)
+	{
+		return EBuildingRoofType::Hipped;
+	}
+	if (RoofTypeCode == ParapetIndex)
+	{
+		return EBuildingRoofType::Parapet;
+	}
+	if (RoofTypeCode == FlatIndex)
+	{
+		return EBuildingRoofType::Flat;
+	}
+	return EBuildingRoofType::Flat;
+}
+
+bool BuildingExtrudeUtils::BuildFlatRoofPartsFromRings(
+	const TArray<FVector>& BaseRingLocal,
+	const TArray<FVector>& TopRingLocal,
+	double MetersPerUv,
+	FExtrudedPrismMesh& OutWallsAndFloor,
+	FExtrudedPrismMesh& OutRoof,
+	FString& OutError)
+{
+	return BuildPrismPartsFromRings(
+		BaseRingLocal,
+		TopRingLocal,
+		MetersPerUv,
+		OutWallsAndFloor,
+		OutRoof,
+		OutError);
+}
+
+bool BuildingExtrudeUtils::BuildHippedRoofPartsFromRings(
+	const TArray<FVector>& BaseRingLocal,
+	const TArray<FVector>& TopRingLocal,
+	double MetersPerUv,
+	double HippedHeightMeters,
+	FExtrudedPrismMesh& OutWallsAndFloor,
+	FExtrudedPrismMesh& OutRoof,
+	FString& OutError)
+{
+	if (!BuildPrismPartsFromRings(
+			BaseRingLocal,
+			TopRingLocal,
+			MetersPerUv,
+			OutWallsAndFloor,
+			OutRoof,
+			OutError))
+	{
+		return false;
+	}
+
+	const double HeightCm = FMath::Max(HippedHeightMeters, 0.0) * 100.0;
+	if (HeightCm <= 1.0)
+	{
+		return true;
+	}
+
+	TArray<FVector> Base = BaseRingLocal;
+	TArray<FVector> Top = TopRingLocal;
+	StripClosingDuplicate(Base);
+	StripClosingDuplicate(Top);
+	if (Base.Num() != Top.Num() || Top.Num() < 3)
+	{
+		return true;
+	}
+
+	FVector Up(0, 0, 0);
+	for (int32 I = 0; I < Base.Num(); ++I)
+	{
+		Up += (Top[I] - Base[I]);
+	}
+	Up = Up.GetSafeNormal();
+	if (Up.IsNearlyZero())
+	{
+		Up = FVector::UpVector;
+	}
+
+	TArray<FRoofTri2D> Tris2D;
+	if (!BuildHippedRoofTris(Top, Tris2D))
+	{
+		UE_LOG(LogBuildingExtruder, Warning, TEXT("Hipped roof skeleton failed; keeping flat roof."));
+		return true;
+	}
+
+	double MaxD = 0.0;
+	for (const FRoofTri2D& Tri : Tris2D)
+	{
+		MaxD = FMath::Max(MaxD, FMath::Max(Tri.DA, FMath::Max(Tri.DB, Tri.DC)));
+	}
+	if (MaxD < 1.0e-3)
+	{
+		return true;
+	}
+
+	const double UvScaleCm = FMath::Max(MetersPerUv, 0.01) * 100.0;
+	double MinX = Top[0].X;
+	double MinY = Top[0].Y;
+	for (int32 I = 1; I < Top.Num(); ++I)
+	{
+		MinX = FMath::Min(MinX, static_cast<double>(Top[I].X));
+		MinY = FMath::Min(MinY, static_cast<double>(Top[I].Y));
+	}
+	auto CapUvFromXY = [MinX, MinY, UvScaleCm](const FVector2D& P) -> FVector2D
+	{
+		return FVector2D(
+			static_cast<float>((static_cast<double>(P.X) - MinX) / UvScaleCm),
+			static_cast<float>((static_cast<double>(P.Y) - MinY) / UvScaleCm));
+	};
+
+	const double Scale = HeightCm / MaxD;
+	FExtrudedPrismMesh HipRoof;
+	for (const FRoofTri2D& Tri : Tris2D)
+	{
+		const FVector A = PointOnEavePlane(Tri.A, Top[0], Up) + Up * (Tri.DA * Scale);
+		const FVector B = PointOnEavePlane(Tri.B, Top[0], Up) + Up * (Tri.DB * Scale);
+		const FVector C = PointOnEavePlane(Tri.C, Top[0], Up) + Up * (Tri.DC * Scale);
+		AddTriWithUV(HipRoof, A, B, C, CapUvFromXY(Tri.A), CapUvFromXY(Tri.B), CapUvFromXY(Tri.C), Up);
+	}
+	if (HipRoof.Triangles.Num() >= 3)
+	{
+		OutRoof = MoveTemp(HipRoof);
+	}
+	return true;
+}
+
+bool BuildingExtrudeUtils::BuildParapetRoofPartsFromRings(
+	const TArray<FVector>& BaseRingLocal,
+	const TArray<FVector>& TopRingLocal,
+	double MetersPerUv,
+	double ParapetHeightMeters,
+	double ParapetWidthMeters,
+	FExtrudedPrismMesh& OutWallsAndFloor,
+	FExtrudedPrismMesh& OutRoof,
+	FString& OutError)
+{
+	if (!BuildPrismPartsFromRings(
+			BaseRingLocal,
+			TopRingLocal,
+			MetersPerUv,
+			OutWallsAndFloor,
+			OutRoof,
+			OutError))
+	{
+		return false;
+	}
+
+	TArray<FVector> Base = BaseRingLocal;
+	TArray<FVector> Top = TopRingLocal;
+	StripClosingDuplicate(Base);
+	StripClosingDuplicate(Top);
+	if (Base.Num() != Top.Num() || Top.Num() < 3)
+	{
+		return true;
+	}
+
+	const double WidthCm = FMath::Max(ParapetWidthMeters, 0.0) * 100.0;
+	double HeightCm = FMath::Max(ParapetHeightMeters, 0.0) * 100.0;
+	if (WidthCm <= 1.0 || HeightCm <= 1.0)
+	{
+		return true;
+	}
+
+	FVector Up(0, 0, 0);
+	FVector Center(0, 0, 0);
+	double WallHeightCm = 0.0;
+	for (int32 I = 0; I < Base.Num(); ++I)
+	{
+		Up += (Top[I] - Base[I]);
+		Center += Base[I];
+		WallHeightCm += FVector::Distance(Base[I], Top[I]);
+	}
+	Up = Up.GetSafeNormal();
+	if (Up.IsNearlyZero())
+	{
+		Up = FVector::UpVector;
+	}
+	Center /= static_cast<double>(Base.Num());
+	WallHeightCm /= static_cast<double>(Base.Num());
+	HeightCm = FMath::Min(HeightCm, WallHeightCm * 0.95);
+	if (HeightCm <= 1.0)
+	{
+		return true;
+	}
+
+	const double Inradius = InradiusEstimateXY(Top);
+	if (WidthCm >= Inradius * 0.49)
+	{
+		UE_LOG(
+			LogBuildingExtruder,
+			Warning,
+			TEXT("Parapet width too large for footprint (width=%.1fcm, inradius~%.1fcm); using flat roof."),
+			WidthCm,
+			Inradius);
+		return true;
+	}
+
+	TArray<FVector> InnerTop;
+	if (!InsetRingXY(Top, WidthCm, InnerTop))
+	{
+		UE_LOG(LogBuildingExtruder, Warning, TEXT("Parapet inset failed; using flat roof."));
+		return true;
+	}
+
+	TArray<int32> InnerTris;
+	FString ClipError;
+	if (!EarClipTriangulate(InnerTop, InnerTris, ClipError))
+	{
+		UE_LOG(LogBuildingExtruder, Warning, TEXT("Parapet inner deck triangulate failed; using flat roof."));
+		return true;
+	}
+
+	const double UvScaleCm = FMath::Max(MetersPerUv, 0.01) * 100.0;
+	double MinX = Top[0].X;
+	double MinY = Top[0].Y;
+	for (int32 I = 1; I < Top.Num(); ++I)
+	{
+		MinX = FMath::Min(MinX, static_cast<double>(Top[I].X));
+		MinY = FMath::Min(MinY, static_cast<double>(Top[I].Y));
+	}
+	auto CapUvFromXY = [MinX, MinY, UvScaleCm](const FVector& P) -> FVector2D
+	{
+		return FVector2D(
+			static_cast<float>((static_cast<double>(P.X) - MinX) / UvScaleCm),
+			static_cast<float>((static_cast<double>(P.Y) - MinY) / UvScaleCm));
+	};
+
+	TArray<double> CumDist;
+	CumDist.SetNum(Top.Num());
+	CumDist[0] = 0.0;
+	for (int32 I = 1; I < Top.Num(); ++I)
+	{
+		CumDist[I] = CumDist[I - 1] + static_cast<double>(FVector::Dist2D(Top[I - 1], Top[I]));
+	}
+	const double ClosingSeg = static_cast<double>(FVector::Dist2D(Top.Last(), Top[0]));
+	const double Perimeter = FMath::Max(CumDist.Last() + ClosingSeg, 1.0);
+
+	TArray<FVector> InnerDeck;
+	InnerDeck.SetNum(InnerTop.Num());
+	for (int32 I = 0; I < InnerTop.Num(); ++I)
+	{
+		InnerDeck[I] = InnerTop[I] - Up * HeightCm;
+	}
+
+	FExtrudedPrismMesh ParapetRoof;
+	for (int32 I = 0; I + 2 < InnerTris.Num(); I += 3)
+	{
+		const FVector& A = InnerDeck[InnerTris[I]];
+		const FVector& B = InnerDeck[InnerTris[I + 1]];
+		const FVector& C = InnerDeck[InnerTris[I + 2]];
+		AddTriWithUV(
+			ParapetRoof,
+			A, B, C,
+			CapUvFromXY(InnerTop[InnerTris[I]]),
+			CapUvFromXY(InnerTop[InnerTris[I + 1]]),
+			CapUvFromXY(InnerTop[InnerTris[I + 2]]),
+			Up);
+	}
+
+	const int32 N = Top.Num();
+	for (int32 I = 0; I < N; ++I)
+	{
+		const int32 J = (I + 1) % N;
+		const FVector& O0 = Top[I];
+		const FVector& O1 = Top[J];
+		const FVector& I0 = InnerTop[I];
+		const FVector& I1 = InnerTop[J];
+		AddQuadWithUV(
+			ParapetRoof,
+			O0, O1, I1, I0,
+			CapUvFromXY(O0), CapUvFromXY(O1), CapUvFromXY(I1), CapUvFromXY(I0),
+			Up);
+
+		const double U0 = CumDist[I] / UvScaleCm;
+		const double U1 = (I + 1 < N) ? (CumDist[I + 1] / UvScaleCm) : (Perimeter / UvScaleCm);
+		const double Vh = HeightCm / UvScaleCm;
+		const FVector2D UvD0(static_cast<float>(U0), 0.0f);
+		const FVector2D UvD1(static_cast<float>(U1), 0.0f);
+		const FVector2D UvT0(static_cast<float>(U0), static_cast<float>(Vh));
+		const FVector2D UvT1(static_cast<float>(U1), static_cast<float>(Vh));
+
+		FVector Inward = Center - 0.5 * (I0 + I1);
+		Inward -= Up * FVector::DotProduct(Inward, Up);
+		Inward = Inward.GetSafeNormal();
+		if (Inward.IsNearlyZero())
+		{
+			Inward = -FVector::CrossProduct(I1 - I0, Up).GetSafeNormal();
+		}
+		AddQuadWithUV(
+			ParapetRoof,
+			InnerDeck[I], InnerDeck[J], InnerTop[J], InnerTop[I],
+			UvD0, UvD1, UvT1, UvT0,
+			Inward);
+	}
+
+	if (ParapetRoof.Triangles.Num() >= 3)
+	{
+		OutRoof = MoveTemp(ParapetRoof);
+	}
+	return true;
+}
+
+bool BuildingExtrudeUtils::BuildRoofPartsFromRings(
+	EBuildingRoofType RoofType,
+	const TArray<FVector>& BaseRingLocal,
+	const TArray<FVector>& TopRingLocal,
+	double MetersPerUv,
+	double ParapetHeightMeters,
+	double ParapetWidthMeters,
+	double HippedHeightMeters,
+	FExtrudedPrismMesh& OutWallsAndFloor,
+	FExtrudedPrismMesh& OutRoof,
+	FString& OutError)
+{
+	switch (RoofType)
+	{
+	case EBuildingRoofType::Hipped:
+		return BuildHippedRoofPartsFromRings(
+			BaseRingLocal,
+			TopRingLocal,
+			MetersPerUv,
+			HippedHeightMeters,
+			OutWallsAndFloor,
+			OutRoof,
+			OutError);
+	case EBuildingRoofType::Parapet:
+		return BuildParapetRoofPartsFromRings(
+			BaseRingLocal,
+			TopRingLocal,
+			MetersPerUv,
+			ParapetHeightMeters,
+			ParapetWidthMeters,
+			OutWallsAndFloor,
+			OutRoof,
+			OutError);
+	case EBuildingRoofType::Flat:
+	default:
+		return BuildFlatRoofPartsFromRings(
+			BaseRingLocal, TopRingLocal, MetersPerUv, OutWallsAndFloor, OutRoof, OutError);
+	}
 }
 
 bool BuildingExtrudeUtils::BuildPrismFromRings(

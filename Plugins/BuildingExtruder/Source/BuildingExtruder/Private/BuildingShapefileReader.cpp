@@ -227,6 +227,7 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 	const FString& ShapefilePath,
 	const FString& HeightFieldName,
 	const FString& ElevationFieldName,
+	const FString& RoofTypeFieldName,
 	TArray<FBuildingShapefileFeature>& OutFeatures,
 	FString& OutError)
 {
@@ -272,6 +273,7 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 
 	const FDbfField* HeightField = FindField(DbfFields, HeightFieldName);
 	const FDbfField* ElevField = FindField(DbfFields, ElevationFieldName);
+	const FDbfField* RoofTypeField = FindField(DbfFields, RoofTypeFieldName);
 	if (!HeightField)
 	{
 		OutError = FString::Printf(TEXT("DBF height field '%s' not found."), *HeightFieldName);
@@ -287,6 +289,16 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 		OutError = FString::Printf(
 			TEXT("DBF elevation/altitude field '%s' not found."),
 			*ElevationFieldName);
+		return false;
+	}
+	if (RoofTypeFieldName.IsEmpty())
+	{
+		OutError = TEXT("DBF roof type field name is empty.");
+		return false;
+	}
+	if (!RoofTypeField)
+	{
+		OutError = FString::Printf(TEXT("DBF roof type field '%s' not found."), *RoofTypeFieldName);
 		return false;
 	}
 
@@ -384,6 +396,11 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 				if (ElevField)
 				{
 					ParseNumericField(Rec, *ElevField, Feature.ElevationM);
+				}
+				double RoofTypeValue = 0.0;
+				if (ParseNumericField(Rec, *RoofTypeField, RoofTypeValue))
+				{
+					Feature.RoofTypeCode = FMath::RoundToInt(RoofTypeValue);
 				}
 			}
 		}

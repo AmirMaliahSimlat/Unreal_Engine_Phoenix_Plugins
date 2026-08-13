@@ -166,6 +166,12 @@ namespace
 		const FBuildingShapefileFeature& Feature,
 		double BaseAltitudeM,
 		double MetersPerUv,
+		int32 FlatRoofIndex,
+		int32 HippedRoofIndex,
+		int32 ParapetRoofIndex,
+		double ParapetHeightMeters,
+		double ParapetWidthMeters,
+		double HippedHeightMeters,
 		FExtrudedPrismMesh& OutWallsAndFloorWorld,
 		FExtrudedPrismMesh& OutRoofWorld,
 		FVector& OutCentroid,
@@ -209,12 +215,22 @@ namespace
 			TopLocal.Add(TopWorld[I] - Origin);
 		}
 
+		const EBuildingRoofType RoofType = BuildingExtrudeUtils::ResolveRoofType(
+			Feature.RoofTypeCode,
+			FlatRoofIndex,
+			HippedRoofIndex,
+			ParapetRoofIndex);
+
 		FExtrudedPrismMesh LocalWalls;
 		FExtrudedPrismMesh LocalRoof;
-		if (!BuildingExtrudeUtils::BuildPrismPartsFromRings(
+		if (!BuildingExtrudeUtils::BuildRoofPartsFromRings(
+				RoofType,
 				BaseLocal,
 				TopLocal,
 				MetersPerUv,
+				ParapetHeightMeters,
+				ParapetWidthMeters,
+				HippedHeightMeters,
 				LocalWalls,
 				LocalRoof,
 				OutError))
@@ -325,13 +341,24 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	float MetersPerUv,
 	int32 WallMaterialSlotCount,
 	int32 RoofMaterialSlotCount,
-	int32 MaterialRandomSeed)
+	int32 MaterialRandomSeed,
+	const FString& RoofTypeFieldName,
+	int32 FlatRoofIndex,
+	int32 HippedRoofIndex,
+	int32 ParapetRoofIndex,
+	float ParapetHeightMeters,
+	float ParapetWidthMeters,
+	float HippedHeightMeters)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
 	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("RELATIVE_F") : HeightFieldName;
+	const FString RoofTypeField = RoofTypeFieldName.IsEmpty() ? TEXT("roof_type") : RoofTypeFieldName;
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.01);
+	const double ParapetHeightM = FMath::Max(static_cast<double>(ParapetHeightMeters), 0.0);
+	const double ParapetWidthM = FMath::Max(static_cast<double>(ParapetWidthMeters), 0.0);
+	const double HippedHeightM = FMath::Max(static_cast<double>(HippedHeightMeters), 0.0);
 	const int32 WallSlots = FMath::Clamp(WallMaterialSlotCount, 1, 64);
 	const int32 RoofSlots = FMath::Clamp(RoofMaterialSlotCount, 1, 64);
 
@@ -342,12 +369,20 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' targetTiles=%d tileFilter='%s' "
-			 "metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d"),
+		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' roofTypeField='%s' "
+			 "flatIdx=%d hippedIdx=%d parapetIdx=%d parapetH=%.2fm parapetW=%.2fm hippedH=%.2fm "
+			 "targetTiles=%d tileFilter='%s' metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d"),
 		*CleanInputPath,
 		*CleanFbxPath,
 		*AltitudeField,
 		*HeightField,
+		*RoofTypeField,
+		FlatRoofIndex,
+		HippedRoofIndex,
+		ParapetRoofIndex,
+		ParapetHeightM,
+		ParapetWidthM,
+		HippedHeightM,
 		TargetTileCount,
 		*TileIndices,
 		UvMeters,
@@ -392,10 +427,23 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		return Result;
 	}
 
+	if (FlatRoofIndex == HippedRoofIndex
+		|| FlatRoofIndex == ParapetRoofIndex
+		|| HippedRoofIndex == ParapetRoofIndex)
+	{
+		Result.Message = FString::Printf(
+			TEXT("Roof type indices must be unique (flat=%d, hipped=%d, parapet=%d)."),
+			FlatRoofIndex,
+			HippedRoofIndex,
+			ParapetRoofIndex);
+		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
+		return Result;
+	}
+
 	TArray<FBuildingShapefileFeature> Features;
 	FString ReadError;
 	if (!BuildingShapefileReader::ReadPolygonBuildings(
-			CleanInputPath, HeightField, AltitudeField, Features, ReadError))
+			CleanInputPath, HeightField, AltitudeField, RoofTypeField, Features, ReadError))
 	{
 		Result.Message = ReadError;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
@@ -710,6 +758,12 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 						Features[FeatureIndex],
 						Features[FeatureIndex].ElevationM,
 						UvMeters,
+						FlatRoofIndex,
+						HippedRoofIndex,
+						ParapetRoofIndex,
+						ParapetHeightM,
+						ParapetWidthM,
+						HippedHeightM,
 						BuildingWalls,
 						BuildingRoof,
 						Centroid,

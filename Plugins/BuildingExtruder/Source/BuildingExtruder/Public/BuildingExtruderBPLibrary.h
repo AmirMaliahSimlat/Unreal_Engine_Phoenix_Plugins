@@ -56,7 +56,8 @@ public:
 	 * @param ShapefilePath Path to .shp (with or without extension; .dbf required beside it).
 	 * @param FbxOutputPath Required output path for the combined FBX.
 	 * @param AltitudeFieldName DBF column for floor altitude in meters (default altitude).
-	 * @param HeightFieldName DBF column for building extrusion height in meters (default RELATIVE_F).
+	 * @param HeightFieldName DBF column for wall height in meters (default RELATIVE_F).
+	 *        Hipped ridge is extra (HippedHeightMeters). Parapet ring is part of this wall height.
 	 * @param ActorLabelPrefix Prefix for tile actor labels (e.g. BldgTile).
 	 * @param EditorFolderPath World Outliner folder.
 	 * @param TargetTileCount Exact tile slot count; XxY chosen from factor pairs for square cells.
@@ -65,6 +66,13 @@ public:
 	 * @param WallMaterialSlotCount Number of material slots on wall/floor meshes (random per building).
 	 * @param RoofMaterialSlotCount Number of material slots on roof meshes (random per building).
 	 * @param MaterialRandomSeed RNG for material slots; 0 = non-deterministic each run.
+	 * @param RoofTypeFieldName DBF column with integer roof-type codes.
+	 * @param FlatRoofIndex DBF value that means a flat roof.
+	 * @param HippedRoofIndex DBF value that means a hipped / cross-hipped roof.
+	 * @param ParapetRoofIndex DBF value that means a parapet roof.
+	 * @param ParapetHeightMeters Height of the parapet ring in meters (included in wall height).
+	 * @param ParapetWidthMeters Inward thickness of the parapet ring in meters.
+	 * @param HippedHeightMeters Ridge height above the wall top in meters (not included in wall height).
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -80,7 +88,14 @@ public:
 			CPP_Default_MetersPerUv = "3.0",
 			CPP_Default_WallMaterialSlotCount = "1",
 			CPP_Default_RoofMaterialSlotCount = "1",
-			CPP_Default_MaterialRandomSeed = "0"))
+			CPP_Default_MaterialRandomSeed = "0",
+			CPP_Default_RoofTypeFieldName = "roof_type",
+			CPP_Default_FlatRoofIndex = "0",
+			CPP_Default_HippedRoofIndex = "1",
+			CPP_Default_ParapetRoofIndex = "2",
+			CPP_Default_ParapetHeightMeters = "1.0",
+			CPP_Default_ParapetWidthMeters = "0.3",
+			CPP_Default_HippedHeightMeters = "2.0"))
 	static FBuildingExtrudeResult ImportAndExtrudeBuildingsFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -94,5 +109,12 @@ public:
 		float MetersPerUv,
 		int32 WallMaterialSlotCount,
 		int32 RoofMaterialSlotCount,
-		int32 MaterialRandomSeed);
+		int32 MaterialRandomSeed,
+		const FString& RoofTypeFieldName,
+		int32 FlatRoofIndex,
+		int32 HippedRoofIndex,
+		int32 ParapetRoofIndex,
+		float ParapetHeightMeters,
+		float ParapetWidthMeters,
+		float HippedHeightMeters);
 };
