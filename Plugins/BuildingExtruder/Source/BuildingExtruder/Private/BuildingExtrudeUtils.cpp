@@ -40,6 +40,93 @@ namespace
 		}
 	}
 
+	/** Drops tiny edges and near-collinear verts so the hip skeleton does not explode. */
+	void CleanHipRingXY(TArray<FVector>& Ring)
+	{
+		StripClosingDuplicate(Ring);
+		bool bChanged = true;
+		for (int32 Pass = 0; bChanged && Ring.Num() >= 3 && Pass < 8; ++Pass)
+		{
+			bChanged = false;
+			for (int32 I = 0; I < Ring.Num() && Ring.Num() >= 3; )
+			{
+				const int32 J = (I + 1) % Ring.Num();
+				if (FVector::Dist2D(Ring[I], Ring[J]) < 1.0)
+				{
+					Ring.RemoveAt(J);
+					bChanged = true;
+					continue;
+				}
+				++I;
+			}
+			for (int32 I = 0; I < Ring.Num() && Ring.Num() >= 3; )
+			{
+				const int32 N = Ring.Num();
+				const int32 IPrev = (I + N - 1) % N;
+				const int32 INext = (I + 1) % N;
+				const FVector2D U(Ring[I].X - Ring[IPrev].X, Ring[I].Y - Ring[IPrev].Y);
+				const FVector2D V(Ring[INext].X - Ring[I].X, Ring[INext].Y - Ring[I].Y);
+				const double LenU = U.Size();
+				const double LenV = V.Size();
+				if (LenU < 1.0e-6 || LenV < 1.0e-6)
+				{
+					Ring.RemoveAt(I);
+					bChanged = true;
+					continue;
+				}
+				const double Cross = (U.X * V.Y - U.Y * V.X) / (LenU * LenV);
+				const double Dot = (U.X * V.X + U.Y * V.Y) / (LenU * LenV);
+				if (FMath::Abs(Cross) < 1.0e-2 && Dot > 0.0)
+				{
+					Ring.RemoveAt(I);
+					bChanged = true;
+					continue;
+				}
+				++I;
+			}
+		}
+	}
+
+	struct FHipBounds
+	{
+		FVector2D Min = FVector2D::ZeroVector;
+		FVector2D Max = FVector2D::ZeroVector;
+		double Pad = 0.0;
+		double MaxD = 0.0;
+	};
+
+	FHipBounds MakeHipBounds(const TArray<FVector>& Ring)
+	{
+		FHipBounds B;
+		B.Min = FVector2D(Ring[0].X, Ring[0].Y);
+		B.Max = B.Min;
+		for (int32 I = 1; I < Ring.Num(); ++I)
+		{
+			B.Min.X = FMath::Min(B.Min.X, static_cast<double>(Ring[I].X));
+			B.Min.Y = FMath::Min(B.Min.Y, static_cast<double>(Ring[I].Y));
+			B.Max.X = FMath::Max(B.Max.X, static_cast<double>(Ring[I].X));
+			B.Max.Y = FMath::Max(B.Max.Y, static_cast<double>(Ring[I].Y));
+		}
+		const double Dx = B.Max.X - B.Min.X;
+		const double Dy = B.Max.Y - B.Min.Y;
+		const double Diag = FMath::Sqrt(Dx * Dx + Dy * Dy);
+		B.Pad = FMath::Max(Diag * 0.05, 100.0);
+		B.MaxD = FMath::Max(Diag, 100.0);
+		return B;
+	}
+
+	bool IsFinitePoint(const FVector2D& P)
+	{
+		return FMath::IsFinite(P.X) && FMath::IsFinite(P.Y);
+	}
+
+	bool IsPointInHipBounds(const FHipBounds& B, const FVector2D& P)
+	{
+		return IsFinitePoint(P)
+			&& P.X >= B.Min.X - B.Pad && P.X <= B.Max.X + B.Pad
+			&& P.Y >= B.Min.Y - B.Pad && P.Y <= B.Max.Y + B.Pad;
+	}
+
 	bool EarClipTriangulate(TArray<FVector> Ring, TArray<int32>& OutIndices, FString& OutError)
 	{
 		OutIndices.Reset();
@@ -528,11 +615,24 @@ namespace
 		}
 	}
 
+	bool LoopPointsInBounds(const TArray<FWaveVert>& Loop, double D, const FHipBounds& Bounds)
+	{
+		for (const FWaveVert& V : Loop)
+		{
+			if (V.Vel.SizeSquared() > 1.0e6 || !IsPointInHipBounds(Bounds, WaveAt(V, D)))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 	bool ShrinkLoop(
 		TArray<FWaveVert> Loop,
 		double DCurrent,
 		bool bCCW,
 		const TArray<FVector2D>& EdgeNormals,
+		const FHipBounds& Bounds,
 		TArray<FRoofTri2D>& OutTris,
 		int32 Depth)
 	{
@@ -555,7 +655,10 @@ namespace
 				const int32 J = (I + 1) % N;
 				double D = 0.0;
 				FVector2D P;
-				if (WaveMeet(Loop[I], Loop[J], DCurrent, D, P) && D < BestD)
+				if (WaveMeet(Loop[I], Loop[J], DCurrent, D, P)
+					&& D <= Bounds.MaxD
+					&& IsPointInHipBounds(Bounds, P)
+					&& D < BestD)
 				{
 					BestD = D;
 					EventType = 1;
@@ -579,7 +682,10 @@ namespace
 					}
 					double D = 0.0;
 					FVector2D P;
-					if (WaveHitEdge(Loop[I], Loop[E], Loop[E1], DCurrent, D, P) && D < BestD)
+					if (WaveHitEdge(Loop[I], Loop[E], Loop[E1], DCurrent, D, P)
+						&& D <= Bounds.MaxD
+						&& IsPointInHipBounds(Bounds, P)
+						&& D < BestD)
 					{
 						BestD = D;
 						EventType = 2;
@@ -590,9 +696,13 @@ namespace
 				}
 			}
 
-			if (EventType == 0 || !FMath::IsFinite(BestD) || BestD > 1.0e8)
+			if (EventType == 0 || !FMath::IsFinite(BestD))
 			{
 				break;
+			}
+			if (BestD > Bounds.MaxD || !IsPointInHipBounds(Bounds, HitP) || !LoopPointsInBounds(Loop, BestD, Bounds))
+			{
+				return false;
 			}
 
 			EmitLoft(OutTris, Loop, DCurrent, BestD);
@@ -659,11 +769,11 @@ namespace
 				bool bOk = true;
 				if (LoopA.Num() >= 3)
 				{
-					bOk = ShrinkLoop(MoveTemp(LoopA), BestD, bCCW, EdgeNormals, OutTris, Depth + 1) && bOk;
+					bOk = ShrinkLoop(MoveTemp(LoopA), BestD, bCCW, EdgeNormals, Bounds, OutTris, Depth + 1) && bOk;
 				}
 				if (LoopB.Num() >= 3)
 				{
-					bOk = ShrinkLoop(MoveTemp(LoopB), BestD, bCCW, EdgeNormals, OutTris, Depth + 1) && bOk;
+					bOk = ShrinkLoop(MoveTemp(LoopB), BestD, bCCW, EdgeNormals, Bounds, OutTris, Depth + 1) && bOk;
 				}
 				return bOk;
 			}
@@ -672,14 +782,32 @@ namespace
 		return OutTris.Num() > 0;
 	}
 
-	bool BuildHippedRoofTris(const TArray<FVector>& Top, TArray<FRoofTri2D>& OutTris)
+	bool HippedTrisStayInBounds(const TArray<FRoofTri2D>& Tris, const FHipBounds& Bounds)
+	{
+		for (const FRoofTri2D& Tri : Tris)
+		{
+			if (Tri.DA > Bounds.MaxD || Tri.DB > Bounds.MaxD || Tri.DC > Bounds.MaxD
+				|| !IsPointInHipBounds(Bounds, Tri.A)
+				|| !IsPointInHipBounds(Bounds, Tri.B)
+				|| !IsPointInHipBounds(Bounds, Tri.C))
+			{
+				return false;
+			}
+		}
+		return Tris.Num() > 0;
+	}
+
+	bool BuildHippedRoofTris(const TArray<FVector>& TopIn, TArray<FRoofTri2D>& OutTris)
 	{
 		OutTris.Reset();
+		TArray<FVector> Top = TopIn;
+		CleanHipRingXY(Top);
 		const int32 N = Top.Num();
 		if (N < 3)
 		{
 			return false;
 		}
+		const FHipBounds Bounds = MakeHipBounds(Top);
 		const bool bCCW = SignedArea2XY(Top) > 0.0;
 		TArray<FVector2D> EdgeNormals;
 		EdgeNormals.SetNum(N);
@@ -694,8 +822,13 @@ namespace
 			Loop[I].Vel = VertexOffsetVelXY(Prev, Top[I], Top[J], bCCW);
 			Loop[I].LeftEdge = (I + N - 1) % N;
 			Loop[I].RightEdge = I;
+			if (Loop[I].Vel.SizeSquared() > 1.0e6)
+			{
+				return false;
+			}
 		}
-		return ShrinkLoop(MoveTemp(Loop), 0.0, bCCW, EdgeNormals, OutTris, 0) && OutTris.Num() > 0;
+		return ShrinkLoop(MoveTemp(Loop), 0.0, bCCW, EdgeNormals, Bounds, OutTris, 0)
+			&& HippedTrisStayInBounds(OutTris, Bounds);
 	}
 }
 
@@ -940,7 +1073,7 @@ bool BuildingExtrudeUtils::BuildHippedRoofPartsFromRings(
 	TArray<FRoofTri2D> Tris2D;
 	if (!BuildHippedRoofTris(Top, Tris2D))
 	{
-		UE_LOG(LogBuildingExtruder, Warning, TEXT("Hipped roof skeleton failed; keeping flat roof."));
+		UE_LOG(LogBuildingExtruder, Warning, TEXT("Hipped roof skeleton failed or produced a spike; keeping flat roof."));
 		return true;
 	}
 
