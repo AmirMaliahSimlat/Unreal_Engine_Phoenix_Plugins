@@ -17,7 +17,6 @@
 #include "InstancedFoliageActor.h"
 #include "Internationalization/Internationalization.h"
 #include "Misc/ScopedSlowTask.h"
-#include "Runtime/Launch/Resources/Version.h"
 
 namespace
 {
@@ -163,7 +162,7 @@ namespace
 			: 0;
 		FoliageType->CullDistance.Min = StartDist;
 		FoliageType->CullDistance.Max = EndDist;
-		FoliageType->bCastShadow = true;
+		FoliageType->CastShadow = true;
 		FoliageType->AlignToNormal = false;
 		FoliageType->RandomYaw = false;
 		FoliageType->Modify();
@@ -246,8 +245,16 @@ namespace
 		return true;
 	}
 
+	FFoliageInstance MakeFoliageInstance(const FTransform& Xform)
+	{
+		FFoliageInstance Instance;
+		Instance.Location = Xform.GetLocation();
+		Instance.Rotation = Xform.Rotator();
+		Instance.DrawScale3D = FVector3f(Xform.GetScale3D());
+		return Instance;
+	}
+
 	bool AddFoliageInstances(
-		AInstancedFoliageActor& IFA,
 		FTreeFoliageSlot& Slot,
 		const TArray<FTransform>& WorldTransforms)
 	{
@@ -256,29 +263,10 @@ namespace
 			return WorldTransforms.Num() == 0;
 		}
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2)
-		TArray<FFoliageInstance> Instances;
-		Instances.Reserve(WorldTransforms.Num());
 		for (const FTransform& Xform : WorldTransforms)
 		{
-			FFoliageInstance Instance;
-			Instance.Location = Xform.GetLocation();
-			Instance.Rotation = Xform.Rotator();
-			Instance.DrawScale3D = Xform.GetScale3D();
-			Instances.Add(Instance);
+			Slot.Info->AddInstance(Slot.Type, MakeFoliageInstance(Xform));
 		}
-		Slot.Info->AddInstances(Slot.Type, Instances);
-#else
-		for (const FTransform& Xform : WorldTransforms)
-		{
-			FFoliageInstance Instance;
-			Instance.Location = Xform.GetLocation();
-			Instance.Rotation = Xform.Rotator();
-			Instance.DrawScale3D = Xform.GetScale3D();
-			// Rebuild once after all tiles via Refresh (per-instance rebuild is too slow).
-			Slot.Info->AddInstance(&IFA, Slot.Type, Instance, /*InRebuildFoliageTree*/ false);
-		}
-#endif
 		return true;
 	}
 
@@ -584,7 +572,7 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 				{
 					continue;
 				}
-				if (!AddFoliageInstances(*IFA, FoliageSlots[MeshIndex], Transforms))
+				if (!AddFoliageInstances(FoliageSlots[MeshIndex], Transforms))
 				{
 					UE_LOG(LogTreePlacer, Error, TEXT("Tile %s failed to add instances for mesh '%s'."),
 						*TileLabel,
