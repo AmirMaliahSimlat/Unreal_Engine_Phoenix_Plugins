@@ -3,7 +3,7 @@
 #include "GameFramework/Actor.h"
 #include "TreePlacerTileActor.generated.h"
 
-/** Tile actor that owns Hierarchical Instanced Static Mesh components for trees. */
+/** Legacy tile actor kept so older levels that already spawned it still load. New placement uses AInstancedFoliageActor. */
 UCLASS()
 class TREEPLACER_API ATreePlacerTileActor : public AActor
 {

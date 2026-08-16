@@ -3,7 +3,6 @@
 #include "TreeCesiumPlacement.h"
 #include "TreeMeshFolderLoader.h"
 #include "TreePlacerLog.h"
-#include "TreePlacerTileActor.h"
 #include "TreeShapefileReader.h"
 
 #include "CesiumGeoreference.h"
@@ -11,9 +10,14 @@
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "FoliageType.h"
+#include "FoliageType_InstancedStaticMesh.h"
 #include "HAL/PlatformTime.h"
+#include "InstancedFoliage.h"
+#include "InstancedFoliageActor.h"
 #include "Internationalization/Internationalization.h"
 #include "Misc/ScopedSlowTask.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 namespace
 {
@@ -143,156 +147,152 @@ namespace
 		HISM->InstanceEndCullDistance = EndDist;
 	}
 
-	UHierarchicalInstancedStaticMeshComponent* CreateTreeHism(
-		AActor& Actor,
-		USceneComponent& Root,
-		UStaticMesh* Mesh,
-		FName CompName,
-		bool bVisibleMesh,
-		bool bCastShadows,
-		int32 EndCullDistanceCm,
-		const TArray<FTransform>& WorldTransforms)
+	void ApplyFoliageCullDistance(
+		UFoliageType* FoliageType,
+		FFoliageInfo* FoliageInfo,
+		int32 TreeCullCm)
 	{
-		UHierarchicalInstancedStaticMeshComponent* HISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(
-			&Actor,
-			CompName,
-			RF_Transactional);
-		HISM->CreationMethod = EComponentCreationMethod::Instance;
-		HISM->SetupAttachment(&Root);
-		HISM->SetStaticMesh(Mesh);
-		HISM->SetMobility(EComponentMobility::Static);
-		HISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		HISM->SetGenerateOverlapEvents(false);
-		HISM->bHasPerInstanceHitProxies = false;
-
-		HISM->SetVisibility(bVisibleMesh, /*bPropagateToChildren*/ false);
-		HISM->SetHiddenInGame(!bVisibleMesh);
-		HISM->SetCastShadow(bCastShadows);
-		HISM->bCastHiddenShadow = bCastShadows && !bVisibleMesh;
-
-		ConfigureHismCullDistance(HISM, EndCullDistanceCm);
-
-		Actor.AddInstanceComponent(HISM);
-		HISM->RegisterComponent();
-
-		for (const FTransform& Xform : WorldTransforms)
+		if (!FoliageType)
 		{
-			HISM->AddInstance(Xform, /*bWorldSpace*/ true);
+			return;
 		}
-#if ENGINE_MAJOR_VERSION >= 5
-		HISM->BuildTreeIfOutdated(/*bAsync*/ false, /*bForceUpdate*/ true);
-#endif
-		HISM->MarkRenderStateDirty();
-		HISM->Modify();
-		return HISM;
+
+		const int32 EndDist = FMath::Max(TreeCullCm, 0);
+		const int32 StartDist = (EndDist > 0)
+			? FMath::Max(0, EndDist - FMath::Max((EndDist * 35) / 100, 100))
+			: 0;
+		FoliageType->CullDistance.Min = StartDist;
+		FoliageType->CullDistance.Max = EndDist;
+		FoliageType->bCastShadow = true;
+		FoliageType->AlignToNormal = false;
+		FoliageType->RandomYaw = false;
+		FoliageType->Modify();
+
+		if (FoliageInfo)
+		{
+			if (UHierarchicalInstancedStaticMeshComponent* HISM =
+					Cast<UHierarchicalInstancedStaticMeshComponent>(FoliageInfo->GetComponent()))
+			{
+				ConfigureHismCullDistance(HISM, TreeCullCm);
+				HISM->SetCastShadow(true);
+				HISM->MarkRenderStateDirty();
+			}
+		}
 	}
 
-	bool SpawnTreeTileActor(
-		UWorld& World,
-		const FString& ActorLabel,
-		const FString& EditorFolderPath,
-		const TArray<UStaticMesh*>& TreeMeshes,
-		const TArray<TArray<FTransform>>& TransformsPerMesh,
-		const FVector& TileOrigin,
-		float TreeCullDistanceMeters,
-		float ShadowCullDistanceMeters,
-		AActor*& OutActor,
+	struct FTreeFoliageSlot
+	{
+		UFoliageType* Type = nullptr;
+		FFoliageInfo* Info = nullptr;
+	};
+
+	UFoliageType* FindFoliageTypeForMesh(AInstancedFoliageActor& IFA, const UStaticMesh* Mesh)
+	{
+		UFoliageType* Found = nullptr;
+		IFA.ForEachFoliageInfo([&](UFoliageType* Type, FFoliageInfo& /*Info*/)
+		{
+			if (!Type || !Mesh)
+			{
+				return true;
+			}
+			if (Type->GetSource() == Mesh)
+			{
+				Found = Type;
+				return false;
+			}
+			if (const UFoliageType_InstancedStaticMesh* ISMType = Cast<UFoliageType_InstancedStaticMesh>(Type))
+			{
+				if (ISMType->GetStaticMesh() == Mesh)
+				{
+					Found = Type;
+					return false;
+				}
+			}
+			return true;
+		});
+		return Found;
+	}
+
+	bool GetOrCreateFoliageSlot(
+		AInstancedFoliageActor& IFA,
+		UStaticMesh* Mesh,
+		int32 TreeCullCm,
+		FTreeFoliageSlot& OutSlot,
 		FString& OutError)
 	{
-		OutActor = nullptr;
-
-		int32 TotalInstances = 0;
-		for (const TArray<FTransform>& Transforms : TransformsPerMesh)
+		OutSlot = FTreeFoliageSlot();
+		if (!Mesh)
 		{
-			TotalInstances += Transforms.Num();
-		}
-		if (TotalInstances == 0)
-		{
-			OutError = TEXT("Tile has no tree instances.");
+			OutError = TEXT("Null tree mesh.");
 			return false;
 		}
 
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		SpawnParams.ObjectFlags |= RF_Transactional;
-
-		ATreePlacerTileActor* Actor = World.SpawnActor<ATreePlacerTileActor>(TileOrigin, FRotator::ZeroRotator, SpawnParams);
-		if (!Actor)
+		UFoliageType* Type = FindFoliageTypeForMesh(IFA, Mesh);
+		FFoliageInfo* Info = Type ? IFA.FindInfo(Type) : nullptr;
+		if (!Type || !Info)
 		{
-			OutError = TEXT("Failed to spawn tile actor.");
+			Type = nullptr;
+			Info = IFA.AddMesh(Mesh, &Type);
+		}
+		if (!Type || !Info)
+		{
+			OutError = FString::Printf(TEXT("Failed to add foliage type for mesh '%s'."), *Mesh->GetName());
 			return false;
 		}
 
-		Actor->SetActorLabel(ActorLabel);
-		Actor->Tags.Add(FName(TEXT("TreePlacer")));
-		Actor->Tags.Add(FName(TEXT("TreePlacerTile")));
-		if (!EditorFolderPath.IsEmpty())
+		ApplyFoliageCullDistance(Type, Info, TreeCullCm);
+		OutSlot.Type = Type;
+		OutSlot.Info = Info;
+		return true;
+	}
+
+	bool AddFoliageInstances(
+		AInstancedFoliageActor& IFA,
+		FTreeFoliageSlot& Slot,
+		const TArray<FTransform>& WorldTransforms)
+	{
+		if (!Slot.Type || !Slot.Info || WorldTransforms.Num() == 0)
 		{
-			Actor->SetFolderPath(FName(*EditorFolderPath));
+			return WorldTransforms.Num() == 0;
 		}
 
-		USceneComponent* Root = Actor->GetRootComponent();
-		if (!Root)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2)
+		TArray<FFoliageInstance> Instances;
+		Instances.Reserve(WorldTransforms.Num());
+		for (const FTransform& Xform : WorldTransforms)
 		{
-			OutError = TEXT("Tile actor missing root component.");
-			Actor->Destroy();
-			return false;
+			FFoliageInstance Instance;
+			Instance.Location = Xform.GetLocation();
+			Instance.Rotation = Xform.Rotator();
+			Instance.DrawScale3D = Xform.GetScale3D();
+			Instances.Add(Instance);
 		}
-		Root->SetWorldLocation(TileOrigin);
-
-		const int32 TreeCullCm = MetersToCullDistanceCm(TreeCullDistanceMeters);
-		const int32 ShadowCullCm = MetersToCullDistanceCm(ShadowCullDistanceMeters);
-
-		for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
+		Slot.Info->AddInstances(Slot.Type, Instances);
+#else
+		for (const FTransform& Xform : WorldTransforms)
 		{
-			const TArray<FTransform>& Transforms = TransformsPerMesh[MeshIndex];
-			UStaticMesh* Mesh = TreeMeshes[MeshIndex];
-			if (Transforms.Num() == 0 || !Mesh)
+			FFoliageInstance Instance;
+			Instance.Location = Xform.GetLocation();
+			Instance.Rotation = Xform.Rotator();
+			Instance.DrawScale3D = Xform.GetScale3D();
+			// Rebuild once after all tiles via Refresh (per-instance rebuild is too slow).
+			Slot.Info->AddInstance(&IFA, Slot.Type, Instance, /*InRebuildFoliageTree*/ false);
+		}
+#endif
+		return true;
+	}
+
+	void RefreshFoliageSlots(TArray<FTreeFoliageSlot>& Slots, int32 TreeCullCm)
+	{
+		for (FTreeFoliageSlot& Slot : Slots)
+		{
+			if (!Slot.Info)
 			{
 				continue;
 			}
-
-			if (TreeCullCm == ShadowCullCm)
-			{
-				// Same cutoff: one component draws mesh + shadows.
-				CreateTreeHism(
-					*Actor,
-					*Root,
-					Mesh,
-					*FString::Printf(TEXT("HISM_%d"), MeshIndex),
-					/*bVisibleMesh*/ true,
-					/*bCastShadows*/ true,
-					TreeCullCm,
-					Transforms);
-			}
-			else
-			{
-				// Split so mesh and shadows can disappear at different distances.
-				CreateTreeHism(
-					*Actor,
-					*Root,
-					Mesh,
-					*FString::Printf(TEXT("HISM_%d_Mesh"), MeshIndex),
-					/*bVisibleMesh*/ true,
-					/*bCastShadows*/ false,
-					TreeCullCm,
-					Transforms);
-				CreateTreeHism(
-					*Actor,
-					*Root,
-					Mesh,
-					*FString::Printf(TEXT("HISM_%d_Shadow"), MeshIndex),
-					/*bVisibleMesh*/ false,
-					/*bCastShadows*/ true,
-					ShadowCullCm,
-					Transforms);
-			}
+			Slot.Info->Refresh(/*Async*/ false, /*Force*/ true);
+			ApplyFoliageCullDistance(Slot.Type, Slot.Info, TreeCullCm);
 		}
-
-		Actor->Modify();
-		Actor->MarkPackageDirty();
-		OutActor = Actor;
-		return true;
 	}
 }
 
@@ -306,8 +306,7 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	int32 TargetTileCount,
 	const FString& TileIndices,
 	int32 RandomSeed,
-	float TreeCullDistanceMeters,
-	float ShadowCullDistanceMeters)
+	float TreeCullDistanceMeters)
 {
 	FTreePlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -318,15 +317,14 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeCullM=%.1f shadowCullM=%.1f"),
+		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeCullM=%.1f"),
 		*CleanInputPath,
 		*TreeMeshFolder,
 		*AltitudeField,
 		TargetTileCount,
 		*TileIndices,
 		RandomSeed,
-		TreeCullDistanceMeters,
-		ShadowCullDistanceMeters);
+		TreeCullDistanceMeters);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -481,9 +479,40 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("TreeTile") : ActorLabelPrefix;
 	const FString FolderPath = EditorFolderPath;
 
+	AInstancedFoliageActor* IFA = AInstancedFoliageActor::GetInstancedFoliageActorForCurrentLevel(World, /*bCreateIfNone*/ true);
+	if (!IFA)
+	{
+		Result.Message = TEXT("Could not get or create the level InstancedFoliageActor.");
+		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+		return Result;
+	}
+
+	IFA->Modify();
+	if (!FolderPath.IsEmpty())
+	{
+		IFA->SetFolderPath(FName(*FolderPath));
+	}
+
+	const int32 TreeCullCm = MetersToCullDistanceCm(TreeCullDistanceMeters);
+
+	TArray<FTreeFoliageSlot> FoliageSlots;
+	FoliageSlots.SetNum(TreeMeshes.Num());
+	for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
+	{
+		FString SlotError;
+		if (!GetOrCreateFoliageSlot(*IFA, TreeMeshes[MeshIndex], TreeCullCm, FoliageSlots[MeshIndex], SlotError))
+		{
+			Result.Message = SlotError;
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
+	}
+
 	FScopedSlowTask SlowTask(
 		static_cast<float>(NonEmptyTiles),
-		NSLOCTEXT("TreePlacer", "PlaceProgress", "Placing tiled trees..."));
+		NSLOCTEXT("TreePlacer", "PlaceProgress", "Placing trees on InstancedFoliageActor..."));
 	SlowTask.MakeDialog(true);
 
 	int32 TreesPlaced = 0;
@@ -510,13 +539,16 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 			if (SlowTask.ShouldCancel())
 			{
+				RefreshFoliageSlots(FoliageSlots, TreeCullCm);
+				IFA->Modify();
+				World->MarkPackageDirty();
 				Result.bCancelled = true;
 				Result.TreesPlaced = TreesPlaced;
 				Result.TreesSkipped = TreesSkipped;
 				Result.TilesSpawned = TilesSpawned;
 				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 				Result.Message = FString::Printf(
-					TEXT("Cancelled. Tiles=%d trees=%d. Elapsed: %.2fs."),
+					TEXT("Cancelled. Tiles=%d trees=%d on InstancedFoliageActor. Elapsed: %.2fs."),
 					TilesSpawned,
 					TreesPlaced,
 					Result.ElapsedSeconds);
@@ -526,8 +558,6 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 			TArray<TArray<FTransform>> TransformsPerMesh;
 			TransformsPerMesh.SetNum(TreeMeshes.Num());
-			FVector OriginSum = FVector::ZeroVector;
-			int32 OriginCount = 0;
 
 			for (const int32 PointIndex : Bucket)
 			{
@@ -540,54 +570,42 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 				const int32 MeshIndex = Rng.RandRange(0, TreeMeshes.Num() - 1);
 				const float YawDeg = Rng.FRandRange(0.0f, 360.0f);
-				const FTransform WorldXform(
+				TransformsPerMesh[MeshIndex].Add(FTransform(
 					FRotator(0.0, YawDeg, 0.0),
 					WorldPos,
-					FVector::OneVector);
-
-				TransformsPerMesh[MeshIndex].Add(WorldXform);
-				OriginSum += WorldPos;
-				++OriginCount;
+					FVector::OneVector));
 			}
 
-			if (OriginCount == 0)
+			bool bTileAdded = false;
+			for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
 			{
-				continue;
+				const TArray<FTransform>& Transforms = TransformsPerMesh[MeshIndex];
+				if (Transforms.Num() == 0)
+				{
+					continue;
+				}
+				if (!AddFoliageInstances(*IFA, FoliageSlots[MeshIndex], Transforms))
+				{
+					UE_LOG(LogTreePlacer, Error, TEXT("Tile %s failed to add instances for mesh '%s'."),
+						*TileLabel,
+						*TreeMeshes[MeshIndex]->GetName());
+					TreesSkipped += Transforms.Num();
+					continue;
+				}
+				TreesPlaced += Transforms.Num();
+				bTileAdded = true;
 			}
 
-			const FVector TileOrigin = OriginSum / static_cast<double>(OriginCount);
-
-			// Keep transforms in world space (identical Cesium LonLatHeight -> Unreal as buildings).
-			// HISM AddInstance(..., bWorldSpace=true) converts to component space.
-
-			AActor* TileActor = nullptr;
-			FString SpawnError;
-			if (!SpawnTreeTileActor(
-					*World,
-					TileLabel,
-					FolderPath,
-					TreeMeshes,
-					TransformsPerMesh,
-					TileOrigin,
-					TreeCullDistanceMeters,
-					ShadowCullDistanceMeters,
-					TileActor,
-					SpawnError))
+			if (bTileAdded)
 			{
-				UE_LOG(LogTreePlacer, Error, TEXT("Tile %s failed: %s"), *TileLabel, *SpawnError);
-				TreesSkipped += Bucket.Num();
-				continue;
+				++TilesSpawned;
 			}
-
-			int32 TileTrees = 0;
-			for (const TArray<FTransform>& Transforms : TransformsPerMesh)
-			{
-				TileTrees += Transforms.Num();
-			}
-			TreesPlaced += TileTrees;
-			++TilesSpawned;
 		}
 	}
+
+	RefreshFoliageSlots(FoliageSlots, TreeCullCm);
+	IFA->Modify();
+	World->MarkPackageDirty();
 
 	if (TilesSpawned <= 0)
 	{
@@ -596,7 +614,7 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 		Result.TilesSpawned = 0;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		Result.Message = FString::Printf(
-			TEXT("No tiles spawned (%d trees skipped). Elapsed: %.2fs."),
+			TEXT("No trees added to InstancedFoliageActor (%d skipped). Elapsed: %.2fs."),
 			TreesSkipped,
 			Result.ElapsedSeconds);
 		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
@@ -609,15 +627,14 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	Result.TilesSpawned = TilesSpawned;
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d tree tiles (%d trees, %d skipped) using %d mesh types from '%s'. Elapsed: %.2fs."),
-		TilesSpawned,
+		TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d mesh types from '%s'. Elapsed: %.2fs."),
 		TreesPlaced,
 		TreesSkipped,
+		TilesSpawned,
 		TreeMeshes.Num(),
 		*TreeMeshFolder,
 		Result.ElapsedSeconds);
 
-	World->MarkPackageDirty();
 	UE_LOG(LogTreePlacer, Display, TEXT("%s"), *Result.Message);
 	UE_LOG(LogTreePlacer, Display, TEXT("========== Tree Place END =========="));
 	return Result;

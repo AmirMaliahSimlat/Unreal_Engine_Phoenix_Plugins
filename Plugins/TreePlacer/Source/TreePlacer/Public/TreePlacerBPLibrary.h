@@ -17,7 +17,7 @@ struct FTreePlaceResult
 	UPROPERTY(BlueprintReadOnly, Category = "Tree Placer")
 	int32 TreesSkipped = 0;
 
-	/** Non-empty tile actors spawned (each tile holds HISM components). */
+	/** Non-empty tiles that contributed instances to the foliage actor. */
 	UPROPERTY(BlueprintReadOnly, Category = "Tree Placer")
 	int32 TilesSpawned = 0;
 
@@ -35,8 +35,8 @@ struct FTreePlaceResult
  * Blueprint API for the Tree Placer editor plugin.
  * Requires an ACesiumGeoreference in the open editor map.
  * Tree meshes must already exist as Content assets (StaticMesh or FoliageType).
- * Large point counts are placed as Hierarchical Instanced Static Meshes per tile
- * (same tiling grid logic as Building Extruder) so level save / undo stay stable.
+ * Instances are added to the level's AInstancedFoliageActor (same actor Foliage Mode uses).
+ * Tiling is only used to batch work and filter TileIndices.
  */
 UCLASS()
 class TREEPLACER_API UTreePlacerBPLibrary : public UBlueprintFunctionLibrary
@@ -46,20 +46,18 @@ class TREEPLACER_API UTreePlacerBPLibrary : public UBlueprintFunctionLibrary
 public:
 	/**
 	 * Reads EPSG:4326 tree points from a shapefile and places random tree meshes from
-	 * TreeMeshFolder into tiled HISM actors in the open level.
+	 * TreeMeshFolder onto the level Instanced Foliage Actor.
 	 *
 	 * @param ShapefilePath Path to point .shp (.dbf required beside it).
 	 * @param TreeMeshFolder Content folder with StaticMesh and/or FoliageType assets (e.g. /Game/Trees).
 	 * @param AltitudeFieldName DBF column for ground altitude in meters (default altitude).
-	 * @param ActorLabelPrefix Prefix for tile actor labels (e.g. TreeTile).
-	 * @param EditorFolderPath World Outliner folder.
+	 * @param ActorLabelPrefix Prefix used only in progress labels (e.g. TreeTile).
+	 * @param EditorFolderPath World Outliner folder for the InstancedFoliageActor.
 	 * @param TargetTileCount Exact tile slot count; XxY chosen for near-square cells.
 	 * @param TileIndices Optional comma-separated linear tile indices (Y*TilesX+X).
 	 * @param RandomSeed RNG seed for mesh + yaw; 0 uses a non-deterministic seed.
-	 * @param TreeCullDistanceMeters Camera distance in meters at which trees disappear.
-	 *        <= 0 disables tree distance culling.
-	 * @param ShadowCullDistanceMeters Camera distance in meters at which tree shadows disappear.
-	 *        <= 0 disables shadow distance culling.
+	 * @param TreeCullDistanceMeters Camera distance in meters at which trees and their
+	 *        shadows disappear together. <= 0 disables distance culling.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -72,8 +70,7 @@ public:
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_TileIndices = "",
 			CPP_Default_RandomSeed = "0",
-			CPP_Default_TreeCullDistanceMeters = "0.0",
-			CPP_Default_ShadowCullDistanceMeters = "0.0"))
+			CPP_Default_TreeCullDistanceMeters = "0.0"))
 	static FTreePlaceResult PlaceTreesFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -84,6 +81,5 @@ public:
 		int32 TargetTileCount,
 		const FString& TileIndices,
 		int32 RandomSeed,
-		float TreeCullDistanceMeters,
-		float ShadowCullDistanceMeters);
+		float TreeCullDistanceMeters);
 };
