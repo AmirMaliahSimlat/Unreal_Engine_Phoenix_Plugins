@@ -16,6 +16,10 @@
 #include "InstancedFoliage.h"
 #include "InstancedFoliageActor.h"
 #include "Internationalization/Internationalization.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialInterface.h"
+#include "MaterialTypes.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopedSlowTask.h"
 
 namespace
@@ -174,6 +178,17 @@ namespace
 			{
 				ConfigureHismCullDistance(HISM, TreeCullCm);
 				HISM->SetCastShadow(true);
+				if (const UFoliageType_InstancedStaticMesh* ISMType =
+						Cast<UFoliageType_InstancedStaticMesh>(FoliageType))
+				{
+					for (int32 Slot = 0; Slot < ISMType->OverrideMaterials.Num(); ++Slot)
+					{
+						if (ISMType->OverrideMaterials[Slot])
+						{
+							HISM->SetMaterial(Slot, ISMType->OverrideMaterials[Slot]);
+						}
+					}
+				}
 				HISM->MarkRenderStateDirty();
 			}
 		}
@@ -212,12 +227,71 @@ namespace
 		return Found;
 	}
 
+	UFoliageType* FindFoliageTypeForMeshAndLeaf(
+		AInstancedFoliageActor& IFA,
+		const UStaticMesh* Mesh,
+		const UMaterialInterface* LeafMI,
+		int32 LeafSlotIndex)
+	{
+		UFoliageType* Found = nullptr;
+		IFA.ForEachFoliageInfo([&](UFoliageType* Type, FFoliageInfo& /*Info*/)
+		{
+			const UFoliageType_InstancedStaticMesh* ISMType = Cast<UFoliageType_InstancedStaticMesh>(Type);
+			if (!ISMType || !Mesh || ISMType->GetStaticMesh() != Mesh)
+			{
+				return true;
+			}
+			if (!LeafMI)
+			{
+				return true;
+			}
+			if (ISMType->OverrideMaterials.IsValidIndex(LeafSlotIndex)
+				&& ISMType->OverrideMaterials[LeafSlotIndex] == LeafMI)
+			{
+				Found = Type;
+				return false;
+			}
+			return true;
+		});
+		return Found;
+	}
+
+	void ApplyLeafOverride(
+		UFoliageType_InstancedStaticMesh& Type,
+		UStaticMesh* Mesh,
+		int32 LeafSlotIndex,
+		UMaterialInterface* LeafMI)
+	{
+		if (!Mesh || !LeafMI)
+		{
+			return;
+		}
+
+		const int32 NumSlots = Mesh->GetStaticMaterials().Num();
+		Type.OverrideMaterials.SetNum(FMath::Max(NumSlots, 0));
+		for (int32 I = 0; I < NumSlots; ++I)
+		{
+			Type.OverrideMaterials[I] = Mesh->GetMaterial(I);
+		}
+
+		const int32 Slot = (NumSlots > 0)
+			? FMath::Clamp(LeafSlotIndex, 0, NumSlots - 1)
+			: FMath::Max(LeafSlotIndex, 0);
+		if (!Type.OverrideMaterials.IsValidIndex(Slot))
+		{
+			Type.OverrideMaterials.SetNum(Slot + 1);
+		}
+		Type.OverrideMaterials[Slot] = LeafMI;
+	}
+
 	bool GetOrCreateFoliageSlot(
 		AInstancedFoliageActor& IFA,
 		UStaticMesh* Mesh,
 		int32 TreeCullCm,
 		FTreeFoliageSlot& OutSlot,
-		FString& OutError)
+		FString& OutError,
+		UMaterialInterface* LeafOverride = nullptr,
+		int32 LeafSlotIndex = 1)
 	{
 		OutSlot = FTreeFoliageSlot();
 		if (!Mesh)
@@ -226,13 +300,42 @@ namespace
 			return false;
 		}
 
-		UFoliageType* Type = FindFoliageTypeForMesh(IFA, Mesh);
-		FFoliageInfo* Info = Type ? IFA.FindInfo(Type) : nullptr;
-		if (!Type || !Info)
+		UFoliageType* Type = nullptr;
+		FFoliageInfo* Info = nullptr;
+
+		if (LeafOverride)
 		{
-			Type = nullptr;
-			Info = IFA.AddMesh(Mesh, &Type);
+			Type = FindFoliageTypeForMeshAndLeaf(IFA, Mesh, LeafOverride, LeafSlotIndex);
+			Info = Type ? IFA.FindInfo(Type) : nullptr;
+			if (!Type || !Info)
+			{
+				UFoliageType_InstancedStaticMesh* NewType =
+					NewObject<UFoliageType_InstancedStaticMesh>(&IFA, NAME_None, RF_Transactional);
+				NewType->SetStaticMesh(Mesh);
+				ApplyLeafOverride(*NewType, Mesh, LeafSlotIndex, LeafOverride);
+				Type = IFA.AddFoliageType(NewType, &Info);
+				if (Type && !Info)
+				{
+					Info = IFA.FindInfo(Type);
+				}
+				if (UFoliageType_InstancedStaticMesh* AddedISM = Cast<UFoliageType_InstancedStaticMesh>(Type))
+				{
+					ApplyLeafOverride(*AddedISM, Mesh, LeafSlotIndex, LeafOverride);
+					AddedISM->Modify();
+				}
+			}
 		}
+		else
+		{
+			Type = FindFoliageTypeForMesh(IFA, Mesh);
+			Info = Type ? IFA.FindInfo(Type) : nullptr;
+			if (!Type || !Info)
+			{
+				Type = nullptr;
+				Info = IFA.AddMesh(Mesh, &Type);
+			}
+		}
+
 		if (!Type || !Info)
 		{
 			OutError = FString::Printf(TEXT("Failed to add foliage type for mesh '%s'."), *Mesh->GetName());
@@ -282,6 +385,373 @@ namespace
 			ApplyFoliageCullDistance(Slot.Type, Slot.Info, TreeCullCm);
 		}
 	}
+
+	struct FLabColor
+	{
+		double L = 0.0;
+		double A = 0.0;
+		double B = 0.0;
+	};
+
+	double LabF(double T)
+	{
+		constexpr double Delta = 6.0 / 29.0;
+		constexpr double Delta3 = Delta * Delta * Delta;
+		if (T > Delta3)
+		{
+			return FMath::Pow(T, 1.0 / 3.0);
+		}
+		return T / (3.0 * Delta * Delta) + 4.0 / 29.0;
+	}
+
+	double LabFInv(double T)
+	{
+		constexpr double Delta = 6.0 / 29.0;
+		if (T > Delta)
+		{
+			return T * T * T;
+		}
+		return 3.0 * Delta * Delta * (T - 4.0 / 29.0);
+	}
+
+	FLabColor LinearToLab(const FLinearColor& Color)
+	{
+		const double R = FMath::Max(static_cast<double>(Color.R), 0.0);
+		const double G = FMath::Max(static_cast<double>(Color.G), 0.0);
+		const double B = FMath::Max(static_cast<double>(Color.B), 0.0);
+		const double X = 0.4124564 * R + 0.3575761 * G + 0.1804375 * B;
+		const double Y = 0.2126729 * R + 0.7151522 * G + 0.0721750 * B;
+		const double Z = 0.0193339 * R + 0.1191920 * G + 0.9503041 * B;
+		const double Fx = LabF(X / 0.95047);
+		const double Fy = LabF(Y / 1.00000);
+		const double Fz = LabF(Z / 1.08883);
+		FLabColor Lab;
+		Lab.L = 116.0 * Fy - 16.0;
+		Lab.A = 500.0 * (Fx - Fy);
+		Lab.B = 200.0 * (Fy - Fz);
+		return Lab;
+	}
+
+	FLinearColor LabToLinear(const FLabColor& Lab)
+	{
+		const double Fy = (Lab.L + 16.0) / 116.0;
+		const double Fx = Fy + Lab.A / 500.0;
+		const double Fz = Fy - Lab.B / 200.0;
+		const double X = 0.95047 * LabFInv(Fx);
+		const double Y = 1.00000 * LabFInv(Fy);
+		const double Z = 1.08883 * LabFInv(Fz);
+		FLinearColor Color;
+		Color.R = static_cast<float>(3.2404542 * X - 1.5371385 * Y - 0.4985314 * Z);
+		Color.G = static_cast<float>(-0.9692660 * X + 1.8760108 * Y + 0.0415560 * Z);
+		Color.B = static_cast<float>(0.0556434 * X - 0.2040259 * Y + 1.0572252 * Z);
+		Color.A = 1.0f;
+		Color.R = FMath::Clamp(Color.R, 0.0f, 1.0f);
+		Color.G = FMath::Clamp(Color.G, 0.0f, 1.0f);
+		Color.B = FMath::Clamp(Color.B, 0.0f, 1.0f);
+		return Color;
+	}
+
+	FLabColor Srgb8ToLab(uint8 R, uint8 G, uint8 B)
+	{
+		return LinearToLab(FLinearColor::FromSRGBColor(FColor(R, G, B, 255)));
+	}
+
+	double LabDistSq(const FLabColor& A, const FLabColor& B)
+	{
+		const double DL = A.L - B.L;
+		const double DA = A.A - B.A;
+		const double DB = A.B - B.B;
+		return DL * DL + DA * DA + DB * DB;
+	}
+
+	int32 NearestCentroid(const FLabColor& Sample, const TArray<FLabColor>& Centroids)
+	{
+		int32 Best = 0;
+		double BestDist = LabDistSq(Sample, Centroids[0]);
+		for (int32 I = 1; I < Centroids.Num(); ++I)
+		{
+			const double Dist = LabDistSq(Sample, Centroids[I]);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				Best = I;
+			}
+		}
+		return Best;
+	}
+
+	bool ClusterLeafColors(
+		const TArray<FTreeShapefilePoint>& Points,
+		int32 RequestedK,
+		FRandomStream& Rng,
+		TArray<int32>& OutClusterOfPoint,
+		TArray<FLinearColor>& OutPalette,
+		int32& OutDefaultCluster,
+		FString& OutError)
+	{
+		OutClusterOfPoint.SetNum(Points.Num());
+		for (int32& Id : OutClusterOfPoint)
+		{
+			Id = INDEX_NONE;
+		}
+		OutPalette.Reset();
+		OutDefaultCluster = 0;
+
+		TArray<int32> RgbIndices;
+		RgbIndices.Reserve(Points.Num());
+		for (int32 I = 0; I < Points.Num(); ++I)
+		{
+			if (Points[I].bHasRgb)
+			{
+				RgbIndices.Add(I);
+			}
+		}
+		if (RgbIndices.Num() == 0)
+		{
+			OutError = TEXT("Leaf tint is enabled but no points have valid R/G/B values.");
+			return false;
+		}
+
+		const int32 SampleCount = FMath::Min(RgbIndices.Num(), 10000);
+		TArray<FLabColor> Samples;
+		Samples.Reserve(SampleCount);
+		for (int32 I = 0; I < SampleCount; ++I)
+		{
+			const int32 J = Rng.RandRange(I, RgbIndices.Num() - 1);
+			RgbIndices.Swap(I, J);
+			const FTreeShapefilePoint& Point = Points[RgbIndices[I]];
+			Samples.Add(Srgb8ToLab(Point.R, Point.G, Point.B));
+		}
+
+		int32 K = FMath::Clamp(RequestedK, 1, 64);
+		K = FMath::Min(K, Samples.Num());
+
+		TArray<FLabColor> Centroids;
+		Centroids.Reserve(K);
+		Centroids.Add(Samples[Rng.RandRange(0, Samples.Num() - 1)]);
+		TArray<double> MinDistSq;
+		MinDistSq.SetNum(Samples.Num());
+		while (Centroids.Num() < K)
+		{
+			double DistSum = 0.0;
+			for (int32 I = 0; I < Samples.Num(); ++I)
+			{
+				MinDistSq[I] = LabDistSq(Samples[I], Centroids[0]);
+				for (int32 C = 1; C < Centroids.Num(); ++C)
+				{
+					MinDistSq[I] = FMath::Min(MinDistSq[I], LabDistSq(Samples[I], Centroids[C]));
+				}
+				DistSum += MinDistSq[I];
+			}
+			if (DistSum <= KINDA_SMALL_NUMBER)
+			{
+				break;
+			}
+			double Pick = Rng.FRandRange(0.0, DistSum);
+			int32 Chosen = Samples.Num() - 1;
+			for (int32 I = 0; I < Samples.Num(); ++I)
+			{
+				Pick -= MinDistSq[I];
+				if (Pick <= 0.0)
+				{
+					Chosen = I;
+					break;
+				}
+			}
+			Centroids.Add(Samples[Chosen]);
+		}
+		K = Centroids.Num();
+
+		TArray<int32> Assignment;
+		Assignment.SetNum(Samples.Num());
+		for (int32 Iter = 0; Iter < 32; ++Iter)
+		{
+			for (int32 I = 0; I < Samples.Num(); ++I)
+			{
+				Assignment[I] = NearestCentroid(Samples[I], Centroids);
+			}
+
+			TArray<FLabColor> Sums;
+			TArray<int32> Counts;
+			Sums.SetNum(K);
+			Counts.Init(0, K);
+			for (int32 I = 0; I < Samples.Num(); ++I)
+			{
+				const int32 C = Assignment[I];
+				Sums[C].L += Samples[I].L;
+				Sums[C].A += Samples[I].A;
+				Sums[C].B += Samples[I].B;
+				++Counts[C];
+			}
+
+			double MaxMoveSq = 0.0;
+			for (int32 C = 0; C < K; ++C)
+			{
+				FLabColor NewCentroid = Centroids[C];
+				if (Counts[C] > 0)
+				{
+					const double Inv = 1.0 / static_cast<double>(Counts[C]);
+					NewCentroid.L = Sums[C].L * Inv;
+					NewCentroid.A = Sums[C].A * Inv;
+					NewCentroid.B = Sums[C].B * Inv;
+				}
+				else
+				{
+					NewCentroid = Samples[Rng.RandRange(0, Samples.Num() - 1)];
+				}
+				MaxMoveSq = FMath::Max(MaxMoveSq, LabDistSq(Centroids[C], NewCentroid));
+				Centroids[C] = NewCentroid;
+			}
+			if (MaxMoveSq < 1.0e-4)
+			{
+				break;
+			}
+		}
+
+		TArray<int32> ClusterCounts;
+		ClusterCounts.Init(0, K);
+		for (int32 I = 0; I < Points.Num(); ++I)
+		{
+			if (!Points[I].bHasRgb)
+			{
+				continue;
+			}
+			const FLabColor Lab = Srgb8ToLab(Points[I].R, Points[I].G, Points[I].B);
+			const int32 Cluster = NearestCentroid(Lab, Centroids);
+			OutClusterOfPoint[I] = Cluster;
+			++ClusterCounts[Cluster];
+		}
+
+		OutDefaultCluster = 0;
+		for (int32 C = 1; C < K; ++C)
+		{
+			if (ClusterCounts[C] > ClusterCounts[OutDefaultCluster])
+			{
+				OutDefaultCluster = C;
+			}
+		}
+		for (int32 I = 0; I < Points.Num(); ++I)
+		{
+			if (OutClusterOfPoint[I] == INDEX_NONE)
+			{
+				OutClusterOfPoint[I] = OutDefaultCluster;
+			}
+		}
+
+		OutPalette.SetNum(K);
+		for (int32 C = 0; C < K; ++C)
+		{
+			OutPalette[C] = LabToLinear(Centroids[C]);
+		}
+
+		UE_LOG(
+			LogTreePlacer,
+			Display,
+			TEXT("Leaf tint k-means: rgbPoints=%d samples=%d K=%d defaultCluster=%d (missing RGB -> largest cluster)"),
+			RgbIndices.Num(),
+			SampleCount,
+			K,
+			OutDefaultCluster);
+		for (int32 C = 0; C < K; ++C)
+		{
+			const FColor Srgb = OutPalette[C].ToFColor(true);
+			UE_LOG(
+				LogTreePlacer,
+				Display,
+				TEXT("  cluster %d: sRGB(%d,%d,%d) count=%d"),
+				C,
+				Srgb.R,
+				Srgb.G,
+				Srgb.B,
+				ClusterCounts[C]);
+		}
+
+		return true;
+	}
+
+	UMaterialInterface* LoadLeafTintMaterial(const FString& InPath, FString& OutError)
+	{
+		const FString Path = SanitizeFilePath(InPath);
+		if (Path.IsEmpty())
+		{
+			OutError = TEXT("LeafTintMaterialPath is empty.");
+			return nullptr;
+		}
+
+		UMaterialInterface* Mat = LoadObject<UMaterialInterface>(nullptr, *Path);
+		if (!Mat && !Path.Contains(TEXT(".")))
+		{
+			const FString ObjectPath = Path + TEXT(".") + FPackageName::GetShortName(Path);
+			Mat = LoadObject<UMaterialInterface>(nullptr, *ObjectPath);
+		}
+		if (!Mat)
+		{
+			OutError = FString::Printf(TEXT("Could not load leaf tint material '%s'."), *Path);
+			return nullptr;
+		}
+		return Mat;
+	}
+
+	bool CreateLeafTintInstances(
+		AInstancedFoliageActor& IFA,
+		UMaterialInterface* Master,
+		const FName ParameterName,
+		const TArray<FLinearColor>& Palette,
+		TArray<UMaterialInterface*>& OutMIs,
+		FString& OutError)
+	{
+		OutMIs.Reset();
+		if (!Master)
+		{
+			OutError = TEXT("Leaf tint master material is null.");
+			return false;
+		}
+
+		TArray<FMaterialParameterInfo> ParamInfos;
+		TArray<FGuid> ParamIds;
+		Master->GetAllVectorParameterInfo(ParamInfos, ParamIds);
+		bool bFoundParam = false;
+		for (const FMaterialParameterInfo& Info : ParamInfos)
+		{
+			if (Info.Name == ParameterName)
+			{
+				bFoundParam = true;
+				break;
+			}
+		}
+		if (!bFoundParam)
+		{
+			UE_LOG(
+				LogTreePlacer,
+				Warning,
+				TEXT("Leaf tint parameter '%s' was not found on '%s'. Overrides will still be set."),
+				*ParameterName.ToString(),
+				*Master->GetName());
+		}
+
+		OutMIs.Reserve(Palette.Num());
+		for (int32 I = 0; I < Palette.Num(); ++I)
+		{
+			const FName MicName(*FString::Printf(TEXT("TP_LeafTint_%d"), I));
+			UMaterialInstanceConstant* MIC = FindObject<UMaterialInstanceConstant>(&IFA, *MicName.ToString());
+			if (!MIC)
+			{
+				MIC = NewObject<UMaterialInstanceConstant>(&IFA, MicName, RF_Public | RF_Transactional);
+			}
+			if (!MIC)
+			{
+				OutError = FString::Printf(TEXT("Failed to create leaf tint material instance %d."), I);
+				return false;
+			}
+
+			MIC->SetParentEditorOnly(Master);
+			MIC->SetVectorParameterValueEditorOnly(ParameterName, Palette[I]);
+			MIC->PostEditChange();
+			MIC->MarkPackageDirty();
+			OutMIs.Add(MIC);
+		}
+		return true;
+	}
 }
 
 FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
@@ -294,25 +764,43 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	int32 TargetTileCount,
 	const FString& TileIndices,
 	int32 RandomSeed,
-	float TreeCullDistanceMeters)
+	float TreeCullDistanceMeters,
+	const FString& RedFieldName,
+	const FString& GreenFieldName,
+	const FString& BlueFieldName,
+	const FString& LeafTintMaterialPath,
+	const FString& LeafTintParameterName,
+	int32 LeafMaterialSlotIndex,
+	int32 ColorClusterCount)
 {
 	FTreePlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
+	const FString CleanTintPath = SanitizeFilePath(LeafTintMaterialPath);
+	const bool bTintLeaves = !CleanTintPath.IsEmpty();
+	const FString RedField = RedFieldName.IsEmpty() ? TEXT("R") : RedFieldName;
+	const FString GreenField = GreenFieldName.IsEmpty() ? TEXT("G") : GreenFieldName;
+	const FString BlueField = BlueFieldName.IsEmpty() ? TEXT("B") : BlueFieldName;
+	const FName TintParamName = LeafTintParameterName.IsEmpty()
+		? FName(TEXT("LeafTint"))
+		: FName(*LeafTintParameterName);
+	const int32 RequestedK = FMath::Clamp(ColorClusterCount <= 0 ? 8 : ColorClusterCount, 1, 64);
 
 	UE_LOG(LogTreePlacer, Display, TEXT("========== Tree Place START =========="));
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeCullM=%.1f"),
+		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeCullM=%.1f tint='%s' K=%d"),
 		*CleanInputPath,
 		*TreeMeshFolder,
 		*AltitudeField,
 		TargetTileCount,
 		*TileIndices,
 		RandomSeed,
-		TreeCullDistanceMeters);
+		TreeCullDistanceMeters,
+		bTintLeaves ? *CleanTintPath : TEXT("(off)"),
+		RequestedK);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -349,7 +837,10 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 	TArray<FTreeShapefilePoint> Points;
 	FString ReadError;
-	if (!TreeShapefileReader::ReadPoints(CleanInputPath, AltitudeField, Points, ReadError))
+	const FString RgbRed = bTintLeaves ? RedField : FString();
+	const FString RgbGreen = bTintLeaves ? GreenField : FString();
+	const FString RgbBlue = bTintLeaves ? BlueField : FString();
+	if (!TreeShapefileReader::ReadPoints(CleanInputPath, AltitudeField, Points, ReadError, RgbRed, RgbGreen, RgbBlue))
 	{
 		Result.Message = ReadError;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
@@ -454,15 +945,19 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 		return Result;
 	}
 
-	FRandomStream Rng;
-	if (RandomSeed == 0)
+	int32 EffectiveSeed = RandomSeed;
+	if (EffectiveSeed == 0)
 	{
-		Rng.GenerateNewSeed();
+		EffectiveSeed = FMath::Rand();
+		if (EffectiveSeed == 0)
+		{
+			EffectiveSeed = 1;
+		}
 	}
-	else
-	{
-		Rng.Initialize(RandomSeed);
-	}
+	FRandomStream PlaceRng;
+	FRandomStream ClusterRng;
+	PlaceRng.Initialize(EffectiveSeed);
+	ClusterRng.Initialize(EffectiveSeed);
 
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("TreeTile") : ActorLabelPrefix;
 	const FString FolderPath = EditorFolderPath;
@@ -484,17 +979,58 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 	const int32 TreeCullCm = MetersToCullDistanceCm(TreeCullDistanceMeters);
 
-	TArray<FTreeFoliageSlot> FoliageSlots;
-	FoliageSlots.SetNum(TreeMeshes.Num());
-	for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
+	TArray<int32> ClusterOfPoint;
+	TArray<FLinearColor> Palette;
+	TArray<UMaterialInterface*> LeafMIs;
+	int32 DefaultCluster = 0;
+	int32 PaletteK = 1;
+	if (bTintLeaves)
 	{
-		FString SlotError;
-		if (!GetOrCreateFoliageSlot(*IFA, TreeMeshes[MeshIndex], TreeCullCm, FoliageSlots[MeshIndex], SlotError))
+		UMaterialInterface* Master = nullptr;
+		FString TintError;
+		Master = LoadLeafTintMaterial(CleanTintPath, TintError);
+		if (!Master)
 		{
-			Result.Message = SlotError;
+			Result.Message = TintError;
 			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 			UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
 			return Result;
+		}
+
+		if (!ClusterLeafColors(Points, RequestedK, ClusterRng, ClusterOfPoint, Palette, DefaultCluster, TintError))
+		{
+			Result.Message = TintError;
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
+
+		if (!CreateLeafTintInstances(*IFA, Master, TintParamName, Palette, LeafMIs, TintError))
+		{
+			Result.Message = TintError;
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
+		PaletteK = LeafMIs.Num();
+	}
+
+	const int32 SlotCount = bTintLeaves ? (TreeMeshes.Num() * PaletteK) : TreeMeshes.Num();
+	TArray<FTreeFoliageSlot> FoliageSlots;
+	FoliageSlots.SetNum(SlotCount);
+
+	if (!bTintLeaves)
+	{
+		for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
+		{
+			FString SlotError;
+			if (!GetOrCreateFoliageSlot(*IFA, TreeMeshes[MeshIndex], TreeCullCm, FoliageSlots[MeshIndex], SlotError))
+			{
+				Result.Message = SlotError;
+				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+				UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+				return Result;
+			}
 		}
 	}
 
@@ -544,8 +1080,8 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 				return Result;
 			}
 
-			TArray<TArray<FTransform>> TransformsPerMesh;
-			TransformsPerMesh.SetNum(TreeMeshes.Num());
+			TArray<TArray<FTransform>> TransformsPerSlot;
+			TransformsPerSlot.SetNum(SlotCount);
 
 			for (const int32 PointIndex : Bucket)
 			{
@@ -556,24 +1092,52 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 					Point.LatDeg,
 					Point.AltitudeM);
 
-				const int32 MeshIndex = Rng.RandRange(0, TreeMeshes.Num() - 1);
-				const float YawDeg = Rng.FRandRange(0.0f, 360.0f);
-				TransformsPerMesh[MeshIndex].Add(FTransform(
+				const int32 MeshIndex = PlaceRng.RandRange(0, TreeMeshes.Num() - 1);
+				const int32 ClusterIndex = bTintLeaves
+					? FMath::Clamp(ClusterOfPoint[PointIndex], 0, PaletteK - 1)
+					: 0;
+				const int32 SlotIndex = bTintLeaves
+					? (MeshIndex * PaletteK + ClusterIndex)
+					: MeshIndex;
+				const float YawDeg = PlaceRng.FRandRange(0.0f, 360.0f);
+				TransformsPerSlot[SlotIndex].Add(FTransform(
 					FRotator(0.0, YawDeg, 0.0),
 					WorldPos,
 					FVector::OneVector));
 			}
 
 			bool bTileAdded = false;
-			for (int32 MeshIndex = 0; MeshIndex < TreeMeshes.Num(); ++MeshIndex)
+			for (int32 SlotIndex = 0; SlotIndex < SlotCount; ++SlotIndex)
 			{
-				const TArray<FTransform>& Transforms = TransformsPerMesh[MeshIndex];
+				const TArray<FTransform>& Transforms = TransformsPerSlot[SlotIndex];
 				if (Transforms.Num() == 0)
 				{
 					continue;
 				}
-				if (!AddFoliageInstances(FoliageSlots[MeshIndex], Transforms))
+
+				if (!FoliageSlots[SlotIndex].Type)
 				{
+					const int32 MeshIndex = bTintLeaves ? (SlotIndex / PaletteK) : SlotIndex;
+					UMaterialInterface* LeafMI = bTintLeaves ? LeafMIs[SlotIndex % PaletteK] : nullptr;
+					FString SlotError;
+					if (!GetOrCreateFoliageSlot(
+							*IFA,
+							TreeMeshes[MeshIndex],
+							TreeCullCm,
+							FoliageSlots[SlotIndex],
+							SlotError,
+							LeafMI,
+							LeafMaterialSlotIndex))
+					{
+						UE_LOG(LogTreePlacer, Error, TEXT("Tile %s: %s"), *TileLabel, *SlotError);
+						TreesSkipped += Transforms.Num();
+						continue;
+					}
+				}
+
+				if (!AddFoliageInstances(FoliageSlots[SlotIndex], Transforms))
+				{
+					const int32 MeshIndex = bTintLeaves ? (SlotIndex / PaletteK) : SlotIndex;
 					UE_LOG(LogTreePlacer, Error, TEXT("Tile %s failed to add instances for mesh '%s'."),
 						*TileLabel,
 						*TreeMeshes[MeshIndex]->GetName());
@@ -614,14 +1178,29 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	Result.TreesSkipped = TreesSkipped;
 	Result.TilesSpawned = TilesSpawned;
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-	Result.Message = FString::Printf(
-		TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d mesh types from '%s'. Elapsed: %.2fs."),
-		TreesPlaced,
-		TreesSkipped,
-		TilesSpawned,
-		TreeMeshes.Num(),
-		*TreeMeshFolder,
-		Result.ElapsedSeconds);
+	if (bTintLeaves)
+	{
+		Result.Message = FString::Printf(
+			TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d meshes x %d leaf colors from '%s'. Elapsed: %.2fs."),
+			TreesPlaced,
+			TreesSkipped,
+			TilesSpawned,
+			TreeMeshes.Num(),
+			PaletteK,
+			*TreeMeshFolder,
+			Result.ElapsedSeconds);
+	}
+	else
+	{
+		Result.Message = FString::Printf(
+			TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d mesh types from '%s'. Elapsed: %.2fs."),
+			TreesPlaced,
+			TreesSkipped,
+			TilesSpawned,
+			TreeMeshes.Num(),
+			*TreeMeshFolder,
+			Result.ElapsedSeconds);
+	}
 
 	UE_LOG(LogTreePlacer, Display, TEXT("%s"), *Result.Message);
 	UE_LOG(LogTreePlacer, Display, TEXT("========== Tree Place END =========="));

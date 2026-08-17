@@ -200,6 +200,17 @@ namespace
 		return true;
 	}
 
+	bool ParseByteField(const TArray<uint8>& Record, const FDbfField& Field, uint8& OutByte)
+	{
+		double Value = 0.0;
+		if (!ParseNumericField(Record, Field, Value))
+		{
+			return false;
+		}
+		OutByte = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Value), 0, 255));
+		return true;
+	}
+
 	const FDbfField* FindField(const TArray<FDbfField>& Fields, const FString& Name)
 	{
 		for (const FDbfField& Field : Fields)
@@ -217,7 +228,10 @@ bool TreeShapefileReader::ReadPoints(
 	const FString& ShapefilePath,
 	const FString& AltitudeFieldName,
 	TArray<FTreeShapefilePoint>& OutPoints,
-	FString& OutError)
+	FString& OutError,
+	const FString& RedFieldName,
+	const FString& GreenFieldName,
+	const FString& BlueFieldName)
 {
 	OutPoints.Reset();
 	const FString BasePath = NormalizeShpPath(ShapefilePath);
@@ -274,9 +288,30 @@ bool TreeShapefileReader::ReadPoints(
 		return false;
 	}
 
+	const bool bWantRgb = !RedFieldName.IsEmpty() && !GreenFieldName.IsEmpty() && !BlueFieldName.IsEmpty();
+	const FDbfField* RedField = nullptr;
+	const FDbfField* GreenField = nullptr;
+	const FDbfField* BlueField = nullptr;
+	if (bWantRgb)
+	{
+		RedField = FindField(DbfFields, RedFieldName);
+		GreenField = FindField(DbfFields, GreenFieldName);
+		BlueField = FindField(DbfFields, BlueFieldName);
+		if (!RedField || !GreenField || !BlueField)
+		{
+			OutError = FString::Printf(
+				TEXT("DBF RGB fields not found (need '%s', '%s', '%s')."),
+				*RedFieldName,
+				*GreenFieldName,
+				*BlueFieldName);
+			return false;
+		}
+	}
+
 	int32 Offset = 100;
 	int32 RecordIndex = 0;
 	int32 NullAltitudeCount = 0;
+	int32 NullRgbCount = 0;
 	while (Offset + 8 <= ShpData.Num())
 	{
 		const int32 ContentWords = ReadInt32BE(ShpData, Offset + 4);
@@ -327,6 +362,25 @@ bool TreeShapefileReader::ReadPoints(
 					++NullAltitudeCount;
 					Point.AltitudeM = 0.0;
 				}
+				if (bWantRgb)
+				{
+					uint8 Rv = 0;
+					uint8 Gv = 0;
+					uint8 Bv = 0;
+					if (ParseByteField(Rec, *RedField, Rv)
+						&& ParseByteField(Rec, *GreenField, Gv)
+						&& ParseByteField(Rec, *BlueField, Bv))
+					{
+						Point.bHasRgb = true;
+						Point.R = Rv;
+						Point.G = Gv;
+						Point.B = Bv;
+					}
+					else
+					{
+						++NullRgbCount;
+					}
+				}
 			}
 		}
 
@@ -344,9 +398,10 @@ bool TreeShapefileReader::ReadPoints(
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("Read %d tree points from '%s' (null/empty altitude -> 0: %d)"),
+		TEXT("Read %d tree points from '%s' (null/empty altitude -> 0: %d, missing RGB: %d)"),
 		OutPoints.Num(),
 		*ShpPath,
-		NullAltitudeCount);
+		NullAltitudeCount,
+		NullRgbCount);
 	return true;
 }

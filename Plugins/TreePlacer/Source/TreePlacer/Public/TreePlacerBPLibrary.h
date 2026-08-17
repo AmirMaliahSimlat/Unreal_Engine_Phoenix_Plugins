@@ -58,6 +58,14 @@ public:
 	 * @param RandomSeed RNG seed for mesh + yaw; 0 uses a non-deterministic seed.
 	 * @param TreeCullDistanceMeters Camera distance in meters at which trees and their
 	 *        shadows disappear together. <= 0 disables distance culling.
+	 * @param RedFieldName DBF 0–255 red column (used only when LeafTintMaterialPath is set).
+	 * @param GreenFieldName DBF 0–255 green column.
+	 * @param BlueFieldName DBF 0–255 blue column.
+	 * @param LeafTintMaterialPath Content path of the leaf material to instance.
+	 *        Empty = no coloring (current behavior). Recreate this Blueprint node after updating.
+	 * @param LeafTintParameterName Vector parameter on that material set to the cluster color.
+	 * @param LeafMaterialSlotIndex Mesh material slot to override (0 = first, often bark; 1 = leaves).
+	 * @param ColorClusterCount K-means palette size K (not the mesh count). Clamped 1–64.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -70,7 +78,14 @@ public:
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_TileIndices = "",
 			CPP_Default_RandomSeed = "0",
-			CPP_Default_TreeCullDistanceMeters = "0.0"))
+			CPP_Default_TreeCullDistanceMeters = "0.0",
+			CPP_Default_RedFieldName = "R",
+			CPP_Default_GreenFieldName = "G",
+			CPP_Default_BlueFieldName = "B",
+			CPP_Default_LeafTintMaterialPath = "",
+			CPP_Default_LeafTintParameterName = "LeafTint",
+			CPP_Default_LeafMaterialSlotIndex = "1",
+			CPP_Default_ColorClusterCount = "8"))
 	static FTreePlaceResult PlaceTreesFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -81,5 +96,12 @@ public:
 		int32 TargetTileCount,
 		const FString& TileIndices,
 		int32 RandomSeed,
-		float TreeCullDistanceMeters);
+		float TreeCullDistanceMeters,
+		const FString& RedFieldName,
+		const FString& GreenFieldName,
+		const FString& BlueFieldName,
+		const FString& LeafTintMaterialPath,
+		const FString& LeafTintParameterName,
+		int32 LeafMaterialSlotIndex,
+		int32 ColorClusterCount);
 };
