@@ -35,7 +35,7 @@ namespace BuildingExtrudeUtils
 	 * Builds separate wall+floor and roof meshes from matching base/top rings in actor-local space.
 	 * Triangulates using base ring XY (ear clipping). Side faces connect base[i]→top[i].
 	 * WallsAndFloor = bottom cap + vertical sides. Roof = top cap only.
-	 * Normals face outward; UVs use MetersPerUv density.
+	 * Normals face outward (edge × Up from ring winding); UVs use MetersPerUv density.
 	 */
 	bool BuildPrismPartsFromRings(
 		const TArray<FVector>& BaseRingLocal,

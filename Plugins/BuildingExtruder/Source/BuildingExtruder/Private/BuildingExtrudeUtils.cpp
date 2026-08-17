@@ -16,6 +16,49 @@ namespace
 		return Area2;
 	}
 
+	/** Positive = CCW around Up (viewed from the Up tip / from above if Up is sky). */
+	double SignedAreaAboutUp(const TArray<FVector>& Ring, const FVector& Up)
+	{
+		double Area = 0.0;
+		if (Ring.Num() < 3)
+		{
+			return 0.0;
+		}
+		const FVector Origin = Ring[0];
+		for (int32 I = 0; I < Ring.Num(); ++I)
+		{
+			const FVector A = Ring[I] - Origin;
+			const FVector B = Ring[(I + 1) % Ring.Num()] - Origin;
+			Area += FVector::DotProduct(FVector::CrossProduct(A, B), Up);
+		}
+		return Area;
+	}
+
+	/**
+	 * Outward (away from polygon interior) for a boundary edge, including C/H recesses.
+	 * Uses edge × Up and ring winding in the Up plane — not the vertex centroid.
+	 */
+	FVector EdgeOutwardDir(const FVector& From, const FVector& To, const FVector& Up, double AreaAboutUp)
+	{
+		FVector Edge = To - From;
+		Edge -= Up * FVector::DotProduct(Edge, Up);
+		FVector Outward = FVector::CrossProduct(Edge, Up);
+		if (AreaAboutUp < 0.0)
+		{
+			Outward = -Outward;
+		}
+		Outward = Outward.GetSafeNormal();
+		if (Outward.IsNearlyZero())
+		{
+			Outward = FVector::CrossProduct(To - From, Up).GetSafeNormal();
+			if (AreaAboutUp < 0.0)
+			{
+				Outward = -Outward;
+			}
+		}
+		return Outward;
+	}
+
 	bool PointInTriangleXY(const FVector& P, const FVector& A, const FVector& B, const FVector& C)
 	{
 		const double D1 = (P.X - B.X) * (A.Y - B.Y) - (A.X - B.X) * (P.Y - B.Y);
@@ -111,7 +154,18 @@ namespace
 		const double Dy = B.Max.Y - B.Min.Y;
 		const double Diag = FMath::Sqrt(Dx * Dx + Dy * Dy);
 		B.Pad = FMath::Max(Diag * 0.05, 100.0);
-		B.MaxD = FMath::Max(Diag, 100.0);
+		const double MinHalf = 0.5 * FMath::Min(Dx, Dy);
+		double Area2 = 0.0;
+		double Peri = 0.0;
+		for (int32 I = 0; I < Ring.Num(); ++I)
+		{
+			const FVector& A = Ring[I];
+			const FVector& C = Ring[(I + 1) % Ring.Num()];
+			Area2 += A.X * C.Y - C.X * A.Y;
+			Peri += FVector::Dist2D(A, C);
+		}
+		const double Inr = (Peri > 1.0e-6) ? (FMath::Abs(Area2) / Peri) : 0.0;
+		B.MaxD = FMath::Max(FMath::Max(MinHalf, Inr) * 1.5, 50.0);
 		return B;
 	}
 
@@ -475,7 +529,7 @@ namespace
 		}
 		const FVector2D PA = WaveAt(A, D);
 		const FVector2D PB = WaveAt(B, D);
-		if ((PA - PB).SizeSquared() > 1.0e-4)
+		if ((PA - PB).SizeSquared() > 1.0)
 		{
 			return false;
 		}
@@ -541,12 +595,15 @@ namespace
 				continue;
 			}
 			const double U = FVector2D::DotProduct(P - Q0, Edge) / EdgeLenSq;
-			if (U < 1.0e-4 || U > 1.0 - 1.0e-4)
+			// Axis-aligned C/U notches often hit exactly at an edge endpoint.
+			// Rejecting those (old 1e-4 margin) skips the split and the hip falls back to flat.
+			if (U < -1.0e-3 || U > 1.0 + 1.0e-3)
 			{
 				continue;
 			}
-			const FVector2D Closest = Q0 + Edge * U;
-			if ((P - Closest).SizeSquared() > 1.0e-4)
+			const double UClamped = FMath::Clamp(U, 0.0, 1.0);
+			const FVector2D Closest = Q0 + Edge * UClamped;
+			if ((P - Closest).SizeSquared() > 1.0)
 			{
 				continue;
 			}
@@ -554,7 +611,7 @@ namespace
 			{
 				bFound = true;
 				BestD = D;
-				BestP = P;
+				BestP = Closest;
 			}
 		}
 		if (!bFound)
@@ -575,9 +632,13 @@ namespace
 		int32 RightEdge)
 	{
 		const double Denom = 1.0 + FVector2D::DotProduct(LeftN, RightN);
-		const FVector2D Vel = (FMath::Abs(Denom) < 1.0e-6)
+		FVector2D Vel = (FMath::Abs(Denom) < 1.0e-6)
 			? (LeftN + RightN) * 0.5
 			: (LeftN + RightN) / Denom;
+		if (Vel.SizeSquared() > 1.0e4)
+		{
+			Vel = Vel.GetSafeNormal() * 100.0;
+		}
 		FWaveVert W;
 		W.Vel = Vel;
 		W.P0 = PAtD - Vel * D;
@@ -615,6 +676,38 @@ namespace
 		}
 	}
 
+	/** True when the shrinking loop has become a ridge (or a point), not a 2D roof region. */
+	bool WaveLoopIsRidge(const TArray<FWaveVert>& Loop, double D)
+	{
+		const int32 N = Loop.Num();
+		if (N < 3)
+		{
+			return true;
+		}
+		TArray<FVector2D> Pts;
+		Pts.SetNum(N);
+		double Area2 = 0.0;
+		double Peri = 0.0;
+		for (int32 I = 0; I < N; ++I)
+		{
+			Pts[I] = WaveAt(Loop[I], D);
+		}
+		for (int32 I = 0; I < N; ++I)
+		{
+			const FVector2D& A = Pts[I];
+			const FVector2D& B = Pts[(I + 1) % N];
+			Area2 += A.X * B.Y - B.X * A.Y;
+			Peri += (B - A).Size();
+		}
+		if (Peri < 20.0)
+		{
+			return true;
+		}
+		const double Area = FMath::Abs(Area2) * 0.5;
+		const double Inr = 2.0 * Area / Peri;
+		return Inr < 3.0;
+	}
+
 	bool LoopPointsInBounds(const TArray<FWaveVert>& Loop, double D, const FHipBounds& Bounds)
 	{
 		for (const FWaveVert& V : Loop)
@@ -643,6 +736,11 @@ namespace
 
 		for (int32 Guard = 0; Guard < 256 && Loop.Num() >= 3; ++Guard)
 		{
+			if (WaveLoopIsRidge(Loop, DCurrent))
+			{
+				break;
+			}
+
 			double BestD = TNumericLimits<double>::Max();
 			int32 EventType = 0;
 			int32 IA = INDEX_NONE;
@@ -658,6 +756,7 @@ namespace
 				if (WaveMeet(Loop[I], Loop[J], DCurrent, D, P)
 					&& D <= Bounds.MaxD
 					&& IsPointInHipBounds(Bounds, P)
+					&& LoopPointsInBounds(Loop, D, Bounds)
 					&& D < BestD)
 				{
 					BestD = D;
@@ -685,6 +784,7 @@ namespace
 					if (WaveHitEdge(Loop[I], Loop[E], Loop[E1], DCurrent, D, P)
 						&& D <= Bounds.MaxD
 						&& IsPointInHipBounds(Bounds, P)
+						&& LoopPointsInBounds(Loop, D, Bounds)
 						&& D < BestD)
 					{
 						BestD = D;
@@ -702,7 +802,7 @@ namespace
 			}
 			if (BestD > Bounds.MaxD || !IsPointInHipBounds(Bounds, HitP) || !LoopPointsInBounds(Loop, BestD, Bounds))
 			{
-				return false;
+				break;
 			}
 
 			EmitLoft(OutTris, Loop, DCurrent, BestD);
@@ -879,19 +979,17 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 
 	// Orient against explicit outward dirs (CCW-in-XY guesses fail after Cesium frames).
 	FVector Up(0, 0, 0);
-	FVector Center(0, 0, 0);
 	for (int32 I = 0; I < Base.Num(); ++I)
 	{
 		Up += (Top[I] - Base[I]);
-		Center += Base[I];
 	}
 	Up = Up.GetSafeNormal();
 	if (Up.IsNearlyZero())
 	{
 		Up = FVector::UpVector;
 	}
-	Center /= static_cast<double>(Base.Num());
 	const FVector Down = -Up;
+	const double AreaAboutUp = SignedAreaAboutUp(Base, Up);
 
 	double MinX = Base[0].X;
 	double MinY = Base[0].Y;
@@ -946,7 +1044,7 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 			Up);
 	}
 
-	// Walls — normals face outward (horizontal, away from footprint center).
+	// Walls — outward is edge × Up using ring winding (works for C/H recesses).
 	const int32 N = Base.Num();
 	for (int32 I = 0; I < N; ++I)
 	{
@@ -965,14 +1063,7 @@ bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 		const FVector2D UvT0(static_cast<float>(U0), static_cast<float>(Vt0));
 		const FVector2D UvT1(static_cast<float>(U1), static_cast<float>(Vt1));
 
-		const FVector EdgeMid = 0.5 * (B0 + B1);
-		FVector Outward = EdgeMid - Center;
-		Outward -= Up * FVector::DotProduct(Outward, Up);
-		Outward = Outward.GetSafeNormal();
-		if (Outward.IsNearlyZero())
-		{
-			Outward = FVector::CrossProduct(B1 - B0, Up).GetSafeNormal();
-		}
+		const FVector Outward = EdgeOutwardDir(B0, B1, Up, AreaAboutUp);
 
 		AddTriWithUV(OutWallsAndFloor, B0, B1, T1, UvB0, UvB1, UvT1, Outward);
 		AddTriWithUV(OutWallsAndFloor, B0, T1, T0, UvB0, UvT1, UvT0, Outward);
@@ -1109,6 +1200,13 @@ bool BuildingExtrudeUtils::BuildHippedRoofPartsFromRings(
 		const FVector A = PointOnEavePlane(Tri.A, Top[0], Up) + Up * (Tri.DA * Scale);
 		const FVector B = PointOnEavePlane(Tri.B, Top[0], Up) + Up * (Tri.DB * Scale);
 		const FVector C = PointOnEavePlane(Tri.C, Top[0], Up) + Up * (Tri.DC * Scale);
+		const FVector FaceN = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
+		const double DSpan = FMath::Max3(Tri.DA, Tri.DB, Tri.DC) - FMath::Min3(Tri.DA, Tri.DB, Tri.DC);
+		// Drop vertical "fin" triangles left by shrinking past a ridge.
+		if (!FaceN.IsNearlyZero() && FMath::Abs(FVector::DotProduct(FaceN, Up)) < 0.25 && DSpan * Scale > 30.0)
+		{
+			continue;
+		}
 		AddTriWithUV(HipRoof, A, B, C, CapUvFromXY(Tri.A), CapUvFromXY(Tri.B), CapUvFromXY(Tri.C), Up);
 	}
 	if (HipRoof.Triangles.Num() >= 3)
@@ -1156,12 +1254,10 @@ bool BuildingExtrudeUtils::BuildParapetRoofPartsFromRings(
 	}
 
 	FVector Up(0, 0, 0);
-	FVector Center(0, 0, 0);
 	double WallHeightCm = 0.0;
 	for (int32 I = 0; I < Base.Num(); ++I)
 	{
 		Up += (Top[I] - Base[I]);
-		Center += Base[I];
 		WallHeightCm += FVector::Distance(Base[I], Top[I]);
 	}
 	Up = Up.GetSafeNormal();
@@ -1169,7 +1265,7 @@ bool BuildingExtrudeUtils::BuildParapetRoofPartsFromRings(
 	{
 		Up = FVector::UpVector;
 	}
-	Center /= static_cast<double>(Base.Num());
+	const double AreaAboutUp = SignedAreaAboutUp(Top, Up);
 	WallHeightCm /= static_cast<double>(Base.Num());
 	HeightCm = FMath::Min(HeightCm, WallHeightCm * 0.95);
 	if (HeightCm <= 1.0)
@@ -1273,13 +1369,7 @@ bool BuildingExtrudeUtils::BuildParapetRoofPartsFromRings(
 		const FVector2D UvT0(static_cast<float>(U0), static_cast<float>(Vh));
 		const FVector2D UvT1(static_cast<float>(U1), static_cast<float>(Vh));
 
-		FVector Inward = Center - 0.5 * (I0 + I1);
-		Inward -= Up * FVector::DotProduct(Inward, Up);
-		Inward = Inward.GetSafeNormal();
-		if (Inward.IsNearlyZero())
-		{
-			Inward = -FVector::CrossProduct(I1 - I0, Up).GetSafeNormal();
-		}
+		const FVector Inward = -EdgeOutwardDir(I0, I1, Up, AreaAboutUp);
 		AddQuadWithUV(
 			ParapetRoof,
 			InnerDeck[I], InnerDeck[J], InnerTop[J], InnerTop[I],
