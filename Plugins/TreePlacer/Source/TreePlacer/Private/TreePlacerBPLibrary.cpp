@@ -16,11 +16,14 @@
 #include "InstancedFoliage.h"
 #include "InstancedFoliageActor.h"
 #include "Internationalization/Internationalization.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "MaterialTypes.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
+#include "UObject/SoftObjectPath.h"
 
 namespace
 {
@@ -669,27 +672,108 @@ namespace
 		return true;
 	}
 
+	FString NormalizeLeafTintObjectPath(const FString& InPath)
+	{
+		FString Path = SanitizeFilePath(InPath);
+		Path.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+		// Content Browser "Copy Reference": MaterialInstanceConstant'/Plugin/Path/Asset.Asset'
+		const int32 QuoteStart = Path.Find(TEXT("'"));
+		const int32 QuoteEnd = Path.Find(TEXT("'"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		if (QuoteStart != INDEX_NONE && QuoteEnd > QuoteStart)
+		{
+			Path = Path.Mid(QuoteStart + 1, QuoteEnd - QuoteStart - 1);
+		}
+
+		if (Path.StartsWith(TEXT("/All/")))
+		{
+			Path = Path.RightChop(4);
+		}
+		else if (Path.StartsWith(TEXT("All/")))
+		{
+			Path = TEXT("/") + Path.RightChop(4);
+		}
+
+		if (Path.EndsWith(TEXT(".uasset"), ESearchCase::IgnoreCase))
+		{
+			Path.LeftChopInline(7);
+		}
+		else if (Path.EndsWith(TEXT(".umap"), ESearchCase::IgnoreCase))
+		{
+			Path.LeftChopInline(5);
+		}
+
+		if (Path.Len() >= 2 && Path[1] == TEXT(':'))
+		{
+			FString PackageName;
+			if (FPackageName::TryConvertFilenameToLongPackageName(Path, PackageName))
+			{
+				Path = PackageName;
+			}
+		}
+
+		Path.RemoveFromEnd(TEXT("/"));
+		return Path;
+	}
+
+	UMaterialInterface* TryLoadMaterialAtPath(const FString& ObjectPath)
+	{
+		if (ObjectPath.IsEmpty())
+		{
+			return nullptr;
+		}
+		if (UMaterialInterface* Mat = LoadObject<UMaterialInterface>(nullptr, *ObjectPath))
+		{
+			return Mat;
+		}
+		return Cast<UMaterialInterface>(FSoftObjectPath(ObjectPath).TryLoad());
+	}
+
 	UMaterialInterface* LoadLeafTintMaterial(const FString& InPath, FString& OutError)
 	{
-		const FString Path = SanitizeFilePath(InPath);
+		const FString Path = NormalizeLeafTintObjectPath(InPath);
 		if (Path.IsEmpty())
 		{
 			OutError = TEXT("LeafTintMaterialPath is empty.");
 			return nullptr;
 		}
 
-		UMaterialInterface* Mat = LoadObject<UMaterialInterface>(nullptr, *Path);
-		if (!Mat && !Path.Contains(TEXT(".")))
+		TArray<FString> Candidates;
+		Candidates.Add(Path);
+		const FString PackagePath = Path.Contains(TEXT("."))
+			? FPackageName::ObjectPathToPackageName(Path)
+			: Path;
+		const FString ObjectPath = PackagePath + TEXT(".") + FPackageName::GetShortName(PackagePath);
+		Candidates.AddUnique(PackagePath);
+		Candidates.AddUnique(ObjectPath);
+
+		for (const FString& Candidate : Candidates)
 		{
-			const FString ObjectPath = Path + TEXT(".") + FPackageName::GetShortName(Path);
-			Mat = LoadObject<UMaterialInterface>(nullptr, *ObjectPath);
+			if (UMaterialInterface* Mat = TryLoadMaterialAtPath(Candidate))
+			{
+				UE_LOG(LogTreePlacer, Display, TEXT("Loaded leaf tint material '%s'."), *Mat->GetPathName());
+				return Mat;
+			}
 		}
-		if (!Mat)
+
+		IAssetRegistry& AssetRegistry =
+			FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+		TArray<FAssetData> Assets;
+		AssetRegistry.GetAssetsByPackageName(*PackagePath, Assets);
+		for (const FAssetData& Asset : Assets)
 		{
-			OutError = FString::Printf(TEXT("Could not load leaf tint material '%s'."), *Path);
-			return nullptr;
+			if (UMaterialInterface* Mat = Cast<UMaterialInterface>(Asset.GetAsset()))
+			{
+				UE_LOG(LogTreePlacer, Display, TEXT("Loaded leaf tint material '%s'."), *Mat->GetPathName());
+				return Mat;
+			}
 		}
-		return Mat;
+
+		OutError = FString::Printf(
+			TEXT("Could not load leaf tint material '%s' (normalized '%s'). Use a Content path such as /Plugin/Folder/MI_Leaves, with or without .uasset."),
+			*InPath,
+			*Path);
+		return nullptr;
 	}
 
 	bool CreateLeafTintInstances(
@@ -721,12 +805,24 @@ namespace
 		}
 		if (!bFoundParam)
 		{
+			FString FoundNames;
+			const int32 MaxListed = 16;
+			for (int32 I = 0; I < ParamInfos.Num() && I < MaxListed; ++I)
+			{
+				if (!FoundNames.IsEmpty())
+				{
+					FoundNames += TEXT(", ");
+				}
+				FoundNames += ParamInfos[I].Name.ToString();
+			}
 			UE_LOG(
 				LogTreePlacer,
 				Warning,
-				TEXT("Leaf tint parameter '%s' was not found on '%s'. Overrides will still be set."),
+				TEXT("Leaf tint parameter '%s' was not found on '%s'. Vector params: %s%s"),
 				*ParameterName.ToString(),
-				*Master->GetName());
+				*Master->GetName(),
+				FoundNames.IsEmpty() ? TEXT("(none)") : *FoundNames,
+				ParamInfos.Num() > MaxListed ? TEXT(", ...") : TEXT(""));
 		}
 
 		OutMIs.Reserve(Palette.Num());
