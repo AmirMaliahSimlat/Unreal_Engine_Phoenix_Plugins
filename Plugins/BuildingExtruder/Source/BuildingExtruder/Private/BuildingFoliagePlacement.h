@@ -6,7 +6,6 @@ class AInstancedFoliageActor;
 class UFoliageType;
 class UStaticMesh;
 struct FFoliageInfo;
-struct FTransform;
 
 struct FBuildingFoliageSlot
 {
