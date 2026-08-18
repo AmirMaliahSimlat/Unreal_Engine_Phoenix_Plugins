@@ -496,6 +496,31 @@ namespace
 		Tris.Add(Tri);
 	}
 
+	/** Edge whose two vertices share offset-from-eave (iso-height) is parallel to that slope's footprint edge. */
+	FVector2D EaveDirFromRoofTri2D(const FRoofTri2D& Tri)
+	{
+		FVector2D BestDir = FVector2D::ZeroVector;
+		double BestDiff = TNumericLimits<double>::Max();
+		auto Consider = [&BestDir, &BestDiff](const FVector2D& P0, const FVector2D& P1, double D0, double D1)
+		{
+			const FVector2D Delta = P1 - P0;
+			if (Delta.SizeSquared() < 1.0)
+			{
+				return;
+			}
+			const double Diff = FMath::Abs(D0 - D1);
+			if (Diff < BestDiff)
+			{
+				BestDiff = Diff;
+				BestDir = Delta.GetSafeNormal();
+			}
+		};
+		Consider(Tri.A, Tri.B, Tri.DA, Tri.DB);
+		Consider(Tri.B, Tri.C, Tri.DB, Tri.DC);
+		Consider(Tri.C, Tri.A, Tri.DC, Tri.DA);
+		return BestDir;
+	}
+
 	struct FWaveVert
 	{
 		FVector2D P0;
@@ -1498,6 +1523,7 @@ bool BuildingExtrudeUtils::BuildRoofPlacementTriangles(
 					Place.A = A;
 					Place.B = B;
 					Place.C = C;
+					Place.AlignDirXY = EaveDirFromRoofTri2D(Tri);
 					OutTris.Add(Place);
 				}
 				if (OutTris.Num() > 0)

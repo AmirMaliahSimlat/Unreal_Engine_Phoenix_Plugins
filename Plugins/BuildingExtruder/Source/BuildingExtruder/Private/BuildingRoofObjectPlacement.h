@@ -26,12 +26,14 @@ namespace BuildingRoofObjectPlacement
 	FRoofObjectFootprint MakeFootprint(const UStaticMesh& Mesh);
 
 	/**
-	 * Picks a random yaw-only pose on the usable roof faces.
-	 * The full XY box (rotated) must stay inside one roof face with a gap, and not overlap Occupied.
-	 * On slopes, Z is the lowest roof height under the box so the downhill edge sits on the roof.
+	 * Picks a pose on the usable roof faces. Yaw follows the slope eave (hipped) or the
+	 * closest footprint edge (flat / parapet). The full XY box must stay inside one face
+	 * with a gap, and not overlap Occupied. On slopes, Z is the lowest roof height under
+	 * the box so the downhill edge sits on the roof.
 	 */
 	bool TryPlace(
 		const TArray<FRoofPlaceTriangle>& WorldTris,
+		const TArray<FVector2D>& FootprintXY,
 		const FRoofObjectFootprint& Foot,
 		const TArray<FPlacedRoofObject2D>& Occupied,
 		FRandomStream& Rng,

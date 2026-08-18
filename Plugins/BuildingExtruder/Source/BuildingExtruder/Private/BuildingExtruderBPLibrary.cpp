@@ -210,6 +210,7 @@ namespace
 		FExtrudedPrismMesh& OutRoofWorld,
 		FVector& OutCentroid,
 		TArray<FRoofPlaceTriangle>* OutPlaceTris,
+		TArray<FVector2D>* OutFootprintXY,
 		FString& OutError)
 	{
 		const TArray<FVector2D>& Ring = Feature.OuterRingLonLat;
@@ -278,6 +279,16 @@ namespace
 		AppendWorldMesh(OutWallsAndFloorWorld, LocalWalls, Origin);
 		AppendWorldMesh(OutRoofWorld, LocalRoof, Origin);
 
+		if (OutFootprintXY)
+		{
+			OutFootprintXY->Reset();
+			OutFootprintXY->Reserve(TopWorld.Num());
+			for (const FVector& P : TopWorld)
+			{
+				OutFootprintXY->Add(FVector2D(P.X, P.Y));
+			}
+		}
+
 		if (OutPlaceTris)
 		{
 			OutPlaceTris->Reset();
@@ -298,6 +309,7 @@ namespace
 					WorldTri.A = Tri.A + Origin;
 					WorldTri.B = Tri.B + Origin;
 					WorldTri.C = Tri.C + Origin;
+					WorldTri.AlignDirXY = Tri.AlignDirXY;
 					OutPlaceTris->Add(WorldTri);
 				}
 			}
@@ -869,6 +881,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				FVector Centroid;
 				FString ExtrudeError;
 				TArray<FRoofPlaceTriangle> PlaceTris;
+				TArray<FVector2D> FootprintXY;
 				if (!BuildFeaturePartsWorld(
 						*Georeference,
 						Features[FeatureIndex],
@@ -884,6 +897,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 						BuildingRoof,
 						Centroid,
 						bPlaceRoofObjects ? &PlaceTris : nullptr,
+						bPlaceRoofObjects ? &FootprintXY : nullptr,
 						ExtrudeError))
 				{
 					++BuildingsSkipped;
@@ -929,6 +943,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 						FPlacedRoofObject2D Placed;
 						if (!BuildingRoofObjectPlacement::TryPlace(
 								PlaceTris,
+								FootprintXY,
 								RoofFeet[MeshIndex],
 								Occupied,
 								MaterialRng,

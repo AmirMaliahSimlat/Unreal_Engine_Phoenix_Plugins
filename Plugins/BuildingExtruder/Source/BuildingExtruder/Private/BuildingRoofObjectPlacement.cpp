@@ -144,6 +144,51 @@ namespace
 		}
 		return false;
 	}
+
+	FVector2D ClosestFootprintEdgeDir(const FVector2D& P, const TArray<FVector2D>& Ring)
+	{
+		if (Ring.Num() < 2)
+		{
+			return FVector2D::ZeroVector;
+		}
+		double BestDist = TNumericLimits<double>::Max();
+		FVector2D BestDir = FVector2D::ZeroVector;
+		const int32 N = Ring.Num();
+		const int32 SegCount = N >= 3 ? N : (N - 1);
+		for (int32 I = 0; I < SegCount; ++I)
+		{
+			const FVector2D& A = Ring[I];
+			const FVector2D& B = Ring[(I + 1) % N];
+			const FVector2D Delta = B - A;
+			if (Delta.SizeSquared() < 1.0)
+			{
+				continue;
+			}
+			const double Dist = DistPointSegXY(P, A, B);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				BestDir = Delta.GetSafeNormal();
+			}
+		}
+		return BestDir;
+	}
+
+	/** Local +X parallel to Dir. 0 and 180 are the same alignment. */
+	float YawDegFromDirXY(const FVector2D& Dir)
+	{
+		if (Dir.SizeSquared() < 1.0e-12)
+		{
+			return 0.0f;
+		}
+		float Yaw = FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
+		Yaw = FMath::Fmod(Yaw, 180.0f);
+		if (Yaw < 0.0f)
+		{
+			Yaw += 180.0f;
+		}
+		return Yaw;
+	}
 }
 
 FRoofObjectFootprint BuildingRoofObjectPlacement::MakeFootprint(const UStaticMesh& Mesh)
@@ -162,6 +207,7 @@ FRoofObjectFootprint BuildingRoofObjectPlacement::MakeFootprint(const UStaticMes
 
 bool BuildingRoofObjectPlacement::TryPlace(
 	const TArray<FRoofPlaceTriangle>& WorldTris,
+	const TArray<FVector2D>& FootprintXY,
 	const FRoofObjectFootprint& Foot,
 	const TArray<FPlacedRoofObject2D>& Occupied,
 	FRandomStream& Rng,
@@ -202,7 +248,13 @@ bool BuildingRoofObjectPlacement::TryPlace(
 		const double W = 1.0 - U - V;
 		const FVector Sample = InterpolateOnTri(Tri, U, V, W);
 		const FVector2D Center(Sample.X, Sample.Y);
-		const float YawDeg = Rng.FRandRange(0.0f, 360.0f);
+
+		FVector2D AlignDir = Tri.AlignDirXY;
+		if (AlignDir.SizeSquared() < 1.0e-8)
+		{
+			AlignDir = ClosestFootprintEdgeDir(Center, FootprintXY);
+		}
+		const float YawDeg = YawDegFromDirXY(AlignDir);
 		FootprintCornersXY(Foot, Center, YawDeg, Corners);
 
 		double MinRoofZ = 0.0;

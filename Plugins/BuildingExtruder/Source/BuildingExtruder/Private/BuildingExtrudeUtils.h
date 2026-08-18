@@ -26,6 +26,8 @@ struct FRoofPlaceTriangle
 	FVector A = FVector::ZeroVector;
 	FVector B = FVector::ZeroVector;
 	FVector C = FVector::ZeroVector;
+	/** XY direction parallel to this slope's eave. Zero = use closest footprint edge. */
+	FVector2D AlignDirXY = FVector2D::ZeroVector;
 };
 
 namespace BuildingExtrudeUtils
