@@ -4,8 +4,8 @@
 
 namespace
 {
-	constexpr double ExtraClearanceCm = 25.0;
-	constexpr int32 SampleAttempts = 40;
+	constexpr double ExtraClearanceCm = 50.0;
+	constexpr int32 SampleAttempts = 64;
 
 	double DistPointSegXY(const FVector2D& P, const FVector2D& A, const FVector2D& B)
 	{
@@ -62,15 +62,15 @@ namespace
 		return Tri.A * U + Tri.B * V + Tri.C * W;
 	}
 
-	bool CircleFitsTri(
+	bool PointFitsTri(
 		const FRoofPlaceTriangle& Tri,
-		const FVector2D& Center,
-		double Radius)
+		const FVector2D& P,
+		double ClearanceCm)
 	{
 		double U = 0.0;
 		double V = 0.0;
 		double W = 0.0;
-		if (!BarycentricXY(Tri.A, Tri.B, Tri.C, Center, U, V, W))
+		if (!BarycentricXY(Tri.A, Tri.B, Tri.C, P, U, V, W))
 		{
 			return false;
 		}
@@ -81,9 +81,52 @@ namespace
 		const FVector2D A(Tri.A.X, Tri.A.Y);
 		const FVector2D B(Tri.B.X, Tri.B.Y);
 		const FVector2D C(Tri.C.X, Tri.C.Y);
-		return DistPointSegXY(Center, A, B) >= Radius
-			&& DistPointSegXY(Center, B, C) >= Radius
-			&& DistPointSegXY(Center, C, A) >= Radius;
+		return DistPointSegXY(P, A, B) >= ClearanceCm
+			&& DistPointSegXY(P, B, C) >= ClearanceCm
+			&& DistPointSegXY(P, C, A) >= ClearanceCm;
+	}
+
+	void FootprintCornersXY(
+		const FRoofObjectFootprint& Foot,
+		const FVector2D& Center,
+		float YawDeg,
+		TArray<FVector2D>& OutCorners)
+	{
+		OutCorners.Reset();
+		const FRotator YawRot(0.0, YawDeg, 0.0);
+		const FVector2D Locals[4] = {
+			FVector2D(Foot.LocalMinX, Foot.LocalMinY),
+			FVector2D(Foot.LocalMaxX, Foot.LocalMinY),
+			FVector2D(Foot.LocalMaxX, Foot.LocalMaxY),
+			FVector2D(Foot.LocalMinX, Foot.LocalMaxY)
+		};
+		for (const FVector2D& Local : Locals)
+		{
+			const FVector Rotated = YawRot.RotateVector(FVector(Local.X, Local.Y, 0.0));
+			OutCorners.Add(Center + FVector2D(Rotated.X, Rotated.Y));
+		}
+	}
+
+	bool BoxFitsTri(
+		const FRoofPlaceTriangle& Tri,
+		const TArray<FVector2D>& Corners,
+		double ClearanceCm,
+		double& OutMinZ)
+	{
+		OutMinZ = TNumericLimits<double>::Max();
+		for (const FVector2D& Corner : Corners)
+		{
+			if (!PointFitsTri(Tri, Corner, ClearanceCm))
+			{
+				return false;
+			}
+			double U = 0.0;
+			double V = 0.0;
+			double W = 0.0;
+			BarycentricXY(Tri.A, Tri.B, Tri.C, Corner, U, V, W);
+			OutMinZ = FMath::Min(OutMinZ, static_cast<double>(InterpolateOnTri(Tri, U, V, W).Z));
+		}
+		return OutMinZ < TNumericLimits<double>::Max() / 4.0;
 	}
 
 	bool OverlapsOccupied(
@@ -110,6 +153,10 @@ FRoofObjectFootprint BuildingRoofObjectPlacement::MakeFootprint(const UStaticMes
 	const FVector Size = Box.GetSize();
 	Foot.RadiusCm = 0.5 * FVector2D(Size.X, Size.Y).Size();
 	Foot.PivotZMin = Box.Min.Z;
+	Foot.LocalMinX = Box.Min.X;
+	Foot.LocalMinY = Box.Min.Y;
+	Foot.LocalMaxX = Box.Max.X;
+	Foot.LocalMaxY = Box.Max.Y;
 	return Foot;
 }
 
@@ -121,8 +168,11 @@ bool BuildingRoofObjectPlacement::TryPlace(
 	FTransform& OutXform,
 	FPlacedRoofObject2D& OutOccupied)
 {
-	const double NeedRadius = Foot.RadiusCm + ExtraClearanceCm;
-	if (NeedRadius < 1.0 || WorldTris.Num() == 0)
+	const double SizeX = FMath::Abs(Foot.LocalMaxX - Foot.LocalMinX);
+	const double SizeY = FMath::Abs(Foot.LocalMaxY - Foot.LocalMinY);
+	const double ClearanceCm = FMath::Max(ExtraClearanceCm, 0.2 * FMath::Max(SizeX, SizeY));
+	const double NeedInradius = Foot.RadiusCm + ClearanceCm;
+	if (WorldTris.Num() == 0 || NeedInradius < 1.0)
 	{
 		return false;
 	}
@@ -131,7 +181,7 @@ bool BuildingRoofObjectPlacement::TryPlace(
 	Eligible.Reserve(WorldTris.Num());
 	for (int32 I = 0; I < WorldTris.Num(); ++I)
 	{
-		if (TriangleInradiusXY(WorldTris[I].A, WorldTris[I].B, WorldTris[I].C) > NeedRadius)
+		if (TriangleInradiusXY(WorldTris[I].A, WorldTris[I].B, WorldTris[I].C) > NeedInradius)
 		{
 			Eligible.Add(I);
 		}
@@ -141,6 +191,7 @@ bool BuildingRoofObjectPlacement::TryPlace(
 		return false;
 	}
 
+	TArray<FVector2D> Corners;
 	for (int32 Attempt = 0; Attempt < SampleAttempts; ++Attempt)
 	{
 		const FRoofPlaceTriangle& Tri = WorldTris[Eligible[Rng.RandRange(0, Eligible.Num() - 1)]];
@@ -151,7 +202,11 @@ bool BuildingRoofObjectPlacement::TryPlace(
 		const double W = 1.0 - U - V;
 		const FVector Sample = InterpolateOnTri(Tri, U, V, W);
 		const FVector2D Center(Sample.X, Sample.Y);
-		if (!CircleFitsTri(Tri, Center, NeedRadius))
+		const float YawDeg = Rng.FRandRange(0.0f, 360.0f);
+		FootprintCornersXY(Foot, Center, YawDeg, Corners);
+
+		double MinRoofZ = 0.0;
+		if (!BoxFitsTri(Tri, Corners, ClearanceCm, MinRoofZ))
 		{
 			continue;
 		}
@@ -160,9 +215,8 @@ bool BuildingRoofObjectPlacement::TryPlace(
 			continue;
 		}
 
-		FVector Location = Sample;
+		FVector Location(Center.X, Center.Y, MinRoofZ);
 		Location.Z -= Foot.PivotZMin;
-		const float YawDeg = Rng.FRandRange(0.0f, 360.0f);
 		OutXform = FTransform(FRotator(0.0, YawDeg, 0.0), Location, FVector::OneVector);
 		OutOccupied.CenterXY = Center;
 		OutOccupied.RadiusCm = Foot.RadiusCm;

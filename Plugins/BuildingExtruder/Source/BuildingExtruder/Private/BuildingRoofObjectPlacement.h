@@ -15,6 +15,10 @@ struct FRoofObjectFootprint
 {
 	double RadiusCm = 0.0;
 	double PivotZMin = 0.0;
+	double LocalMinX = 0.0;
+	double LocalMinY = 0.0;
+	double LocalMaxX = 0.0;
+	double LocalMaxY = 0.0;
 };
 
 namespace BuildingRoofObjectPlacement
@@ -23,7 +27,8 @@ namespace BuildingRoofObjectPlacement
 
 	/**
 	 * Picks a random yaw-only pose on the usable roof faces.
-	 * Circle of RadiusCm+margin must stay inside a face (XY) and not overlap Occupied.
+	 * The full XY box (rotated) must stay inside one roof face with a gap, and not overlap Occupied.
+	 * On slopes, Z is the lowest roof height under the box so the downhill edge sits on the roof.
 	 */
 	bool TryPlace(
 		const TArray<FRoofPlaceTriangle>& WorldTris,
