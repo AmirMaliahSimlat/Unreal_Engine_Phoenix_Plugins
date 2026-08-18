@@ -145,14 +145,30 @@ namespace
 		return false;
 	}
 
-	FVector2D ClosestFootprintEdgeDir(const FVector2D& P, const TArray<FVector2D>& Ring)
+	FVector2D ClosestPointOnSegXY(const FVector2D& P, const FVector2D& A, const FVector2D& B)
+	{
+		const FVector2D AB = B - A;
+		const double LenSq = AB.SizeSquared();
+		if (LenSq < 1.0e-8)
+		{
+			return A;
+		}
+		const double T = FMath::Clamp(FVector2D::DotProduct(P - A, AB) / LenSq, 0.0, 1.0);
+		return A + AB * T;
+	}
+
+	bool ClosestFootprintEdge(
+		const FVector2D& P,
+		const TArray<FVector2D>& Ring,
+		FVector2D& OutDir,
+		FVector2D& OutClosest)
 	{
 		if (Ring.Num() < 2)
 		{
-			return FVector2D::ZeroVector;
+			return false;
 		}
 		double BestDist = TNumericLimits<double>::Max();
-		FVector2D BestDir = FVector2D::ZeroVector;
+		bool bFound = false;
 		const int32 N = Ring.Num();
 		const int32 SegCount = N >= 3 ? N : (N - 1);
 		for (int32 I = 0; I < SegCount; ++I)
@@ -164,30 +180,54 @@ namespace
 			{
 				continue;
 			}
-			const double Dist = DistPointSegXY(P, A, B);
+			const FVector2D Closest = ClosestPointOnSegXY(P, A, B);
+			const double Dist = FVector2D::Distance(P, Closest);
 			if (Dist < BestDist)
 			{
 				BestDist = Dist;
-				BestDir = Delta.GetSafeNormal();
+				OutDir = Delta.GetSafeNormal();
+				OutClosest = Closest;
+				bFound = true;
 			}
 		}
-		return BestDir;
+		return bFound;
 	}
 
-	/** Local +X parallel to Dir. 0 and 180 are the same alignment. */
-	float YawDegFromDirXY(const FVector2D& Dir)
+	/**
+	 * Local +X along the eave/footprint edge, local +Y into the roof (away from that edge).
+	 * Picks the 180° so the same side of the mesh always faces the edge.
+	 */
+	float YawAlongEdgeFacingInward(
+		const FVector2D& Center,
+		const FVector2D& AlignDirHint,
+		const TArray<FVector2D>& FootprintXY)
 	{
-		if (Dir.SizeSquared() < 1.0e-12)
+		FVector2D EdgeDir = FVector2D::ZeroVector;
+		FVector2D Closest = Center;
+		if (!ClosestFootprintEdge(Center, FootprintXY, EdgeDir, Closest))
+		{
+			EdgeDir = AlignDirHint;
+		}
+		if (AlignDirHint.SizeSquared() > 1.0e-8)
+		{
+			EdgeDir = AlignDirHint.GetSafeNormal();
+		}
+		if (EdgeDir.SizeSquared() < 1.0e-12)
 		{
 			return 0.0f;
 		}
-		float Yaw = FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
-		Yaw = FMath::Fmod(Yaw, 180.0f);
-		if (Yaw < 0.0f)
+
+		FVector2D Inward = Center - Closest;
+		if (Inward.SizeSquared() < 1.0)
 		{
-			Yaw += 180.0f;
+			Inward = FVector2D(-EdgeDir.Y, EdgeDir.X);
 		}
-		return Yaw;
+		// Local +Y after yaw(EdgeDir) is (-EdgeDir.Y, EdgeDir.X). Flip so it points into the roof.
+		if (EdgeDir.X * Inward.Y - EdgeDir.Y * Inward.X < 0.0)
+		{
+			EdgeDir = -EdgeDir;
+		}
+		return FMath::RadiansToDegrees(FMath::Atan2(EdgeDir.Y, EdgeDir.X));
 	}
 }
 
@@ -249,12 +289,7 @@ bool BuildingRoofObjectPlacement::TryPlace(
 		const FVector Sample = InterpolateOnTri(Tri, U, V, W);
 		const FVector2D Center(Sample.X, Sample.Y);
 
-		FVector2D AlignDir = Tri.AlignDirXY;
-		if (AlignDir.SizeSquared() < 1.0e-8)
-		{
-			AlignDir = ClosestFootprintEdgeDir(Center, FootprintXY);
-		}
-		const float YawDeg = YawDegFromDirXY(AlignDir);
+		const float YawDeg = YawAlongEdgeFacingInward(Center, Tri.AlignDirXY, FootprintXY);
 		FootprintCornersXY(Foot, Center, YawDeg, Corners);
 
 		double MinRoofZ = 0.0;

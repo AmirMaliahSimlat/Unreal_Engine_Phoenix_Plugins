@@ -27,9 +27,10 @@ namespace BuildingRoofObjectPlacement
 
 	/**
 	 * Picks a pose on the usable roof faces. Yaw follows the slope eave (hipped) or the
-	 * closest footprint edge (flat / parapet). The full XY box must stay inside one face
-	 * with a gap, and not overlap Occupied. On slopes, Z is the lowest roof height under
-	 * the box so the downhill edge sits on the roof.
+	 * closest footprint edge (flat / parapet), with local +Y into the roof so the same
+	 * side of the mesh faces the edge. The full XY box must stay inside one face with a
+	 * gap, and not overlap Occupied. On slopes, Z is the lowest roof height under the box
+	 * so the downhill edge sits on the roof.
 	 */
 	bool TryPlace(
 		const TArray<FRoofPlaceTriangle>& WorldTris,
