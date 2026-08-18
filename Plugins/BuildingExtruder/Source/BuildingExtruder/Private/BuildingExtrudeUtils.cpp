@@ -1384,6 +1384,135 @@ bool BuildingExtrudeUtils::BuildParapetRoofPartsFromRings(
 	return true;
 }
 
+bool BuildingExtrudeUtils::BuildRoofPlacementTriangles(
+	EBuildingRoofType RoofType,
+	const TArray<FVector>& BaseRingLocal,
+	const TArray<FVector>& TopRingLocal,
+	double ParapetHeightMeters,
+	double ParapetWidthMeters,
+	double HippedHeightMeters,
+	TArray<FRoofPlaceTriangle>& OutTris)
+{
+	OutTris.Reset();
+	TArray<FVector> Base = BaseRingLocal;
+	TArray<FVector> Top = TopRingLocal;
+	StripClosingDuplicate(Base);
+	StripClosingDuplicate(Top);
+	if (Top.Num() < 3)
+	{
+		return false;
+	}
+
+	FVector Up(0, 0, 0);
+	const int32 Count = FMath::Min(Base.Num(), Top.Num());
+	for (int32 I = 0; I < Count; ++I)
+	{
+		Up += (Top[I] - Base[I]);
+	}
+	Up = Up.GetSafeNormal();
+	if (Up.IsNearlyZero())
+	{
+		Up = FVector::UpVector;
+	}
+
+	auto AddCapFromRing = [&OutTris](const TArray<FVector>& Ring) -> bool
+	{
+		TArray<int32> CapTris;
+		FString ClipError;
+		if (!EarClipTriangulate(Ring, CapTris, ClipError) || CapTris.Num() < 3)
+		{
+			return false;
+		}
+		for (int32 I = 0; I + 2 < CapTris.Num(); I += 3)
+		{
+			FRoofPlaceTriangle Tri;
+			Tri.A = Ring[CapTris[I]];
+			Tri.B = Ring[CapTris[I + 1]];
+			Tri.C = Ring[CapTris[I + 2]];
+			OutTris.Add(Tri);
+		}
+		return OutTris.Num() > 0;
+	};
+
+	if (RoofType == EBuildingRoofType::Parapet)
+	{
+		const double WidthCm = FMath::Max(ParapetWidthMeters, 0.0) * 100.0;
+		double HeightCm = FMath::Max(ParapetHeightMeters, 0.0) * 100.0;
+		double WallHeightCm = 0.0;
+		for (int32 I = 0; I < Count; ++I)
+		{
+			WallHeightCm += FVector::Distance(Base[I], Top[I]);
+		}
+		WallHeightCm /= static_cast<double>(FMath::Max(Count, 1));
+		HeightCm = FMath::Min(HeightCm, WallHeightCm * 0.95);
+		if (WidthCm > 1.0 && HeightCm > 1.0 && WidthCm < InradiusEstimateXY(Top) * 0.49)
+		{
+			TArray<FVector> InnerTop;
+			if (InsetRingXY(Top, WidthCm, InnerTop))
+			{
+				TArray<FVector> InnerDeck;
+				InnerDeck.SetNum(InnerTop.Num());
+				for (int32 I = 0; I < InnerTop.Num(); ++I)
+				{
+					InnerDeck[I] = InnerTop[I] - Up * HeightCm;
+				}
+				if (AddCapFromRing(InnerDeck))
+				{
+					return true;
+				}
+			}
+		}
+		OutTris.Reset();
+		return AddCapFromRing(Top);
+	}
+
+	if (RoofType == EBuildingRoofType::Hipped)
+	{
+		const double HeightCm = FMath::Max(HippedHeightMeters, 0.0) * 100.0;
+		TArray<FRoofTri2D> Tris2D;
+		if (HeightCm > 1.0 && BuildHippedRoofTris(Top, Tris2D))
+		{
+			double MaxD = 0.0;
+			for (const FRoofTri2D& Tri : Tris2D)
+			{
+				MaxD = FMath::Max(MaxD, FMath::Max(Tri.DA, FMath::Max(Tri.DB, Tri.DC)));
+			}
+			if (MaxD > 1.0e-3)
+			{
+				const double Scale = HeightCm / MaxD;
+				for (const FRoofTri2D& Tri : Tris2D)
+				{
+					const FVector A = PointOnEavePlane(Tri.A, Top[0], Up) + Up * (Tri.DA * Scale);
+					const FVector B = PointOnEavePlane(Tri.B, Top[0], Up) + Up * (Tri.DB * Scale);
+					const FVector C = PointOnEavePlane(Tri.C, Top[0], Up) + Up * (Tri.DC * Scale);
+					const FVector FaceN = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
+					const double DSpan =
+						FMath::Max3(Tri.DA, Tri.DB, Tri.DC) - FMath::Min3(Tri.DA, Tri.DB, Tri.DC);
+					if (!FaceN.IsNearlyZero()
+						&& FMath::Abs(FVector::DotProduct(FaceN, Up)) < 0.25
+						&& DSpan * Scale > 30.0)
+					{
+						continue;
+					}
+					FRoofPlaceTriangle Place;
+					Place.A = A;
+					Place.B = B;
+					Place.C = C;
+					OutTris.Add(Place);
+				}
+				if (OutTris.Num() > 0)
+				{
+					return true;
+				}
+			}
+		}
+		OutTris.Reset();
+		return AddCapFromRing(Top);
+	}
+
+	return AddCapFromRing(Top);
+}
+
 bool BuildingExtrudeUtils::BuildRoofPartsFromRings(
 	EBuildingRoofType RoofType,
 	const TArray<FVector>& BaseRingLocal,

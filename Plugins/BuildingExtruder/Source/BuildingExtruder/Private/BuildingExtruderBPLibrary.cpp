@@ -4,14 +4,19 @@
 #include "BuildingExtrudeUtils.h"
 #include "BuildingExtruderLog.h"
 #include "BuildingFbxExporter.h"
+#include "BuildingFoliagePlacement.h"
+#include "BuildingMeshFolderLoader.h"
+#include "BuildingRoofObjectPlacement.h"
 #include "BuildingShapefileReader.h"
 #include "BuildingStaticMeshUtils.h"
 
 #include "CesiumGeoreference.h"
 #include "Editor.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
+#include "InstancedFoliageActor.h"
 #include "Internationalization/Internationalization.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/Paths.h"
@@ -135,6 +140,35 @@ namespace
 		return true;
 	}
 
+	int32 CommitRoofFoliage(
+		AInstancedFoliageActor* IFA,
+		TArray<FBuildingFoliageSlot>& Slots,
+		TArray<TArray<FTransform>>& Transforms,
+		UWorld* World)
+	{
+		int32 Count = 0;
+		if (!IFA)
+		{
+			return 0;
+		}
+		for (int32 I = 0; I < Slots.Num(); ++I)
+		{
+			if (Transforms.IsValidIndex(I))
+			{
+				BuildingFoliagePlacement::AddInstances(Slots[I], Transforms[I]);
+				Count += Transforms[I].Num();
+				Transforms[I].Reset();
+			}
+		}
+		BuildingFoliagePlacement::RefreshSlots(Slots);
+		IFA->Modify();
+		if (World)
+		{
+			World->MarkPackageDirty();
+		}
+		return Count;
+	}
+
 	void AppendWorldMesh(
 		FExtrudedPrismMesh& Combined,
 		const FExtrudedPrismMesh& LocalMesh,
@@ -175,6 +209,7 @@ namespace
 		FExtrudedPrismMesh& OutWallsAndFloorWorld,
 		FExtrudedPrismMesh& OutRoofWorld,
 		FVector& OutCentroid,
+		TArray<FRoofPlaceTriangle>* OutPlaceTris,
 		FString& OutError)
 	{
 		const TArray<FVector2D>& Ring = Feature.OuterRingLonLat;
@@ -242,6 +277,31 @@ namespace
 		OutRoofWorld = FExtrudedPrismMesh();
 		AppendWorldMesh(OutWallsAndFloorWorld, LocalWalls, Origin);
 		AppendWorldMesh(OutRoofWorld, LocalRoof, Origin);
+
+		if (OutPlaceTris)
+		{
+			OutPlaceTris->Reset();
+			TArray<FRoofPlaceTriangle> LocalPlace;
+			if (BuildingExtrudeUtils::BuildRoofPlacementTriangles(
+					RoofType,
+					BaseLocal,
+					TopLocal,
+					ParapetHeightMeters,
+					ParapetWidthMeters,
+					HippedHeightMeters,
+					LocalPlace))
+			{
+				OutPlaceTris->Reserve(LocalPlace.Num());
+				for (const FRoofPlaceTriangle& Tri : LocalPlace)
+				{
+					FRoofPlaceTriangle WorldTri;
+					WorldTri.A = Tri.A + Origin;
+					WorldTri.B = Tri.B + Origin;
+					WorldTri.C = Tri.C + Origin;
+					OutPlaceTris->Add(WorldTri);
+				}
+			}
+		}
 		return true;
 	}
 
@@ -348,7 +408,9 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	int32 ParapetRoofIndex,
 	float ParapetHeightMeters,
 	float ParapetWidthMeters,
-	float HippedHeightMeters)
+	float HippedHeightMeters,
+	bool bPlaceRoofObjects,
+	const FString& RoofObjectMeshFolder)
 {
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -371,7 +433,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		Display,
 		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' roofTypeField='%s' "
 			 "flatIdx=%d hippedIdx=%d parapetIdx=%d parapetH=%.2fm parapetW=%.2fm hippedH=%.2fm "
-			 "targetTiles=%d tileFilter='%s' metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d"),
+			 "targetTiles=%d tileFilter='%s' metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d "
+			 "roofObjects=%s folder='%s'"),
 		*CleanInputPath,
 		*CleanFbxPath,
 		*AltitudeField,
@@ -388,7 +451,9 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		UvMeters,
 		WallSlots,
 		RoofSlots,
-		MaterialRandomSeed);
+		MaterialRandomSeed,
+		bPlaceRoofObjects ? TEXT("on") : TEXT("off"),
+		*RoofObjectMeshFolder);
 
 	if (CleanFbxPath.IsEmpty())
 	{
@@ -418,6 +483,49 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		Result.Message = TEXT("ShapefilePath is empty (provide a .shp path).");
 		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
 		return Result;
+	}
+
+	TArray<UStaticMesh*> RoofMeshes;
+	TArray<FRoofObjectFootprint> RoofFeet;
+	TArray<FBuildingFoliageSlot> RoofFoliageSlots;
+	TArray<TArray<FTransform>> RoofTransforms;
+	AInstancedFoliageActor* RoofIFA = nullptr;
+	int32 RoofObjectsPlaced = 0;
+	if (bPlaceRoofObjects)
+	{
+		FString MeshError;
+		if (!BuildingMeshFolderLoader::LoadStaticMeshesFromFolder(RoofObjectMeshFolder, RoofMeshes, MeshError))
+		{
+			Result.Message = MeshError;
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
+		RoofIFA = AInstancedFoliageActor::GetInstancedFoliageActorForCurrentLevel(World, /*bCreateIfNone*/ true);
+		if (!RoofIFA)
+		{
+			Result.Message = TEXT("Could not get or create the level InstancedFoliageActor for roof objects.");
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
+		RoofIFA->Modify();
+		RoofFeet.SetNum(RoofMeshes.Num());
+		RoofFoliageSlots.SetNum(RoofMeshes.Num());
+		RoofTransforms.SetNum(RoofMeshes.Num());
+		for (int32 MeshIndex = 0; MeshIndex < RoofMeshes.Num(); ++MeshIndex)
+		{
+			RoofFeet[MeshIndex] = BuildingRoofObjectPlacement::MakeFootprint(*RoofMeshes[MeshIndex]);
+			FString SlotError;
+			if (!BuildingFoliagePlacement::GetOrCreateSlot(
+					*RoofIFA, RoofMeshes[MeshIndex], RoofFoliageSlots[MeshIndex], SlotError))
+			{
+				Result.Message = SlotError;
+				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+				UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
+				return Result;
+			}
+		}
 	}
 
 	if (FPaths::GetExtension(CleanInputPath).Equals(TEXT("gpkg"), ESearchCase::IgnoreCase))
@@ -734,11 +842,13 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				Result.BuildingsSpawned = BuildingsMeshed;
 				Result.BuildingsSkipped = BuildingsSkipped + (ToImport - BuildingsMeshed - BuildingsSkipped);
 				Result.TilesSpawned = TilesSpawned;
+				Result.RoofObjectsPlaced = CommitRoofFoliage(RoofIFA, RoofFoliageSlots, RoofTransforms, World);
 				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 				Result.Message = FString::Printf(
-					TEXT("Cancelled. Tiles=%d buildings=%d. FBX not written. Elapsed: %.2fs."),
+					TEXT("Cancelled. Tiles=%d buildings=%d roofObjects=%d. FBX not written. Elapsed: %.2fs."),
 					TilesSpawned,
 					BuildingsMeshed,
+					Result.RoofObjectsPlaced,
 					Result.ElapsedSeconds);
 				UE_LOG(LogBuildingExtruder, Warning, TEXT("%s"), *Result.Message);
 				return Result;
@@ -747,12 +857,18 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			FExtrudedPrismMesh TileWallsMesh;
 			FExtrudedPrismMesh TileRoofMesh;
 			int32 TileBuildingCount = 0;
+			TArray<TArray<FTransform>> TileRoofPending;
+			if (bPlaceRoofObjects)
+			{
+				TileRoofPending.SetNum(RoofMeshes.Num());
+			}
 			for (const int32 FeatureIndex : Bucket)
 			{
 				FExtrudedPrismMesh BuildingWalls;
 				FExtrudedPrismMesh BuildingRoof;
 				FVector Centroid;
 				FString ExtrudeError;
+				TArray<FRoofPlaceTriangle> PlaceTris;
 				if (!BuildFeaturePartsWorld(
 						*Georeference,
 						Features[FeatureIndex],
@@ -767,6 +883,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 						BuildingWalls,
 						BuildingRoof,
 						Centroid,
+						bPlaceRoofObjects ? &PlaceTris : nullptr,
 						ExtrudeError))
 				{
 					++BuildingsSkipped;
@@ -787,6 +904,44 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 
 				AppendWorldMesh(TileWallsMesh, BuildingWalls, FVector::ZeroVector);
 				AppendWorldMesh(TileRoofMesh, BuildingRoof, FVector::ZeroVector);
+
+				if (bPlaceRoofObjects && PlaceTris.Num() > 0 && RoofMeshes.Num() > 0)
+				{
+					TArray<FPlacedRoofObject2D> Occupied;
+					TArray<int32> Order;
+					Order.SetNum(RoofMeshes.Num());
+					for (int32 I = 0; I < RoofMeshes.Num(); ++I)
+					{
+						Order[I] = I;
+					}
+					for (int32 I = 0; I < Order.Num(); ++I)
+					{
+						const int32 J = MaterialRng.RandRange(I, Order.Num() - 1);
+						Order.Swap(I, J);
+					}
+					for (const int32 MeshIndex : Order)
+					{
+						if (MaterialRng.FRand() >= 0.5f)
+						{
+							continue;
+						}
+						FTransform Xform;
+						FPlacedRoofObject2D Placed;
+						if (!BuildingRoofObjectPlacement::TryPlace(
+								PlaceTris,
+								RoofFeet[MeshIndex],
+								Occupied,
+								MaterialRng,
+								Xform,
+								Placed))
+						{
+							continue;
+						}
+						Occupied.Add(Placed);
+						TileRoofPending[MeshIndex].Add(Xform);
+					}
+				}
+
 				++BuildingsMeshed;
 				++TileBuildingCount;
 			}
@@ -842,10 +997,16 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			SpawnedTileActors.Add(WallsActor);
 			SpawnedTileActors.Add(RoofActor);
 			++TilesSpawned;
+			for (int32 MeshIndex = 0; MeshIndex < TileRoofPending.Num(); ++MeshIndex)
+			{
+				RoofTransforms[MeshIndex].Append(TileRoofPending[MeshIndex]);
+			}
 		}
 	}
 
 	SlowTask.EnterProgressFrame(1.0f, NSLOCTEXT("BuildingExtruder", "WriteFbx", "Writing FBX..."));
+
+	RoofObjectsPlaced = CommitRoofFoliage(RoofIFA, RoofFoliageSlots, RoofTransforms, World);
 
 	FString WrittenFbxPath = CleanFbxPath;
 	if (!WrittenFbxPath.EndsWith(TEXT(".fbx"), ESearchCase::IgnoreCase))
@@ -858,6 +1019,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		Result.BuildingsSpawned = 0;
 		Result.BuildingsSkipped = BuildingsSkipped;
 		Result.TilesSpawned = TilesSpawned;
+		Result.RoofObjectsPlaced = RoofObjectsPlaced;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		Result.Message = FString::Printf(
 			TEXT("No tiles spawned (%d buildings skipped). FBX not written. Elapsed: %.2fs."),
@@ -873,6 +1035,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		Result.BuildingsSpawned = BuildingsMeshed;
 		Result.BuildingsSkipped = BuildingsSkipped;
 		Result.TilesSpawned = TilesSpawned;
+		Result.RoofObjectsPlaced = RoofObjectsPlaced;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		Result.Message = FString::Printf(
 			TEXT("Spawned %d tiles (%d buildings) for editor preview, but FBX write failed: %s"),
@@ -887,16 +1050,18 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	Result.BuildingsSpawned = BuildingsMeshed;
 	Result.BuildingsSkipped = BuildingsSkipped;
 	Result.TilesSpawned = TilesSpawned;
+	Result.RoofObjectsPlaced = RoofObjectsPlaced;
 	Result.FbxOutputPath = WrittenFbxPath;
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d tiles (%d walls + %d roof actors, %d buildings, %d skipped), "
+		TEXT("Spawned %d tiles (%d walls + %d roof actors, %d buildings, %d skipped, %d roof objects), "
 			 "saved meshes under /Game/BuildingExtruder/Meshes, wrote FBX '%s'. Elapsed: %.2fs."),
 		TilesSpawned,
 		TilesSpawned,
 		TilesSpawned,
 		BuildingsMeshed,
 		BuildingsSkipped,
+		RoofObjectsPlaced,
 		*WrittenFbxPath,
 		Result.ElapsedSeconds);
 

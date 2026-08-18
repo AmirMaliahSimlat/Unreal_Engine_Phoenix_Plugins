@@ -20,6 +20,14 @@ enum class EBuildingRoofType : uint8
 	Parapet
 };
 
+/** One roof face used to sit props (local space, same as extrusion rings). */
+struct FRoofPlaceTriangle
+{
+	FVector A = FVector::ZeroVector;
+	FVector B = FVector::ZeroVector;
+	FVector C = FVector::ZeroVector;
+};
+
 namespace BuildingExtrudeUtils
 {
 	/** Maps a DBF roof-type code onto one of the three supported shapes. Unknown → Flat. */
@@ -97,6 +105,19 @@ namespace BuildingExtrudeUtils
 		double MetersPerUv,
 		FExtrudedPrismMesh& OutMesh,
 		FString& OutError);
+
+	/**
+	 * Usable roof faces for prop placement (not the decorative parapet ring, not hip fins).
+	 * Flat: eave cap. Hipped: slope faces (fallback flat). Parapet: inner deck only (fallback flat).
+	 */
+	bool BuildRoofPlacementTriangles(
+		EBuildingRoofType RoofType,
+		const TArray<FVector>& BaseRingLocal,
+		const TArray<FVector>& TopRingLocal,
+		double ParapetHeightMeters,
+		double ParapetWidthMeters,
+		double HippedHeightMeters,
+		TArray<FRoofPlaceTriangle>& OutTris);
 
 	/**
 	 * Constant-height extrusion along +Z (cm). Convenience wrapper around BuildPrismFromRings.

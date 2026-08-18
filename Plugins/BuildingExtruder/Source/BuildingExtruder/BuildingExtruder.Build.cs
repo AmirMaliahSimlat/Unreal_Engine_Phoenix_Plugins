@@ -23,6 +23,8 @@ public class BuildingExtruder : ModuleRules
 			"MeshDescription",
 			"StaticMeshDescription",
 			"AssetRegistry",
+			"Projects",
+			"Foliage",
 			"CesiumRuntime",
 			"Json",
 			"JsonUtilities"

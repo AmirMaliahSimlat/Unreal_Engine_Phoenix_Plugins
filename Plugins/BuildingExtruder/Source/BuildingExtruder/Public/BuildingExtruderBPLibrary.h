@@ -22,6 +22,10 @@ struct FBuildingExtrudeResult
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	int32 TilesSpawned = 0;
 
+	/** Roof props added to the level InstancedFoliageActor (0 if placement is off). */
+	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
+	int32 RoofObjectsPlaced = 0;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	double ElapsedSeconds = 0.0;
 
@@ -65,7 +69,7 @@ public:
 	 * @param MetersPerUv Texture mapping scale in meters per UV unit (walls and roof/floor).
 	 * @param WallMaterialSlotCount Number of material slots on wall/floor meshes (random per building).
 	 * @param RoofMaterialSlotCount Number of material slots on roof meshes (random per building).
-	 * @param MaterialRandomSeed RNG for material slots; 0 = non-deterministic each run.
+	 * @param MaterialRandomSeed RNG for material slots and roof-object poses; 0 = non-deterministic each run.
 	 * @param RoofTypeFieldName DBF column with integer roof-type codes.
 	 * @param FlatRoofIndex DBF value that means a flat roof.
 	 * @param HippedRoofIndex DBF value that means a hipped / cross-hipped roof.
@@ -73,6 +77,10 @@ public:
 	 * @param ParapetHeightMeters Height of the parapet ring in meters (included in wall height).
 	 * @param ParapetWidthMeters Inward thickness of the parapet ring in meters.
 	 * @param HippedHeightMeters Ridge height above the wall top in meters (not included in wall height).
+	 * @param bPlaceRoofObjects If true, place antenna/boiler/etc. meshes on roofs via InstancedFoliageActor.
+	 * @param RoofObjectMeshFolder Content folder of roof prop StaticMeshes. Used only if bPlaceRoofObjects.
+	 *        Only StaticMesh assets are used (materials and other files in the folder are ignored).
+	 *        Each mesh is independently rolled per roof (0 or 1); skipped if it cannot fit.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -95,7 +103,9 @@ public:
 			CPP_Default_ParapetRoofIndex = "2",
 			CPP_Default_ParapetHeightMeters = "1.0",
 			CPP_Default_ParapetWidthMeters = "0.3",
-			CPP_Default_HippedHeightMeters = "2.0"))
+			CPP_Default_HippedHeightMeters = "2.0",
+			CPP_Default_bPlaceRoofObjects = "false",
+			CPP_Default_RoofObjectMeshFolder = ""))
 	static FBuildingExtrudeResult ImportAndExtrudeBuildingsFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -116,5 +126,7 @@ public:
 		int32 ParapetRoofIndex,
 		float ParapetHeightMeters,
 		float ParapetWidthMeters,
-		float HippedHeightMeters);
+		float HippedHeightMeters,
+		bool bPlaceRoofObjects,
+		const FString& RoofObjectMeshFolder);
 };
