@@ -867,14 +867,15 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	const FString& LeafTintMaterialPath,
 	const FString& LeafTintParameterName,
 	int32 LeafMaterialSlotIndex,
-	int32 ColorClusterCount)
+	int32 ColorClusterCount,
+	bool bApplyLeafTint)
 {
 	FTreePlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString CleanTintPath = SanitizeFilePath(LeafTintMaterialPath);
-	const bool bTintLeaves = !CleanTintPath.IsEmpty();
+	const bool bTintLeaves = bApplyLeafTint && !CleanTintPath.IsEmpty();
 	const FString RedField = RedFieldName.IsEmpty() ? TEXT("R") : RedFieldName;
 	const FString GreenField = GreenFieldName.IsEmpty() ? TEXT("G") : GreenFieldName;
 	const FString BlueField = BlueFieldName.IsEmpty() ? TEXT("B") : BlueFieldName;
@@ -917,6 +918,13 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	if (CleanInputPath.IsEmpty())
 	{
 		Result.Message = TEXT("ShapefilePath is empty (provide a .shp path).");
+		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+		return Result;
+	}
+
+	if (bApplyLeafTint && CleanTintPath.IsEmpty())
+	{
+		Result.Message = TEXT("Apply Leaf Tint is on but LeafTintMaterialPath is empty.");
 		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}

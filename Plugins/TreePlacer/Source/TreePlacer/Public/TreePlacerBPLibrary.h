@@ -62,10 +62,12 @@ public:
 	 * @param GreenFieldName DBF 0–255 green column.
 	 * @param BlueFieldName DBF 0–255 blue column.
 	 * @param LeafTintMaterialPath Content path of the leaf material to instance.
-	 *        Empty = no coloring (current behavior). Recreate this Blueprint node after updating.
+	 *        Used only when bApplyLeafTint is true. Recreate this Blueprint node after updating.
 	 * @param LeafTintParameterName Vector parameter on that material set to the cluster color.
 	 * @param LeafMaterialSlotIndex Mesh material slot to override (0 = first, often bark; 1 = leaves).
 	 * @param ColorClusterCount K-means palette size K (not the mesh count). Clamped 1–64.
+	 * @param bApplyLeafTint If false, skip leaf coloring even when LeafTintMaterialPath is set.
+	 *        Recreate this Blueprint node after updating.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -85,7 +87,8 @@ public:
 			CPP_Default_LeafTintMaterialPath = "",
 			CPP_Default_LeafTintParameterName = "LeafTint",
 			CPP_Default_LeafMaterialSlotIndex = "1",
-			CPP_Default_ColorClusterCount = "8"))
+			CPP_Default_ColorClusterCount = "8",
+			CPP_Default_bApplyLeafTint = "false"))
 	static FTreePlaceResult PlaceTreesFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
@@ -103,5 +106,6 @@ public:
 		const FString& LeafTintMaterialPath,
 		const FString& LeafTintParameterName,
 		int32 LeafMaterialSlotIndex,
-		int32 ColorClusterCount);
+		int32 ColorClusterCount,
+		bool bApplyLeafTint);
 };
