@@ -277,7 +277,7 @@ FStencilAssignResult UStencilAssignerBPLibrary::ApplyCustomStencilByTags(
 					Display,
 					TEXT("Unmatched: actor='%s' (%s) component='%s' (%s) tags=[%s]"),
 					*ActorLabel(*Actor),
-					*Actor.GetClass()->GetName(),
+					*Actor->GetClass()->GetName(),
 					*Comp->GetName(),
 					*Comp->GetClass()->GetName(),
 					*JoinComponentTags(*Comp));
