@@ -42,6 +42,12 @@ namespace BuildingExtrudeUtils
 	void AssignAllTrianglesMaterialSlot(FExtrudedPrismMesh& Mesh, int32 MaterialSlotIndex);
 
 	/**
+	 * Copies triangles that use Slot into Out (compact vertex buffer).
+	 * Out uses a single material slot (index 0). Returns false if no triangles.
+	 */
+	bool ExtractMaterialSlot(const FExtrudedPrismMesh& In, int32 Slot, FExtrudedPrismMesh& Out);
+
+	/**
 	 * Builds separate wall+floor and roof meshes from matching base/top rings in actor-local space.
 	 * Triangulates using base ring XY (ear clipping). Side faces connect base[i]→top[i].
 	 * WallsAndFloor = bottom cap + vertical sides. Roof = top cap only.

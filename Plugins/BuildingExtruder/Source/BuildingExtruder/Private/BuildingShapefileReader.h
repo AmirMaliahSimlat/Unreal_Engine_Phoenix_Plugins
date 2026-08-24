@@ -24,7 +24,8 @@ namespace BuildingShapefileReader
 	/**
 	 * Reads polygon shapefile (.shp + .dbf). Path may be with or without .shp extension.
 	 * Coordinates are interpreted as EPSG:4326 lon/lat degrees (no reprojection).
-	 * HeightFieldName, ElevationFieldName, and RoofTypeFieldName are required DBF columns.
+	 * HeightFieldName and ElevationFieldName are required DBF columns.
+	 * RoofTypeFieldName is optional (empty = leave RoofTypeCode at 0).
 	 */
 	bool ReadPolygonBuildings(
 		const FString& ShapefilePath,

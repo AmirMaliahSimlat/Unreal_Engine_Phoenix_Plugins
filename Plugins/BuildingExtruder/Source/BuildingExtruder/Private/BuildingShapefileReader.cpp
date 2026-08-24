@@ -273,7 +273,9 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 
 	const FDbfField* HeightField = FindField(DbfFields, HeightFieldName);
 	const FDbfField* ElevField = FindField(DbfFields, ElevationFieldName);
-	const FDbfField* RoofTypeField = FindField(DbfFields, RoofTypeFieldName);
+	const FDbfField* RoofTypeField = RoofTypeFieldName.IsEmpty()
+		? nullptr
+		: FindField(DbfFields, RoofTypeFieldName);
 	if (!HeightField)
 	{
 		OutError = FString::Printf(TEXT("DBF height field '%s' not found."), *HeightFieldName);
@@ -291,12 +293,7 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 			*ElevationFieldName);
 		return false;
 	}
-	if (RoofTypeFieldName.IsEmpty())
-	{
-		OutError = TEXT("DBF roof type field name is empty.");
-		return false;
-	}
-	if (!RoofTypeField)
+	if (!RoofTypeFieldName.IsEmpty() && !RoofTypeField)
 	{
 		OutError = FString::Printf(TEXT("DBF roof type field '%s' not found."), *RoofTypeFieldName);
 		return false;
@@ -397,15 +394,18 @@ bool BuildingShapefileReader::ReadPolygonBuildings(
 				{
 					ParseNumericField(Rec, *ElevField, Feature.ElevationM);
 				}
-				double RoofTypeValue = 0.0;
-				if (ParseNumericField(Rec, *RoofTypeField, RoofTypeValue))
+				if (RoofTypeField)
 				{
-					Feature.RoofTypeCode = FMath::RoundToInt(RoofTypeValue);
+					double RoofTypeValue = 0.0;
+					if (ParseNumericField(Rec, *RoofTypeField, RoofTypeValue))
+					{
+						Feature.RoofTypeCode = FMath::RoundToInt(RoofTypeValue);
+					}
 				}
 			}
 		}
 
-		// Keep footprints even if RELATIVE_F / height is anomalous; caller replaces those.
+		// Keep footprints even if height is anomalous; caller replaces those.
 		if (Feature.OuterRingLonLat.Num() >= 3)
 		{
 			OutFeatures.Add(MoveTemp(Feature));

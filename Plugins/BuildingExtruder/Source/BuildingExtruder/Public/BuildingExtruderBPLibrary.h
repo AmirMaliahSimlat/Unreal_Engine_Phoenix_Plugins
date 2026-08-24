@@ -18,7 +18,7 @@ struct FBuildingExtrudeResult
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	int32 BuildingsSkipped = 0;
 
-	/** Non-empty tile slots spawned (each tile = walls actor + roof actor). */
+	/** Non-empty tile slots spawned (one actor per tile; walls/roofs split by material). */
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	int32 TilesSpawned = 0;
 
@@ -31,10 +31,6 @@ struct FBuildingExtrudeResult
 
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	bool bCancelled = false;
-
-	/** Absolute path of the written FBX (empty if not written). */
-	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
-	FString FbxOutputPath;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Building Extruder")
 	FString Message;
@@ -53,34 +49,42 @@ class BUILDINGEXTRUDER_API UBuildingExtruderBPLibrary : public UBlueprintFunctio
 public:
 	/**
 	 * Reads EPSG:4326 building footprints from a shapefile (.shp + .dbf),
-	 * places floors from AltitudeFieldName, saves tiled StaticMesh assets under
-	 * /Game/BuildingExtruder/Meshes (walls+floor and roof as separate actors per tile),
-	 * and writes a combined FBX.
+	 * places floors from AltitudeFieldName, and saves tiled StaticMesh assets under
+	 * /Game/BuildingExtruder/Meshes (one tile actor; one mesh per wall/roof material group).
+	 * Recreate this Blueprint node after updating.
 	 *
+	 * Shapefile
 	 * @param ShapefilePath Path to .shp (with or without extension; .dbf required beside it).
-	 * @param FbxOutputPath Required output path for the combined FBX.
-	 * @param AltitudeFieldName DBF column for floor altitude in meters (default altitude).
-	 * @param HeightFieldName DBF column for wall height in meters (default RELATIVE_F).
-	 *        Hipped ridge is extra (HippedHeightMeters). Parapet ring is part of this wall height.
+	 * @param AltitudeFieldName DBF column for floor altitude in meters (exact name, default altitude).
+	 * @param HeightFieldName DBF column for wall height in meters (default height).
+	 *
+	 * Level / tiling
 	 * @param ActorLabelPrefix Prefix for tile actor labels (e.g. BldgTile).
 	 * @param EditorFolderPath World Outliner folder.
-	 * @param TargetTileCount Exact tile slot count; XxY chosen from factor pairs for square cells.
-	 * @param TileIndices Optional comma-separated linear tile indices (Y*TilesX+X), e.g. "0,6,12".
+	 * @param TargetTileCount Tile slot count; XxY chosen for near-square cells. Entire map is processed.
+	 *
+	 * Materials (one component per group)
+	 * @param WallMaterialSlotCount Wall/floor groups per tile. Buildings are shuffled then split evenly
+	 *        into this many mesh assets (one material slot each). Leftover groups stay empty if a tile
+	 *        has fewer buildings than the count.
+	 * @param RoofMaterialSlotCount Roof groups per tile (same split, independent of walls).
 	 * @param MetersPerUv Texture mapping scale in meters per UV unit (walls and roof/floor).
-	 * @param WallMaterialSlotCount Number of material slots on wall/floor meshes (random per building).
-	 * @param RoofMaterialSlotCount Number of material slots on roof meshes (random per building).
-	 * @param MaterialRandomSeed RNG for material slots and roof-object poses; 0 = non-deterministic each run.
-	 * @param RoofTypeFieldName DBF column with integer roof-type codes.
+	 * @param MaterialRandomSeed RNG for material groups and roof-object poses; 0 = non-deterministic.
+	 *
+	 * Roof shapes (optional)
+	 * @param bUseRoofTypes If false, every roof is flat (roof-type DBF column not required).
+	 * @param RoofTypeFieldName DBF column with integer roof-type codes. Used only if bUseRoofTypes.
 	 * @param FlatRoofIndex DBF value that means a flat roof.
 	 * @param HippedRoofIndex DBF value that means a hipped / cross-hipped roof.
 	 * @param ParapetRoofIndex DBF value that means a parapet roof.
 	 * @param ParapetHeightMeters Height of the parapet ring in meters (included in wall height).
 	 * @param ParapetWidthMeters Inward thickness of the parapet ring in meters.
 	 * @param HippedHeightMeters Ridge height above the wall top in meters (not included in wall height).
+	 *
+	 * Roof objects
 	 * @param bPlaceRoofObjects If true, place antenna/boiler/etc. meshes on roofs via InstancedFoliageActor.
 	 * @param RoofObjectMeshFolder Content folder of roof prop StaticMeshes. Used only if bPlaceRoofObjects.
-	 *        Only StaticMesh assets are used (materials and other files in the folder are ignored).
-	 *        Each mesh is independently rolled per roof (0 or 1); skipped if it cannot fit.
+	 *        Only StaticMesh assets are used. Each mesh is independently rolled per roof (0 or 1).
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -88,15 +92,15 @@ public:
 		meta = (
 			WorldContext = "WorldContextObject",
 			CPP_Default_AltitudeFieldName = "altitude",
-			CPP_Default_HeightFieldName = "RELATIVE_F",
+			CPP_Default_HeightFieldName = "height",
 			CPP_Default_ActorLabelPrefix = "BldgTile",
 			CPP_Default_EditorFolderPath = "ExtrudedBuildings",
 			CPP_Default_TargetTileCount = "64",
-			CPP_Default_TileIndices = "",
-			CPP_Default_MetersPerUv = "3.0",
 			CPP_Default_WallMaterialSlotCount = "1",
 			CPP_Default_RoofMaterialSlotCount = "1",
+			CPP_Default_MetersPerUv = "3.0",
 			CPP_Default_MaterialRandomSeed = "0",
+			CPP_Default_bUseRoofTypes = "false",
 			CPP_Default_RoofTypeFieldName = "roof_type",
 			CPP_Default_FlatRoofIndex = "0",
 			CPP_Default_HippedRoofIndex = "1",
@@ -109,17 +113,16 @@ public:
 	static FBuildingExtrudeResult ImportAndExtrudeBuildingsFromShapefile(
 		UObject* WorldContextObject,
 		const FString& ShapefilePath,
-		const FString& FbxOutputPath,
 		const FString& AltitudeFieldName,
 		const FString& HeightFieldName,
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath,
 		int32 TargetTileCount,
-		const FString& TileIndices,
-		float MetersPerUv,
 		int32 WallMaterialSlotCount,
 		int32 RoofMaterialSlotCount,
+		float MetersPerUv,
 		int32 MaterialRandomSeed,
+		bool bUseRoofTypes,
 		const FString& RoofTypeFieldName,
 		int32 FlatRoofIndex,
 		int32 HippedRoofIndex,

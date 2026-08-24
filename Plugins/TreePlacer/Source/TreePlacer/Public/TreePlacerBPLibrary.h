@@ -36,6 +36,7 @@ struct FTreePlaceResult
  * Requires an ACesiumGeoreference in the open editor map.
  * Tree meshes must already exist as Content assets (StaticMesh or FoliageType).
  * Instances are added to the level's AInstancedFoliageActor (same actor Foliage Mode uses).
+ * Each tree mesh is one HISM component, grouped under a Tree folder on that actor.
  * Tiling is only used to batch work and filter TileIndices.
  */
 UCLASS()

@@ -967,6 +967,69 @@ void BuildingExtrudeUtils::AssignAllTrianglesMaterialSlot(FExtrudedPrismMesh& Me
 	}
 }
 
+bool BuildingExtrudeUtils::ExtractMaterialSlot(
+	const FExtrudedPrismMesh& In,
+	int32 Slot,
+	FExtrudedPrismMesh& Out)
+{
+	Out = FExtrudedPrismMesh();
+	const int32 NumTris = In.Triangles.Num() / 3;
+	if (NumTris <= 0 || (In.Triangles.Num() % 3) != 0)
+	{
+		return false;
+	}
+
+	TMap<int32, int32> Remap;
+	Remap.Reserve(In.Vertices.Num());
+	auto CopyVertex = [&](int32 OldIndex) -> int32
+	{
+		if (const int32* Found = Remap.Find(OldIndex))
+		{
+			return *Found;
+		}
+		if (!In.Vertices.IsValidIndex(OldIndex))
+		{
+			return INDEX_NONE;
+		}
+		const int32 NewIndex = Out.Vertices.Num();
+		Remap.Add(OldIndex, NewIndex);
+		Out.Vertices.Add(In.Vertices[OldIndex]);
+		if (In.Normals.IsValidIndex(OldIndex))
+		{
+			Out.Normals.Add(In.Normals[OldIndex]);
+		}
+		if (In.UVs.IsValidIndex(OldIndex))
+		{
+			Out.UVs.Add(In.UVs[OldIndex]);
+		}
+		return NewIndex;
+	};
+
+	for (int32 Tri = 0; Tri < NumTris; ++Tri)
+	{
+		const int32 TriSlot = In.TriangleMaterialIndices.IsValidIndex(Tri)
+			? In.TriangleMaterialIndices[Tri]
+			: 0;
+		if (TriSlot != Slot)
+		{
+			continue;
+		}
+		const int32 I0 = CopyVertex(In.Triangles[Tri * 3]);
+		const int32 I1 = CopyVertex(In.Triangles[Tri * 3 + 1]);
+		const int32 I2 = CopyVertex(In.Triangles[Tri * 3 + 2]);
+		if (I0 == INDEX_NONE || I1 == INDEX_NONE || I2 == INDEX_NONE)
+		{
+			continue;
+		}
+		Out.Triangles.Add(I0);
+		Out.Triangles.Add(I1);
+		Out.Triangles.Add(I2);
+		Out.TriangleMaterialIndices.Add(0);
+	}
+
+	return Out.Triangles.Num() >= 3;
+}
+
 bool BuildingExtrudeUtils::BuildPrismPartsFromRings(
 	const TArray<FVector>& BaseRingLocal,
 	const TArray<FVector>& TopRingLocal,

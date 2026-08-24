@@ -3,7 +3,7 @@
 #include "BuildingCesiumPlacement.h"
 #include "BuildingExtrudeUtils.h"
 #include "BuildingExtruderLog.h"
-#include "BuildingFbxExporter.h"
+#include "BuildingExtruderTileActor.h"
 #include "BuildingFoliagePlacement.h"
 #include "BuildingMeshFolderLoader.h"
 #include "BuildingRoofObjectPlacement.h"
@@ -11,9 +11,11 @@
 #include "BuildingStaticMeshUtils.h"
 
 #include "CesiumGeoreference.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
-#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
 #include "InstancedFoliageActor.h"
@@ -108,36 +110,24 @@ namespace
 		OutTilesY = BestY;
 	}
 
-	/** Parses "0,6,12" into a set of linear tile indices. Empty string -> empty set (meaning all). */
-	bool ParseTileIndicesFilter(const FString& TileIndices, TSet<int32>& OutIndices, FString& OutError)
+	void AssignEvenRandomSlots(
+		const TArray<int32>& Bucket,
+		int32 SlotCount,
+		FRandomStream& Rng,
+		TMap<int32, int32>& OutFeatureToSlot)
 	{
-		OutIndices.Reset();
-		FString Trimmed = TileIndices.TrimStartAndEnd();
-		if (Trimmed.IsEmpty())
+		OutFeatureToSlot.Reset();
+		const int32 Slots = FMath::Max(SlotCount, 1);
+		TArray<int32> Order = Bucket;
+		for (int32 I = 0; I < Order.Num(); ++I)
 		{
-			return true;
+			const int32 J = Rng.RandRange(I, Order.Num() - 1);
+			Order.Swap(I, J);
 		}
-
-		TArray<FString> Parts;
-		Trimmed.ParseIntoArray(Parts, TEXT(","), /*bCullEmpty*/ true);
-		for (FString& Part : Parts)
+		for (int32 I = 0; I < Order.Num(); ++I)
 		{
-			Part.TrimStartAndEndInline();
-			if (Part.IsEmpty())
-			{
-				continue;
-			}
-			int32 Index = INDEX_NONE;
-			if (!LexTryParseString(Index, *Part) || Index < 0)
-			{
-				OutError = FString::Printf(
-					TEXT("TileIndices entry '%s' is not a non-negative integer. Use e.g. \"0,6,12\"."),
-					*Part);
-				return false;
-			}
-			OutIndices.Add(Index);
+			OutFeatureToSlot.Add(Order[I], I % Slots);
 		}
-		return true;
 	}
 
 	int32 CommitRoofFoliage(
@@ -160,7 +150,7 @@ namespace
 				Transforms[I].Reset();
 			}
 		}
-		BuildingFoliagePlacement::RefreshSlots(Slots);
+		BuildingFoliagePlacement::RefreshSlots(*IFA, Slots);
 		IFA->Modify();
 		if (World)
 		{
@@ -200,6 +190,7 @@ namespace
 		const FBuildingShapefileFeature& Feature,
 		double BaseAltitudeM,
 		double MetersPerUv,
+		bool bUseRoofTypes,
 		int32 FlatRoofIndex,
 		int32 HippedRoofIndex,
 		int32 ParapetRoofIndex,
@@ -251,11 +242,13 @@ namespace
 			TopLocal.Add(TopWorld[I] - Origin);
 		}
 
-		const EBuildingRoofType RoofType = BuildingExtrudeUtils::ResolveRoofType(
-			Feature.RoofTypeCode,
-			FlatRoofIndex,
-			HippedRoofIndex,
-			ParapetRoofIndex);
+		const EBuildingRoofType RoofType = bUseRoofTypes
+			? BuildingExtrudeUtils::ResolveRoofType(
+				Feature.RoofTypeCode,
+				FlatRoofIndex,
+				HippedRoofIndex,
+				ParapetRoofIndex)
+			: EBuildingRoofType::Flat;
 
 		FExtrudedPrismMesh LocalWalls;
 		FExtrudedPrismMesh LocalRoof;
@@ -317,82 +310,209 @@ namespace
 		return true;
 	}
 
-	bool SpawnTileStaticMeshActor(
+	void AppendPathTags(UActorComponent& Comp, const TArray<FName>& PathTags)
+	{
+		for (const FName& Tag : PathTags)
+		{
+			Comp.ComponentTags.AddUnique(Tag);
+		}
+	}
+
+	USceneComponent* MakeSceneFolder(
+		AActor& Owner,
+		USceneComponent& Parent,
+		const FName Name,
+		const TArray<FName>& PathTags)
+	{
+		USceneComponent* Folder = NewObject<USceneComponent>(&Owner, Name, RF_Transactional);
+		if (!Folder)
+		{
+			return nullptr;
+		}
+		Folder->SetMobility(EComponentMobility::Static);
+		Folder->SetupAttachment(&Parent);
+		Owner.AddInstanceComponent(Folder);
+		Folder->RegisterComponent();
+		AppendPathTags(*Folder, PathTags);
+		return Folder;
+	}
+
+	bool AttachSlotMesh(
+		AActor& Owner,
+		USceneComponent& Parent,
+		const FName CompName,
+		UStaticMesh& Mesh,
+		const TArray<FName>& PathTags,
+		FString& OutError)
+	{
+		UStaticMeshComponent* Comp = NewObject<UStaticMeshComponent>(&Owner, CompName, RF_Transactional);
+		if (!Comp)
+		{
+			OutError = TEXT("Failed to create StaticMeshComponent.");
+			return false;
+		}
+		Comp->SetMobility(EComponentMobility::Static);
+		Comp->SetupAttachment(&Parent);
+		Owner.AddInstanceComponent(Comp);
+		Comp->RegisterComponent();
+		Comp->SetStaticMesh(&Mesh);
+		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		AppendPathTags(*Comp, PathTags);
+		return true;
+	}
+
+	void ShiftMeshToLocal(FExtrudedPrismMesh& Mesh, const FVector& Origin)
+	{
+		for (FVector& V : Mesh.Vertices)
+		{
+			V -= Origin;
+		}
+	}
+
+	FVector CombinedVertexCentroid(const TArray<FExtrudedPrismMesh*>& Meshes)
+	{
+		FVector Sum(0, 0, 0);
+		int32 Count = 0;
+		for (const FExtrudedPrismMesh* Mesh : Meshes)
+		{
+			if (!Mesh)
+			{
+				continue;
+			}
+			for (const FVector& V : Mesh->Vertices)
+			{
+				Sum += V;
+				++Count;
+			}
+		}
+		return Count > 0 ? (Sum / static_cast<double>(Count)) : FVector::ZeroVector;
+	}
+
+	bool SpawnBuildingTileActor(
 		UWorld& World,
-		const FExtrudedPrismMesh& WorldMesh,
+		const FExtrudedPrismMesh& WorldWallsMesh,
+		const FExtrudedPrismMesh& WorldRoofMesh,
 		const FString& ActorLabel,
 		const FString& EditorFolderPath,
 		UMaterialInterface* Material,
-		int32 NumMaterialSlots,
-		const TArray<FName>& ExtraTags,
-		AStaticMeshActor*& OutActor,
+		int32 NumWallSlots,
+		int32 NumRoofSlots,
+		AActor*& OutActor,
 		FString& OutError)
 	{
 		OutActor = nullptr;
-		if (WorldMesh.Vertices.Num() < 3)
+
+		TArray<FExtrudedPrismMesh> WallParts;
+		TArray<FExtrudedPrismMesh> RoofParts;
+		TArray<FExtrudedPrismMesh*> Used;
+		WallParts.SetNum(NumWallSlots);
+		RoofParts.SetNum(NumRoofSlots);
+		for (int32 Slot = 0; Slot < NumWallSlots; ++Slot)
+		{
+			if (BuildingExtrudeUtils::ExtractMaterialSlot(WorldWallsMesh, Slot, WallParts[Slot]))
+			{
+				Used.Add(&WallParts[Slot]);
+			}
+		}
+		for (int32 Slot = 0; Slot < NumRoofSlots; ++Slot)
+		{
+			if (BuildingExtrudeUtils::ExtractMaterialSlot(WorldRoofMesh, Slot, RoofParts[Slot]))
+			{
+				Used.Add(&RoofParts[Slot]);
+			}
+		}
+		if (Used.Num() == 0)
 		{
 			OutError = TEXT("Tile mesh empty.");
 			return false;
 		}
 
-		FVector Origin(0, 0, 0);
-		for (const FVector& V : WorldMesh.Vertices)
+		const FVector Origin = CombinedVertexCentroid(Used);
+		for (FExtrudedPrismMesh* Mesh : Used)
 		{
-			Origin += V;
-		}
-		Origin /= static_cast<double>(WorldMesh.Vertices.Num());
-
-		FExtrudedPrismMesh LocalMesh;
-		LocalMesh.Normals = WorldMesh.Normals;
-		LocalMesh.UVs = WorldMesh.UVs;
-		LocalMesh.Triangles = WorldMesh.Triangles;
-		LocalMesh.TriangleMaterialIndices = WorldMesh.TriangleMaterialIndices;
-		LocalMesh.Vertices.Reserve(WorldMesh.Vertices.Num());
-		for (const FVector& V : WorldMesh.Vertices)
-		{
-			LocalMesh.Vertices.Add(V - Origin);
-		}
-
-		const FString AssetName = ActorLabel;
-		UStaticMesh* StaticMesh = BuildingStaticMeshUtils::CreatePersistentStaticMesh(
-			TEXT("/Game/BuildingExtruder/Meshes"),
-			AssetName,
-			LocalMesh,
-			Material,
-			NumMaterialSlots,
-			OutError);
-		if (!StaticMesh)
-		{
-			return false;
+			ShiftMeshToLocal(*Mesh, Origin);
 		}
 
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		SpawnParams.ObjectFlags |= RF_Transactional;
 
-		AStaticMeshActor* Actor = World.SpawnActor<AStaticMeshActor>(Origin, FRotator::ZeroRotator, SpawnParams);
-		if (!Actor)
+		ABuildingExtruderTileActor* Actor =
+			World.SpawnActor<ABuildingExtruderTileActor>(Origin, FRotator::ZeroRotator, SpawnParams);
+		if (!Actor || !Actor->GetRootComponent())
 		{
-			OutError = TEXT("Failed to spawn StaticMeshActor.");
+			OutError = TEXT("Failed to spawn tile actor.");
 			return false;
 		}
 
 		Actor->SetActorLabel(ActorLabel);
 		Actor->Tags.Add(FName(TEXT("BuildingExtruder")));
-		for (const FName& Tag : ExtraTags)
-		{
-			Actor->Tags.AddUnique(Tag);
-		}
+		Actor->Tags.Add(FName(TEXT("BuildingExtruderTile")));
+		Actor->Tags.Add(FName(TEXT("Building")));
 		if (!EditorFolderPath.IsEmpty())
 		{
 			Actor->SetFolderPath(FName(*EditorFolderPath));
 		}
 
-		UStaticMeshComponent* Comp = Actor->GetStaticMeshComponent();
-		Comp->SetMobility(EComponentMobility::Static);
-		Comp->Modify();
-		Comp->SetStaticMesh(StaticMesh);
-		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		const TArray<FName> BuildingTags = {FName(TEXT("Building"))};
+		const TArray<FName> WallTags = {FName(TEXT("Building")), FName(TEXT("Wall"))};
+		const TArray<FName> RoofPathTags = {FName(TEXT("Building")), FName(TEXT("Roof"))};
+
+		USceneComponent* BuildingFolder = MakeSceneFolder(
+			*Actor, *Actor->GetRootComponent(), TEXT("Building"), BuildingTags);
+		USceneComponent* WallFolder = BuildingFolder
+			? MakeSceneFolder(*Actor, *BuildingFolder, TEXT("Wall"), WallTags)
+			: nullptr;
+		USceneComponent* RoofFolder = BuildingFolder
+			? MakeSceneFolder(*Actor, *BuildingFolder, TEXT("Roof"), RoofPathTags)
+			: nullptr;
+		if (!BuildingFolder || !WallFolder || !RoofFolder)
+		{
+			OutError = TEXT("Failed to create tile component folders.");
+			Actor->Destroy();
+			return false;
+		}
+
+		auto SpawnSlotComponents = [&](
+			TArray<FExtrudedPrismMesh>& Parts,
+			USceneComponent& Parent,
+			const TCHAR* Kind,
+			const TArray<FName>& PathTags) -> bool
+		{
+			for (int32 Slot = 0; Slot < Parts.Num(); ++Slot)
+			{
+				if (Parts[Slot].Triangles.Num() < 3)
+				{
+					continue;
+				}
+				const FString AssetName = FString::Printf(TEXT("%s_%s_%d"), *ActorLabel, Kind, Slot);
+				const FName CompName(*FString::Printf(TEXT("%s_Material_%d"), Kind, Slot));
+				UStaticMesh* StaticMesh = BuildingStaticMeshUtils::CreatePersistentStaticMesh(
+					TEXT("/Game/BuildingExtruder/Meshes"),
+					AssetName,
+					Parts[Slot],
+					Material,
+					/*NumMaterialSlots*/ 1,
+					OutError);
+				if (!StaticMesh)
+				{
+					return false;
+				}
+				if (!AttachSlotMesh(*Actor, Parent, CompName, *StaticMesh, PathTags, OutError))
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+
+		if (!SpawnSlotComponents(WallParts, *WallFolder, TEXT("Wall"), WallTags)
+			|| !SpawnSlotComponents(RoofParts, *RoofFolder, TEXT("Roof"), RoofPathTags))
+		{
+			Actor->Destroy();
+			return false;
+		}
+
 		Actor->Modify();
 		Actor->MarkPackageDirty();
 		OutActor = Actor;
@@ -403,17 +523,16 @@ namespace
 FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFromShapefile(
 	UObject* WorldContextObject,
 	const FString& ShapefilePath,
-	const FString& FbxOutputPath,
 	const FString& AltitudeFieldName,
 	const FString& HeightFieldName,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
-	const FString& TileIndices,
-	float MetersPerUv,
 	int32 WallMaterialSlotCount,
 	int32 RoofMaterialSlotCount,
+	float MetersPerUv,
 	int32 MaterialRandomSeed,
+	bool bUseRoofTypes,
 	const FString& RoofTypeFieldName,
 	int32 FlatRoofIndex,
 	int32 HippedRoofIndex,
@@ -427,8 +546,10 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	FBuildingExtrudeResult Result;
 	const double StartTime = FPlatformTime::Seconds();
 	const FString AltitudeField = AltitudeFieldName.IsEmpty() ? TEXT("altitude") : AltitudeFieldName;
-	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("RELATIVE_F") : HeightFieldName;
-	const FString RoofTypeField = RoofTypeFieldName.IsEmpty() ? TEXT("roof_type") : RoofTypeFieldName;
+	const FString HeightField = HeightFieldName.IsEmpty() ? TEXT("height") : HeightFieldName;
+	const FString RoofTypeField = (!bUseRoofTypes)
+		? FString()
+		: (RoofTypeFieldName.IsEmpty() ? TEXT("roof_type") : RoofTypeFieldName);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.01);
 	const double ParapetHeightM = FMath::Max(static_cast<double>(ParapetHeightMeters), 0.0);
 	const double ParapetWidthM = FMath::Max(static_cast<double>(ParapetWidthMeters), 0.0);
@@ -437,21 +558,20 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const int32 RoofSlots = FMath::Clamp(RoofMaterialSlotCount, 1, 64);
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
-	const FString CleanFbxPath = SanitizeFilePath(FbxOutputPath);
 
 	UE_LOG(LogBuildingExtruder, Display, TEXT("========== Extrude START =========="));
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("shp='%s' fbx='%s' altitudeField='%s' heightField='%s' roofTypeField='%s' "
+		TEXT("shp='%s' altitudeField='%s' heightField='%s' useRoofTypes=%s roofTypeField='%s' "
 			 "flatIdx=%d hippedIdx=%d parapetIdx=%d parapetH=%.2fm parapetW=%.2fm hippedH=%.2fm "
-			 "targetTiles=%d tileFilter='%s' metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d "
+			 "targetTiles=%d metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d "
 			 "roofObjects=%s folder='%s'"),
 		*CleanInputPath,
-		*CleanFbxPath,
 		*AltitudeField,
 		*HeightField,
-		*RoofTypeField,
+		bUseRoofTypes ? TEXT("on") : TEXT("off"),
+		bUseRoofTypes ? *RoofTypeField : TEXT("(unused)"),
 		FlatRoofIndex,
 		HippedRoofIndex,
 		ParapetRoofIndex,
@@ -459,20 +579,12 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		ParapetWidthM,
 		HippedHeightM,
 		TargetTileCount,
-		*TileIndices,
 		UvMeters,
 		WallSlots,
 		RoofSlots,
 		MaterialRandomSeed,
 		bPlaceRoofObjects ? TEXT("on") : TEXT("off"),
 		*RoofObjectMeshFolder);
-
-	if (CleanFbxPath.IsEmpty())
-	{
-		Result.Message = TEXT("FbxOutputPath is required (final deliverable).");
-		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-		return Result;
-	}
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -547,9 +659,10 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		return Result;
 	}
 
-	if (FlatRoofIndex == HippedRoofIndex
-		|| FlatRoofIndex == ParapetRoofIndex
-		|| HippedRoofIndex == ParapetRoofIndex)
+	if (bUseRoofTypes
+		&& (FlatRoofIndex == HippedRoofIndex
+			|| FlatRoofIndex == ParapetRoofIndex
+			|| HippedRoofIndex == ParapetRoofIndex))
 	{
 		Result.Message = FString::Printf(
 			TEXT("Roof type indices must be unique (flat=%d, hipped=%d, parapet=%d)."),
@@ -651,34 +764,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	int32 TilesY = 1;
 	ChooseSquareTileGrid(MinLon, MaxLon, MinLat, MaxLat, TargetTileCount, TilesX, TilesY);
 
-	TSet<int32> SelectedTileIndices;
-	FString TileFilterError;
-	if (!ParseTileIndicesFilter(TileIndices, SelectedTileIndices, TileFilterError))
-	{
-		Result.Message = TileFilterError;
-		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-		return Result;
-	}
-
 	const int32 TileSlotCount = TilesX * TilesY;
-	for (const int32 Idx : SelectedTileIndices)
-	{
-		if (Idx >= TileSlotCount)
-		{
-			Result.Message = FString::Printf(
-				TEXT("Tile index %d is out of range for grid %dx%d (%d slots, indices 0..%d)."),
-				Idx,
-				TilesX,
-				TilesY,
-				TileSlotCount,
-				TileSlotCount - 1);
-			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-			return Result;
-		}
-	}
-
 	TArray<TArray<int32>> TileFeatureIndices;
 	TileFeatureIndices.SetNum(TileSlotCount);
 	for (int32 I = 0; I < ToImport; ++I)
@@ -692,57 +778,31 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		int32 TY = FMath::FloorToInt(static_cast<float>((C.Y - MinLat) / LatSpan * TilesY));
 		TX = FMath::Clamp(TX, 0, TilesX - 1);
 		TY = FMath::Clamp(TY, 0, TilesY - 1);
-		const int32 LinearIndex = TY * TilesX + TX;
-		if (SelectedTileIndices.Num() > 0 && !SelectedTileIndices.Contains(LinearIndex))
-		{
-			continue;
-		}
-		TileFeatureIndices[LinearIndex].Add(I);
+		TileFeatureIndices[TY * TilesX + TX].Add(I);
 	}
 
 	int32 NonEmptyTiles = 0;
-	int32 BuildingsInSelectedTiles = 0;
+	int32 BuildingsInTiles = 0;
 	for (const TArray<int32>& Bucket : TileFeatureIndices)
 	{
 		if (Bucket.Num() > 0)
 		{
 			++NonEmptyTiles;
-			BuildingsInSelectedTiles += Bucket.Num();
+			BuildingsInTiles += Bucket.Num();
 		}
-	}
-
-	if (SelectedTileIndices.Num() > 0)
-	{
-		TArray<int32> SortedFilter = SelectedTileIndices.Array();
-		SortedFilter.Sort();
-		FString FilterList;
-		for (int32 I = 0; I < SortedFilter.Num(); ++I)
-		{
-			if (I > 0)
-			{
-				FilterList += TEXT(",");
-			}
-			FilterList += FString::FromInt(SortedFilter[I]);
-		}
-		UE_LOG(
-			LogBuildingExtruder,
-			Display,
-			TEXT("Tile filter active: [%s] -> %d non-empty selected tiles, %d buildings"),
-			*FilterList,
-			NonEmptyTiles,
-			BuildingsInSelectedTiles);
 	}
 
 	UE_LOG(
 		LogBuildingExtruder,
 		Display,
-		TEXT("Tiling: buildings=%d target=%d chosenGrid=%dx%d (%d slots) processingNonEmpty=%d bounds lon[%.6f,%.6f] lat[%.6f,%.6f]"),
+		TEXT("Tiling: buildings=%d target=%d chosenGrid=%dx%d (%d slots) processingNonEmpty=%d placed=%d bounds lon[%.6f,%.6f] lat[%.6f,%.6f]"),
 		ToImport,
 		TargetTileCount,
 		TilesX,
 		TilesY,
 		TileSlotCount,
 		NonEmptyTiles,
+		BuildingsInTiles,
 		MinLon,
 		MaxLon,
 		MinLat,
@@ -750,9 +810,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 
 	if (NonEmptyTiles == 0)
 	{
-		Result.Message = SelectedTileIndices.Num() > 0
-			? TEXT("No buildings found in the selected TileIndices.")
-			: TEXT("No buildings assigned to any tile.");
+		Result.Message = TEXT("No buildings assigned to any tile.");
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
 		return Result;
@@ -784,7 +842,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 
 	const float SpawnTileWork = static_cast<float>(FMath::Max(NonEmptyTiles, 1));
 	FScopedSlowTask SlowTask(
-		SpawnTileWork + 1.0f,
+		SpawnTileWork,
 		NSLOCTEXT("BuildingExtruder", "ImportProgress", "Extruding tiled buildings..."));
 	SlowTask.MakeDialog(true);
 
@@ -794,8 +852,6 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	int32 BuildingsMeshed = 0;
 	int32 BuildingsSkipped = 0;
 	int32 TilesSpawned = 0;
-	TArray<AStaticMeshActor*> SpawnedTileActors;
-	SpawnedTileActors.Reserve(NonEmptyTiles * 2);
 	UMaterialInterface* CorrectMaterial = nullptr;
 	{
 		FString MaterialError;
@@ -810,15 +866,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			return Result;
 		}
 	}
-	TArray<FName> WallsTags;
-	WallsTags.Add(FName(TEXT("BuildingExtruderTile")));
-	WallsTags.Add(FName(TEXT("BuildingExtruderWalls")));
-	TArray<FName> RoofTags;
-	RoofTags.Add(FName(TEXT("BuildingExtruderTile")));
-	RoofTags.Add(FName(TEXT("BuildingExtruderRoof")));
-
-	const FString WallsFolder = FolderPath.IsEmpty() ? FString(TEXT("Walls")) : (FolderPath + TEXT("/Walls"));
-	const FString RoofFolder = FolderPath.IsEmpty() ? FString(TEXT("Roofs")) : (FolderPath + TEXT("/Roofs"));
+	}
 
 	FRandomStream MaterialRng;
 	if (MaterialRandomSeed == 0)
@@ -857,7 +905,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				Result.RoofObjectsPlaced = CommitRoofFoliage(RoofIFA, RoofFoliageSlots, RoofTransforms, World);
 				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 				Result.Message = FString::Printf(
-					TEXT("Cancelled. Tiles=%d buildings=%d roofObjects=%d. FBX not written. Elapsed: %.2fs."),
+					TEXT("Cancelled. Tiles=%d buildings=%d roofObjects=%d. Elapsed: %.2fs."),
 					TilesSpawned,
 					BuildingsMeshed,
 					Result.RoofObjectsPlaced,
@@ -874,6 +922,12 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			{
 				TileRoofPending.SetNum(RoofMeshes.Num());
 			}
+
+			TMap<int32, int32> WallSlotByFeature;
+			TMap<int32, int32> RoofSlotByFeature;
+			AssignEvenRandomSlots(Bucket, WallSlots, MaterialRng, WallSlotByFeature);
+			AssignEvenRandomSlots(Bucket, RoofSlots, MaterialRng, RoofSlotByFeature);
+
 			for (const int32 FeatureIndex : Bucket)
 			{
 				FExtrudedPrismMesh BuildingWalls;
@@ -887,6 +941,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 						Features[FeatureIndex],
 						Features[FeatureIndex].ElevationM,
 						UvMeters,
+						bUseRoofTypes,
 						FlatRoofIndex,
 						HippedRoofIndex,
 						ParapetRoofIndex,
@@ -910,9 +965,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					continue;
 				}
 
-				// Same building -> same wall slot and same roof slot; random across buildings.
-				const int32 WallSlot = MaterialRng.RandRange(0, WallSlots - 1);
-				const int32 RoofSlot = MaterialRng.RandRange(0, RoofSlots - 1);
+				const int32 WallSlot = WallSlotByFeature.FindRef(FeatureIndex);
+				const int32 RoofSlot = RoofSlotByFeature.FindRef(FeatureIndex);
 				BuildingExtrudeUtils::AssignAllTrianglesMaterialSlot(BuildingWalls, WallSlot);
 				BuildingExtrudeUtils::AssignAllTrianglesMaterialSlot(BuildingRoof, RoofSlot);
 
@@ -966,51 +1020,26 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 				continue;
 			}
 
-			const FString WallsLabel = TileLabel + TEXT("_Walls");
-			const FString RoofLabel = TileLabel + TEXT("_Roof");
-
-			AStaticMeshActor* WallsActor = nullptr;
-			AStaticMeshActor* RoofActor = nullptr;
+			AActor* TileActor = nullptr;
 			FString SpawnError;
-			if (!SpawnTileStaticMeshActor(
+			if (!SpawnBuildingTileActor(
 					*World,
 					TileWallsMesh,
-					WallsLabel,
-					WallsFolder,
+					TileRoofMesh,
+					TileLabel,
+					FolderPath,
 					CorrectMaterial,
 					WallSlots,
-					WallsTags,
-					WallsActor,
-					SpawnError))
-			{
-				UE_LOG(LogBuildingExtruder, Error, TEXT("Tile %s walls failed: %s"), *TileLabel, *SpawnError);
-				BuildingsSkipped += TileBuildingCount;
-				BuildingsMeshed -= TileBuildingCount;
-				continue;
-			}
-			if (!SpawnTileStaticMeshActor(
-					*World,
-					TileRoofMesh,
-					RoofLabel,
-					RoofFolder,
-					CorrectMaterial,
 					RoofSlots,
-					RoofTags,
-					RoofActor,
+					TileActor,
 					SpawnError))
 			{
-				UE_LOG(LogBuildingExtruder, Error, TEXT("Tile %s roof failed: %s"), *TileLabel, *SpawnError);
-				if (WallsActor)
-				{
-					WallsActor->Destroy();
-				}
+				UE_LOG(LogBuildingExtruder, Error, TEXT("Tile %s failed: %s"), *TileLabel, *SpawnError);
 				BuildingsSkipped += TileBuildingCount;
 				BuildingsMeshed -= TileBuildingCount;
 				continue;
 			}
 
-			SpawnedTileActors.Add(WallsActor);
-			SpawnedTileActors.Add(RoofActor);
 			++TilesSpawned;
 			for (int32 MeshIndex = 0; MeshIndex < TileRoofPending.Num(); ++MeshIndex)
 			{
@@ -1019,44 +1048,19 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		}
 	}
 
-	SlowTask.EnterProgressFrame(1.0f, NSLOCTEXT("BuildingExtruder", "WriteFbx", "Writing FBX..."));
-
 	RoofObjectsPlaced = CommitRoofFoliage(RoofIFA, RoofFoliageSlots, RoofTransforms, World);
 
-	FString WrittenFbxPath = CleanFbxPath;
-	if (!WrittenFbxPath.EndsWith(TEXT(".fbx"), ESearchCase::IgnoreCase))
-	{
-		WrittenFbxPath += TEXT(".fbx");
-	}
-
-	if (SpawnedTileActors.Num() <= 0)
+	if (TilesSpawned <= 0)
 	{
 		Result.BuildingsSpawned = 0;
 		Result.BuildingsSkipped = BuildingsSkipped;
-		Result.TilesSpawned = TilesSpawned;
+		Result.TilesSpawned = 0;
 		Result.RoofObjectsPlaced = RoofObjectsPlaced;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		Result.Message = FString::Printf(
-			TEXT("No tiles spawned (%d buildings skipped). FBX not written. Elapsed: %.2fs."),
+			TEXT("No tiles spawned (%d buildings skipped). Elapsed: %.2fs."),
 			BuildingsSkipped,
 			Result.ElapsedSeconds);
-		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
-		return Result;
-	}
-
-	FString FbxError;
-	if (!BuildingFbxExporter::ExportTileActors(*World, SpawnedTileActors, WrittenFbxPath, FbxError))
-	{
-		Result.BuildingsSpawned = BuildingsMeshed;
-		Result.BuildingsSkipped = BuildingsSkipped;
-		Result.TilesSpawned = TilesSpawned;
-		Result.RoofObjectsPlaced = RoofObjectsPlaced;
-		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-		Result.Message = FString::Printf(
-			TEXT("Spawned %d tiles (%d buildings) for editor preview, but FBX write failed: %s"),
-			TilesSpawned,
-			BuildingsMeshed,
-			*FbxError);
 		UE_LOG(LogBuildingExtruder, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}
@@ -1066,18 +1070,14 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	Result.BuildingsSkipped = BuildingsSkipped;
 	Result.TilesSpawned = TilesSpawned;
 	Result.RoofObjectsPlaced = RoofObjectsPlaced;
-	Result.FbxOutputPath = WrittenFbxPath;
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d tiles (%d walls + %d roof actors, %d buildings, %d skipped, %d roof objects), "
-			 "saved meshes under /Game/BuildingExtruder/Meshes, wrote FBX '%s'. Elapsed: %.2fs."),
-		TilesSpawned,
-		TilesSpawned,
+		TEXT("Spawned %d tiles (%d buildings, %d skipped, %d roof objects), "
+			 "saved per-material meshes under /Game/BuildingExtruder/Meshes. Elapsed: %.2fs."),
 		TilesSpawned,
 		BuildingsMeshed,
 		BuildingsSkipped,
 		RoofObjectsPlaced,
-		*WrittenFbxPath,
 		Result.ElapsedSeconds);
 
 	World->MarkPackageDirty();

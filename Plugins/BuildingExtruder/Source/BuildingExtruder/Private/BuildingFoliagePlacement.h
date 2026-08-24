@@ -23,5 +23,5 @@ namespace BuildingFoliagePlacement
 
 	bool AddInstances(FBuildingFoliageSlot& Slot, const TArray<FTransform>& WorldTransforms);
 
-	void RefreshSlots(TArray<FBuildingFoliageSlot>& Slots);
+	void RefreshSlots(AInstancedFoliageActor& IFA, TArray<FBuildingFoliageSlot>& Slots);
 }

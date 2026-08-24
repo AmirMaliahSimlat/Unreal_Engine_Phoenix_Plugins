@@ -7,6 +7,7 @@
 
 #include "CesiumGeoreference.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/SceneComponent.h"
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -151,6 +152,124 @@ namespace
 			: 0;
 		HISM->InstanceStartCullDistance = StartDist;
 		HISM->InstanceEndCullDistance = EndDist;
+	}
+
+	void AppendComponentTags(UActorComponent& Comp, const TArray<FName>& Tags)
+	{
+		for (const FName& Tag : Tags)
+		{
+			Comp.ComponentTags.AddUnique(Tag);
+		}
+	}
+
+	USceneComponent* FindOrMakeIFaFolder(
+		AInstancedFoliageActor& IFA,
+		FName FolderName,
+		const TArray<FName>& Tags)
+	{
+		USceneComponent* Root = IFA.GetRootComponent();
+		if (!Root)
+		{
+			return nullptr;
+		}
+
+		TArray<USceneComponent*> Comps;
+		IFA.GetComponents(Comps);
+		for (USceneComponent* Comp : Comps)
+		{
+			if (!Comp || Comp == Root || Comp->GetClass() != USceneComponent::StaticClass())
+			{
+				continue;
+			}
+			if (Comp->GetFName() == FolderName || Comp->ComponentTags.Contains(FolderName))
+			{
+				AppendComponentTags(*Comp, Tags);
+				if (Comp->GetAttachParent() != Root)
+				{
+					Comp->AttachToComponent(Root, FAttachmentTransformRules::KeepRelativeTransform);
+				}
+				Comp->SetRelativeTransform(FTransform::Identity);
+				return Comp;
+			}
+		}
+
+		USceneComponent* Folder = NewObject<USceneComponent>(&IFA, FolderName, RF_Transactional);
+		if (!Folder)
+		{
+			return nullptr;
+		}
+		Folder->SetMobility(EComponentMobility::Static);
+		Folder->SetupAttachment(Root);
+		Folder->SetRelativeTransform(FTransform::Identity);
+		IFA.AddInstanceComponent(Folder);
+		Folder->RegisterComponent();
+		AppendComponentTags(*Folder, Tags);
+		return Folder;
+	}
+
+	void OrganizeFoliageHism(
+		AInstancedFoliageActor& IFA,
+		UFoliageType* Type,
+		FFoliageInfo* Info,
+		FName FolderName,
+		const TArray<FName>& Tags)
+	{
+		if (!Info)
+		{
+			return;
+		}
+
+		UHierarchicalInstancedStaticMeshComponent* HISM =
+			Cast<UHierarchicalInstancedStaticMeshComponent>(Info->GetComponent());
+		if (!HISM)
+		{
+			return;
+		}
+
+		const FName TreeTag(TEXT("Tree"));
+		const FName RoofObjectTag(TEXT("RoofObject"));
+		if (FolderName == TreeTag && HISM->ComponentTags.Contains(RoofObjectTag))
+		{
+			return;
+		}
+		if (FolderName == RoofObjectTag && HISM->ComponentTags.Contains(TreeTag))
+		{
+			return;
+		}
+
+		USceneComponent* Folder = FindOrMakeIFaFolder(IFA, FolderName, Tags);
+		if (!Folder)
+		{
+			return;
+		}
+
+		if (HISM->GetAttachParent() != Folder)
+		{
+			HISM->AttachToComponent(Folder, FAttachmentTransformRules::KeepWorldTransform);
+		}
+		if (USceneComponent* Root = IFA.GetRootComponent())
+		{
+			HISM->SetWorldTransform(Root->GetComponentTransform());
+		}
+		AppendComponentTags(*HISM, Tags);
+
+		FString MeshName;
+		if (const UFoliageType_InstancedStaticMesh* ISMType = Cast<UFoliageType_InstancedStaticMesh>(Type))
+		{
+			if (const UStaticMesh* Mesh = ISMType->GetStaticMesh())
+			{
+				MeshName = Mesh->GetName();
+			}
+		}
+		if (MeshName.IsEmpty() && HISM->GetStaticMesh())
+		{
+			MeshName = HISM->GetStaticMesh()->GetName();
+		}
+		if (!MeshName.IsEmpty() && !HISM->GetName().StartsWith(MeshName))
+		{
+			const FName UniqueName = MakeUniqueObjectName(&IFA, HISM->GetClass(), FName(*MeshName));
+			HISM->Rename(*UniqueName.ToString(), nullptr, REN_DontCreateRedirectors);
+		}
 	}
 
 	void ApplyFoliageCullDistance(
@@ -346,6 +465,12 @@ namespace
 		}
 
 		ApplyFoliageCullDistance(Type, Info, TreeCullCm);
+		OrganizeFoliageHism(
+			IFA,
+			Type,
+			Info,
+			FName(TEXT("Tree")),
+			{FName(TEXT("Tree"))});
 		OutSlot.Type = Type;
 		OutSlot.Info = Info;
 		return true;
@@ -376,7 +501,7 @@ namespace
 		return true;
 	}
 
-	void RefreshFoliageSlots(TArray<FTreeFoliageSlot>& Slots, int32 TreeCullCm)
+	void RefreshFoliageSlots(AInstancedFoliageActor& IFA, TArray<FTreeFoliageSlot>& Slots, int32 TreeCullCm)
 	{
 		for (FTreeFoliageSlot& Slot : Slots)
 		{
@@ -386,6 +511,12 @@ namespace
 			}
 			Slot.Info->Refresh(/*Async*/ false, /*Force*/ true);
 			ApplyFoliageCullDistance(Slot.Type, Slot.Info, TreeCullCm);
+			OrganizeFoliageHism(
+				IFA,
+				Slot.Type,
+				Slot.Info,
+				FName(TEXT("Tree")),
+				{FName(TEXT("Tree"))});
 		}
 	}
 
@@ -1167,7 +1298,7 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 			if (SlowTask.ShouldCancel())
 			{
-				RefreshFoliageSlots(FoliageSlots, TreeCullCm);
+				RefreshFoliageSlots(*IFA, FoliageSlots, TreeCullCm);
 				IFA->Modify();
 				World->MarkPackageDirty();
 				Result.bCancelled = true;
@@ -1259,7 +1390,7 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 		}
 	}
 
-	RefreshFoliageSlots(FoliageSlots, TreeCullCm);
+	RefreshFoliageSlots(*IFA, FoliageSlots, TreeCullCm);
 	IFA->Modify();
 	World->MarkPackageDirty();
 
