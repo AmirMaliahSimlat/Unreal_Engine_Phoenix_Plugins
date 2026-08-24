@@ -866,7 +866,6 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 			return Result;
 		}
 	}
-	}
 
 	FRandomStream MaterialRng;
 	if (MaterialRandomSeed == 0)
