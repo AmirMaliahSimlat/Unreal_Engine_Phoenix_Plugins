@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 2,
+	"VersionName": "1.1.0",
+	"FriendlyName": "Stencil Assigner",
+	"Description": "Editor tool that sets Custom Depth stencil on primitive components from component tags and writes unmatched components to a text report.",
+	"Category": "Editor",
+	"CreatedBy": "GeoSim Tools",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "StencilAssigner",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

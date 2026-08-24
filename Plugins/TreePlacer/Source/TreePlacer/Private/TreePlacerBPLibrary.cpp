@@ -98,37 +98,6 @@ namespace
 		OutTilesY = BestY;
 	}
 
-	bool ParseTileIndicesFilter(const FString& TileIndices, TSet<int32>& OutIndices, FString& OutError)
-	{
-		OutIndices.Reset();
-		FString Trimmed = TileIndices.TrimStartAndEnd();
-		if (Trimmed.IsEmpty())
-		{
-			return true;
-		}
-
-		TArray<FString> Parts;
-		Trimmed.ParseIntoArray(Parts, TEXT(","), /*bCullEmpty*/ true);
-		for (FString& Part : Parts)
-		{
-			Part.TrimStartAndEndInline();
-			if (Part.IsEmpty())
-			{
-				continue;
-			}
-			int32 Index = INDEX_NONE;
-			if (!LexTryParseString(Index, *Part) || Index < 0)
-			{
-				OutError = FString::Printf(
-					TEXT("TileIndices entry '%s' is not a non-negative integer. Use e.g. \"0,6,12\"."),
-					*Part);
-				return false;
-			}
-			OutIndices.Add(Index);
-		}
-		return true;
-	}
-
 	/** Convert meters to Unreal cull cm. <= 0 means no distance culling (UE uses 0). */
 	int32 MetersToCullDistanceCm(float DistanceMeters)
 	{
@@ -984,22 +953,21 @@ namespace
 FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	UObject* WorldContextObject,
 	const FString& ShapefilePath,
-	const FString& TreeMeshFolder,
 	const FString& AltitudeFieldName,
+	const FString& TreeMeshFolder,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
-	const FString& TileIndices,
 	int32 RandomSeed,
 	float TreeCullDistanceMeters,
-	const FString& RedFieldName,
-	const FString& GreenFieldName,
-	const FString& BlueFieldName,
+	bool bApplyLeafTint,
 	const FString& LeafTintMaterialPath,
 	const FString& LeafTintParameterName,
 	int32 LeafMaterialSlotIndex,
 	int32 ColorClusterCount,
-	bool bApplyLeafTint)
+	const FString& RedFieldName,
+	const FString& GreenFieldName,
+	const FString& BlueFieldName)
 {
 	FTreePlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -1019,12 +987,11 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d tileFilter='%s' seed=%d treeCullM=%.1f tint='%s' K=%d"),
+		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d seed=%d treeCullM=%.1f tint='%s' K=%d"),
 		*CleanInputPath,
 		*TreeMeshFolder,
 		*AltitudeField,
 		TargetTileCount,
-		*TileIndices,
 		RandomSeed,
 		TreeCullDistanceMeters,
 		bTintLeaves ? *CleanTintPath : TEXT("(off)"),
@@ -1102,34 +1069,7 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	int32 TilesY = 1;
 	ChooseSquareTileGrid(MinLon, MaxLon, MinLat, MaxLat, TargetTileCount, TilesX, TilesY);
 
-	TSet<int32> SelectedTileIndices;
-	FString TileFilterError;
-	if (!ParseTileIndicesFilter(TileIndices, SelectedTileIndices, TileFilterError))
-	{
-		Result.Message = TileFilterError;
-		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
-		return Result;
-	}
-
 	const int32 TileSlotCount = TilesX * TilesY;
-	for (const int32 Idx : SelectedTileIndices)
-	{
-		if (Idx >= TileSlotCount)
-		{
-			Result.Message = FString::Printf(
-				TEXT("Tile index %d is out of range for grid %dx%d (%d slots, indices 0..%d)."),
-				Idx,
-				TilesX,
-				TilesY,
-				TileSlotCount,
-				TileSlotCount - 1);
-			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
-			return Result;
-		}
-	}
-
 	TArray<TArray<int32>> TilePointIndices;
 	TilePointIndices.SetNum(TileSlotCount);
 	for (int32 I = 0; I < PointCount; ++I)
@@ -1139,42 +1079,35 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 		int32 TY = FMath::FloorToInt(static_cast<float>((Point.LatDeg - MinLat) / LatSpan * TilesY));
 		TX = FMath::Clamp(TX, 0, TilesX - 1);
 		TY = FMath::Clamp(TY, 0, TilesY - 1);
-		const int32 LinearIndex = TY * TilesX + TX;
-		if (SelectedTileIndices.Num() > 0 && !SelectedTileIndices.Contains(LinearIndex))
-		{
-			continue;
-		}
-		TilePointIndices[LinearIndex].Add(I);
+		TilePointIndices[TY * TilesX + TX].Add(I);
 	}
 
 	int32 NonEmptyTiles = 0;
-	int32 PointsInSelectedTiles = 0;
+	int32 PointsInTiles = 0;
 	for (const TArray<int32>& Bucket : TilePointIndices)
 	{
 		if (Bucket.Num() > 0)
 		{
 			++NonEmptyTiles;
-			PointsInSelectedTiles += Bucket.Num();
+			PointsInTiles += Bucket.Num();
 		}
 	}
 
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("Tiling: points=%d target=%d chosenGrid=%dx%d (%d slots) processingNonEmpty=%d pointsInTiles=%d"),
+		TEXT("Tiling: points=%d target=%d chosenGrid=%dx%d (%d slots) processingNonEmpty=%d placed=%d"),
 		PointCount,
 		TargetTileCount,
 		TilesX,
 		TilesY,
 		TileSlotCount,
 		NonEmptyTiles,
-		PointsInSelectedTiles);
+		PointsInTiles);
 
 	if (NonEmptyTiles == 0)
 	{
-		Result.Message = SelectedTileIndices.Num() > 0
-			? TEXT("No points found in the selected TileIndices.")
-			: TEXT("No points assigned to any tile.");
+		Result.Message = TEXT("No points assigned to any tile.");
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
