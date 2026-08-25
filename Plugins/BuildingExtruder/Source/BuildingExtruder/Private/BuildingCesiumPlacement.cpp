@@ -33,8 +33,8 @@ FVector BuildingCesiumPlacement::LonLatHeightToUnreal(
 	double HeightM)
 {
 	const FVector LLH(LonDeg, LatDeg, HeightM);
-	// Current Cesium for Unreal API (Phoenix): Position suffix.
-	// Result is in the Georeference actor's local frame — convert to world.
+	// Cesium for Unreal 5.1 and 5.3: Position suffix. Result is in the
+	// Georeference actor's local frame — convert to world.
 	const FVector LocalPos = Georeference.TransformLongitudeLatitudeHeightPositionToUnreal(LLH);
 	return Georeference.GetActorTransform().TransformPosition(LocalPos);
 }

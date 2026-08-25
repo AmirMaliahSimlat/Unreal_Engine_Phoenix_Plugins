@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 7,
-	"VersionName": "1.3.0",
+	"Version": 9,
+	"VersionName": "1.4.1",
 	"FriendlyName": "Tree Placer",
-	"Description": "Editor tool that reads EPSG:4326 tree point shapefiles with altitude and places random tree meshes from a Content folder onto the level InstancedFoliageActor.",
+	"Description": "Editor tool that reads EPSG:4326 tree point shapefiles with altitude and places random tree meshes from a Content folder onto the level InstancedFoliageActor. Compiles for Unreal Engine 5.1 and 5.3.",
 	"Category": "Editor",
 	"CreatedBy": "GeoSim Tools",
 	"CreatedByURL": "",

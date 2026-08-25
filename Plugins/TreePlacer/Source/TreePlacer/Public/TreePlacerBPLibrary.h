@@ -37,6 +37,7 @@ struct FTreePlaceResult
  * Tree meshes must already exist as Content assets (StaticMesh or FoliageType).
  * Instances are added to the level's AInstancedFoliageActor (same actor Foliage Mode uses).
  * Each tree mesh is one HISM component, grouped under a Tree folder on that actor.
+ * Optional IR copies use a TreeIR folder (Visible in Scene Capture Only).
  * Tiling is only used to batch work. The entire map is processed.
  */
 UCLASS()
@@ -54,6 +55,11 @@ public:
 	 * @param ShapefilePath Path to point .shp (.dbf required beside it).
 	 * @param AltitudeFieldName DBF column for ground altitude in meters (default altitude).
 	 * @param TreeMeshFolder Content folder with StaticMesh and/or FoliageType assets (e.g. /Game/Trees).
+	 * @param bPlaceIRCopies If true, place a second instance of each tree on separate IFA HISMs
+	 *        (TreeIR folder, Visible in Scene Capture Only). Hide those components on the EO
+	 *        Scene Capture and hide EO tree HISMs on the IR Scene Capture.
+	 * @param TreeIRMeshFolder Content folder for IR meshes. Used only if bPlaceIRCopies.
+	 *        Empty = use TreeMeshFolder (same meshes, still separate components).
 	 *
 	 * Level / tiling
 	 * @param ActorLabelPrefix Prefix used only in progress labels (e.g. TreeTile).
@@ -84,6 +90,8 @@ public:
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_RandomSeed = "0",
 			CPP_Default_TreeCullDistanceMeters = "0.0",
+			CPP_Default_bPlaceIRCopies = "false",
+			CPP_Default_TreeIRMeshFolder = "",
 			CPP_Default_bApplyLeafTint = "false",
 			CPP_Default_LeafTintMaterialPath = "",
 			CPP_Default_LeafTintParameterName = "LeafTint",
@@ -97,6 +105,8 @@ public:
 		const FString& ShapefilePath,
 		const FString& AltitudeFieldName,
 		const FString& TreeMeshFolder,
+		bool bPlaceIRCopies,
+		const FString& TreeIRMeshFolder,
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath,
 		int32 TargetTileCount,

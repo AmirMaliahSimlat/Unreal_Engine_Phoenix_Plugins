@@ -6,6 +6,8 @@ public class StencilAssigner : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		bUseUnity = false;
+		// Same include order on 5.1 and 5.3 so one codebase compiles in both editors.
+		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_1;
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
@@ -19,7 +21,8 @@ public class StencilAssigner : ModuleRules
 			"UnrealEd",
 			"EditorSubsystem",
 			"Slate",
-			"SlateCore"
+			"SlateCore",
+			"Foliage"
 		});
 	}
 }

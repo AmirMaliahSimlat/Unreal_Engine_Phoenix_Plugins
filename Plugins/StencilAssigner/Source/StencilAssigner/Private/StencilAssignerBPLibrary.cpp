@@ -2,17 +2,25 @@
 
 #include "StencilAssignerLog.h"
 
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Editor.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "FoliageType.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
+#include "InstancedFoliage.h"
+#include "InstancedFoliageActor.h"
 #include "Internationalization/Internationalization.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 namespace
 {
@@ -137,6 +145,20 @@ namespace
 		return true;
 	}
 
+	bool ComponentOrAncestorsHaveTag(const USceneComponent& Comp, FName Tag)
+	{
+		const USceneComponent* Walk = &Comp;
+		while (Walk)
+		{
+			if (Walk->ComponentTags.Contains(Tag))
+			{
+				return true;
+			}
+			Walk = Walk->GetAttachParent();
+		}
+		return false;
+	}
+
 	bool TryMatchStencil(const UPrimitiveComponent& Comp, const TArray<FParsedMapping>& Mappings, int32& OutValue)
 	{
 		for (const FParsedMapping& Mapping : Mappings)
@@ -145,13 +167,71 @@ namespace
 			{
 				continue;
 			}
-			if (Comp.ComponentTags.Contains(Mapping.Tag))
+			if (ComponentOrAncestorsHaveTag(Comp, Mapping.Tag))
 			{
 				OutValue = Mapping.StencilValue;
 				return true;
 			}
 		}
 		return false;
+	}
+
+	void WarnIfNanite(const UPrimitiveComponent& Comp)
+	{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION <= 1
+		const UStaticMesh* Mesh = nullptr;
+		if (const UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(&Comp))
+		{
+			Mesh = SMC->GetStaticMesh();
+		}
+		if (Mesh && Mesh->NaniteSettings.bEnabled)
+		{
+			UE_LOG(
+				LogStencilAssigner,
+				Warning,
+				TEXT("Nanite is enabled on mesh '%s' (component '%s'). UE 5.1 Custom Stencil often skips Nanite meshes."),
+				*Mesh->GetName(),
+				*Comp.GetName());
+		}
+#else
+		(void)Comp;
+#endif
+	}
+
+	void ApplyStencilToPrimitive(UPrimitiveComponent& Comp, int32 StencilValue)
+	{
+		AActor* Owner = Comp.GetOwner();
+		if (Owner)
+		{
+			Owner->Modify();
+		}
+		Comp.Modify();
+		Comp.SetRenderCustomDepth(true);
+		Comp.SetCustomDepthStencilValue(StencilValue);
+		Comp.SetCustomDepthStencilWriteMask(ERendererStencilMask::ERSM_Default);
+		Comp.bHiddenInSceneCapture = false;
+		Comp.MarkRenderStateDirty();
+		WarnIfNanite(Comp);
+
+		AInstancedFoliageActor* IFA = Owner ? Cast<AInstancedFoliageActor>(Owner) : nullptr;
+		if (!IFA)
+		{
+			return;
+		}
+
+		// Foliage copies Type -> HISM on refresh; component-only stencil gets wiped.
+		IFA->ForEachFoliageInfo([&](UFoliageType* Type, FFoliageInfo& Info)
+		{
+			if (!Type || Info.GetComponent() != &Comp)
+			{
+				return true;
+			}
+			Type->Modify();
+			Type->bRenderCustomDepth = true;
+			Type->CustomDepthStencilValue = StencilValue;
+			Type->CustomDepthStencilWriteMask = ERendererStencilMask::ERSM_Default;
+			return true;
+		});
 	}
 
 	FString FormatUnmatchedLine(const AActor& Actor, const UPrimitiveComponent& Comp)
@@ -216,7 +296,7 @@ FStencilAssignResult UStencilAssignerBPLibrary::ApplyCustomStencilByTags(
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
 		AActor* Actor = *It;
-		if (Actor && IsValid(Actor) && !Actor->IsPendingKillPending())
+		if (IsValid(Actor))
 		{
 			Actors.Add(Actor);
 		}
@@ -250,7 +330,7 @@ FStencilAssignResult UStencilAssignerBPLibrary::ApplyCustomStencilByTags(
 		}
 
 		TArray<UPrimitiveComponent*> Primitives;
-		Actor->GetComponents<UPrimitiveComponent>(Primitives);
+		Actor->GetComponents<UPrimitiveComponent>(Primitives, /*bIncludeFromChildActors*/ true);
 		for (UPrimitiveComponent* Comp : Primitives)
 		{
 			if (!Comp)
@@ -261,11 +341,7 @@ FStencilAssignResult UStencilAssignerBPLibrary::ApplyCustomStencilByTags(
 			int32 StencilValue = 0;
 			if (TryMatchStencil(*Comp, ParsedMappings, StencilValue))
 			{
-				Actor->Modify();
-				Comp->Modify();
-				Comp->SetRenderCustomDepth(true);
-				Comp->SetCustomDepthStencilValue(StencilValue);
-				Comp->MarkRenderStateDirty();
+				ApplyStencilToPrimitive(*Comp, StencilValue);
 				++Matched;
 			}
 			else

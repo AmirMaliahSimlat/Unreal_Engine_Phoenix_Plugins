@@ -6,7 +6,9 @@
 #include "TreeShapefileReader.h"
 
 #include "CesiumGeoreference.h"
+#include "Components/ActorComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
@@ -143,7 +145,7 @@ namespace
 		}
 
 		TArray<USceneComponent*> Comps;
-		IFA.GetComponents(Comps);
+		IFA.GetComponents<USceneComponent>(Comps);
 		for (USceneComponent* Comp : Comps)
 		{
 			if (!Comp || Comp == Root || Comp->GetClass() != USceneComponent::StaticClass())
@@ -196,12 +198,21 @@ namespace
 		}
 
 		const FName TreeTag(TEXT("Tree"));
+		const FName TreeIRTag(TEXT("TreeIR"));
 		const FName RoofObjectTag(TEXT("RoofObject"));
-		if (FolderName == TreeTag && HISM->ComponentTags.Contains(RoofObjectTag))
+		if (FolderName == TreeTag && (HISM->ComponentTags.Contains(RoofObjectTag) || HISM->ComponentTags.Contains(TreeIRTag)))
 		{
 			return;
 		}
-		if (FolderName == RoofObjectTag && HISM->ComponentTags.Contains(TreeTag))
+		if (FolderName == TreeIRTag && HISM->ComponentTags.Contains(RoofObjectTag))
+		{
+			return;
+		}
+		if (FolderName == TreeIRTag && HISM->ComponentTags.Contains(TreeTag) && !HISM->ComponentTags.Contains(TreeIRTag))
+		{
+			return;
+		}
+		if (FolderName == RoofObjectTag && (HISM->ComponentTags.Contains(TreeTag) || HISM->ComponentTags.Contains(TreeIRTag)))
 		{
 			return;
 		}
@@ -289,14 +300,43 @@ namespace
 	{
 		UFoliageType* Type = nullptr;
 		FFoliageInfo* Info = nullptr;
+		bool bIRCopy = false;
 	};
 
-	UFoliageType* FindFoliageTypeForMesh(AInstancedFoliageActor& IFA, const UStaticMesh* Mesh)
+	bool FoliageComponentHasTag(FFoliageInfo& Info, FName Tag)
+	{
+		if (const UActorComponent* Comp = Info.GetComponent())
+		{
+			return Comp->ComponentTags.Contains(Tag);
+		}
+		return false;
+	}
+
+	void ApplyHismSceneCaptureOnly(FFoliageInfo* Info, bool bCaptureOnly)
+	{
+		if (!Info)
+		{
+			return;
+		}
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Info->GetComponent()))
+		{
+			Prim->bVisibleInSceneCaptureOnly = bCaptureOnly;
+			Prim->bHiddenInSceneCapture = false;
+			Prim->MarkRenderStateDirty();
+		}
+	}
+
+	UFoliageType* FindFoliageTypeForMesh(AInstancedFoliageActor& IFA, const UStaticMesh* Mesh, bool bIRCopy)
 	{
 		UFoliageType* Found = nullptr;
-		IFA.ForEachFoliageInfo([&](UFoliageType* Type, FFoliageInfo& /*Info*/)
+		const FName TreeIRTag(TEXT("TreeIR"));
+		IFA.ForEachFoliageInfo([&](UFoliageType* Type, FFoliageInfo& Info)
 		{
 			if (!Type || !Mesh)
+			{
+				return true;
+			}
+			if (bIRCopy != FoliageComponentHasTag(Info, TreeIRTag))
 			{
 				return true;
 			}
@@ -325,10 +365,14 @@ namespace
 		int32 LeafSlotIndex)
 	{
 		UFoliageType* Found = nullptr;
-		IFA.ForEachFoliageInfo([&](UFoliageType* Type, FFoliageInfo& /*Info*/)
+		IFA.ForEachFoliageInfo([&](UFoliageType* Type, FFoliageInfo& Info)
 		{
 			const UFoliageType_InstancedStaticMesh* ISMType = Cast<UFoliageType_InstancedStaticMesh>(Type);
 			if (!ISMType || !Mesh || ISMType->GetStaticMesh() != Mesh)
+			{
+				return true;
+			}
+			if (FoliageComponentHasTag(Info, FName(TEXT("TreeIR"))))
 			{
 				return true;
 			}
@@ -382,9 +426,11 @@ namespace
 		FTreeFoliageSlot& OutSlot,
 		FString& OutError,
 		UMaterialInterface* LeafOverride = nullptr,
-		int32 LeafSlotIndex = 1)
+		int32 LeafSlotIndex = 1,
+		bool bIRCopy = false)
 	{
 		OutSlot = FTreeFoliageSlot();
+		OutSlot.bIRCopy = bIRCopy;
 		if (!Mesh)
 		{
 			OutError = TEXT("Null tree mesh.");
@@ -394,7 +440,7 @@ namespace
 		UFoliageType* Type = nullptr;
 		FFoliageInfo* Info = nullptr;
 
-		if (LeafOverride)
+		if (LeafOverride && !bIRCopy)
 		{
 			Type = FindFoliageTypeForMeshAndLeaf(IFA, Mesh, LeafOverride, LeafSlotIndex);
 			Info = Type ? IFA.FindInfo(Type) : nullptr;
@@ -418,12 +464,18 @@ namespace
 		}
 		else
 		{
-			Type = FindFoliageTypeForMesh(IFA, Mesh);
+			Type = FindFoliageTypeForMesh(IFA, Mesh, bIRCopy);
 			Info = Type ? IFA.FindInfo(Type) : nullptr;
 			if (!Type || !Info)
 			{
-				Type = nullptr;
-				Info = IFA.AddMesh(Mesh, &Type);
+				UFoliageType_InstancedStaticMesh* NewType =
+					NewObject<UFoliageType_InstancedStaticMesh>(&IFA, NAME_None, RF_Transactional);
+				NewType->SetStaticMesh(Mesh);
+				Type = IFA.AddFoliageType(NewType, &Info);
+				if (Type && !Info)
+				{
+					Info = IFA.FindInfo(Type);
+				}
 			}
 		}
 
@@ -434,14 +486,15 @@ namespace
 		}
 
 		ApplyFoliageCullDistance(Type, Info, TreeCullCm);
-		OrganizeFoliageHism(
-			IFA,
-			Type,
-			Info,
-			FName(TEXT("Tree")),
-			{FName(TEXT("Tree"))});
+		const FName FolderName = bIRCopy ? FName(TEXT("TreeIR")) : FName(TEXT("Tree"));
+		const TArray<FName> PathTags = bIRCopy
+			? TArray<FName>{FName(TEXT("TreeIR"))}
+			: TArray<FName>{FName(TEXT("Tree"))};
+		OrganizeFoliageHism(IFA, Type, Info, FolderName, PathTags);
+		ApplyHismSceneCaptureOnly(Info, bIRCopy);
 		OutSlot.Type = Type;
 		OutSlot.Info = Info;
+		OutSlot.bIRCopy = bIRCopy;
 		return true;
 	}
 
@@ -480,13 +533,33 @@ namespace
 			}
 			Slot.Info->Refresh(/*Async*/ false, /*Force*/ true);
 			ApplyFoliageCullDistance(Slot.Type, Slot.Info, TreeCullCm);
-			OrganizeFoliageHism(
-				IFA,
-				Slot.Type,
-				Slot.Info,
-				FName(TEXT("Tree")),
-				{FName(TEXT("Tree"))});
+			const FName FolderName = Slot.bIRCopy ? FName(TEXT("TreeIR")) : FName(TEXT("Tree"));
+			const TArray<FName> PathTags = Slot.bIRCopy
+				? TArray<FName>{FName(TEXT("TreeIR"))}
+				: TArray<FName>{FName(TEXT("Tree"))};
+			OrganizeFoliageHism(IFA, Slot.Type, Slot.Info, FolderName, PathTags);
+			ApplyHismSceneCaptureOnly(Slot.Info, Slot.bIRCopy);
 		}
+	}
+
+	int32 MapEoMeshToIrIndex(int32 EoMeshIndex, const TArray<UStaticMesh*>& EoMeshes, const TArray<UStaticMesh*>& IrMeshes)
+	{
+		if (IrMeshes.Num() <= 0)
+		{
+			return INDEX_NONE;
+		}
+		if (EoMeshes.IsValidIndex(EoMeshIndex) && EoMeshes[EoMeshIndex])
+		{
+			const FName EoName = EoMeshes[EoMeshIndex]->GetFName();
+			for (int32 I = 0; I < IrMeshes.Num(); ++I)
+			{
+				if (IrMeshes[I] && IrMeshes[I]->GetFName() == EoName)
+				{
+					return I;
+				}
+			}
+		}
+		return FMath::Clamp(EoMeshIndex, 0, IrMeshes.Num() - 1) % IrMeshes.Num();
 	}
 
 	struct FLabColor
@@ -955,6 +1028,8 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	const FString& ShapefilePath,
 	const FString& AltitudeFieldName,
 	const FString& TreeMeshFolder,
+	bool bPlaceIRCopies,
+	const FString& TreeIRMeshFolder,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
 	int32 TargetTileCount,
@@ -987,9 +1062,11 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	UE_LOG(
 		LogTreePlacer,
 		Display,
-		TEXT("shp='%s' meshes='%s' altitudeField='%s' targetTiles=%d seed=%d treeCullM=%.1f tint='%s' K=%d"),
+		TEXT("shp='%s' meshes='%s' irCopies=%s irMeshes='%s' altitudeField='%s' targetTiles=%d seed=%d treeCullM=%.1f tint='%s' K=%d"),
 		*CleanInputPath,
 		*TreeMeshFolder,
+		bPlaceIRCopies ? TEXT("on") : TEXT("off"),
+		bPlaceIRCopies ? *(TreeIRMeshFolder.IsEmpty() ? TreeMeshFolder : TreeIRMeshFolder) : TEXT("(unused)"),
 		*AltitudeField,
 		TargetTileCount,
 		RandomSeed,
@@ -1035,6 +1112,20 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 		UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
+	}
+
+	TArray<UStaticMesh*> IrTreeMeshes;
+	const FString IrFolder = TreeIRMeshFolder.TrimStartAndEnd().IsEmpty() ? TreeMeshFolder : TreeIRMeshFolder;
+	if (bPlaceIRCopies)
+	{
+		FString IrMeshError;
+		if (!TreeMeshFolderLoader::LoadTreeMeshesFromFolder(IrFolder, IrTreeMeshes, IrMeshError))
+		{
+			Result.Message = IrMeshError;
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
 	}
 
 	TArray<FTreeShapefilePoint> Points;
@@ -1186,6 +1277,11 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	const int32 SlotCount = bTintLeaves ? (TreeMeshes.Num() * PaletteK) : TreeMeshes.Num();
 	TArray<FTreeFoliageSlot> FoliageSlots;
 	FoliageSlots.SetNum(SlotCount);
+	TArray<FTreeFoliageSlot> IrFoliageSlots;
+	if (bPlaceIRCopies)
+	{
+		IrFoliageSlots.SetNum(IrTreeMeshes.Num());
+	}
 
 	if (!bTintLeaves)
 	{
@@ -1193,6 +1289,28 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 		{
 			FString SlotError;
 			if (!GetOrCreateFoliageSlot(*IFA, TreeMeshes[MeshIndex], TreeCullCm, FoliageSlots[MeshIndex], SlotError))
+			{
+				Result.Message = SlotError;
+				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+				UE_LOG(LogTreePlacer, Error, TEXT("%s"), *Result.Message);
+				return Result;
+			}
+		}
+	}
+	if (bPlaceIRCopies)
+	{
+		for (int32 MeshIndex = 0; MeshIndex < IrTreeMeshes.Num(); ++MeshIndex)
+		{
+			FString SlotError;
+			if (!GetOrCreateFoliageSlot(
+					*IFA,
+					IrTreeMeshes[MeshIndex],
+					TreeCullCm,
+					IrFoliageSlots[MeshIndex],
+					SlotError,
+					nullptr,
+					LeafMaterialSlotIndex,
+					/*bIRCopy*/ true))
 			{
 				Result.Message = SlotError;
 				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
@@ -1232,6 +1350,10 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 			if (SlowTask.ShouldCancel())
 			{
 				RefreshFoliageSlots(*IFA, FoliageSlots, TreeCullCm);
+				if (bPlaceIRCopies)
+				{
+					RefreshFoliageSlots(*IFA, IrFoliageSlots, TreeCullCm);
+				}
 				IFA->Modify();
 				World->MarkPackageDirty();
 				Result.bCancelled = true;
@@ -1250,6 +1372,11 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 
 			TArray<TArray<FTransform>> TransformsPerSlot;
 			TransformsPerSlot.SetNum(SlotCount);
+			TArray<TArray<FTransform>> IrTransformsPerSlot;
+			if (bPlaceIRCopies)
+			{
+				IrTransformsPerSlot.SetNum(IrTreeMeshes.Num());
+			}
 
 			for (const int32 PointIndex : Bucket)
 			{
@@ -1268,10 +1395,16 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 					? (MeshIndex * PaletteK + ClusterIndex)
 					: MeshIndex;
 				const float YawDeg = PlaceRng.FRandRange(0.0f, 360.0f);
-				TransformsPerSlot[SlotIndex].Add(FTransform(
-					FRotator(0.0, YawDeg, 0.0),
-					WorldPos,
-					FVector::OneVector));
+				const FTransform TreeXform(FRotator(0.0, YawDeg, 0.0), WorldPos, FVector::OneVector);
+				TransformsPerSlot[SlotIndex].Add(TreeXform);
+				if (bPlaceIRCopies)
+				{
+					const int32 IrIndex = MapEoMeshToIrIndex(MeshIndex, TreeMeshes, IrTreeMeshes);
+					if (IrTransformsPerSlot.IsValidIndex(IrIndex))
+					{
+						IrTransformsPerSlot[IrIndex].Add(TreeXform);
+					}
+				}
 			}
 
 			bool bTileAdded = false;
@@ -1316,6 +1449,32 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 				bTileAdded = true;
 			}
 
+			if (bPlaceIRCopies)
+			{
+				for (int32 IrIndex = 0; IrIndex < IrTransformsPerSlot.Num(); ++IrIndex)
+				{
+					const TArray<FTransform>& IrTransforms = IrTransformsPerSlot[IrIndex];
+					if (IrTransforms.Num() == 0)
+					{
+						continue;
+					}
+					if (!IrFoliageSlots.IsValidIndex(IrIndex) || !IrFoliageSlots[IrIndex].Type)
+					{
+						UE_LOG(LogTreePlacer, Error, TEXT("Tile %s: missing IR foliage slot %d."), *TileLabel, IrIndex);
+						continue;
+					}
+					if (!AddFoliageInstances(IrFoliageSlots[IrIndex], IrTransforms))
+					{
+						UE_LOG(
+							LogTreePlacer,
+							Error,
+							TEXT("Tile %s failed to add IR instances for mesh '%s'."),
+							*TileLabel,
+							*IrTreeMeshes[IrIndex]->GetName());
+					}
+				}
+			}
+
 			if (bTileAdded)
 			{
 				++TilesSpawned;
@@ -1324,6 +1483,15 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	}
 
 	RefreshFoliageSlots(*IFA, FoliageSlots, TreeCullCm);
+	if (bPlaceIRCopies)
+	{
+		RefreshFoliageSlots(*IFA, IrFoliageSlots, TreeCullCm);
+		UE_LOG(
+			LogTreePlacer,
+			Warning,
+			TEXT("IR copies are Visible in Scene Capture Only. Hide TreeIR HISMs on the EO Scene Capture "
+				 "and hide Tree HISMs on the IR Scene Capture (HideComponent), or both cameras will see the wrong set."));
+	}
 	IFA->Modify();
 	World->MarkPackageDirty();
 
@@ -1349,24 +1517,26 @@ FTreePlaceResult UTreePlacerBPLibrary::PlaceTreesFromShapefile(
 	if (bTintLeaves)
 	{
 		Result.Message = FString::Printf(
-			TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d meshes x %d leaf colors from '%s'. Elapsed: %.2fs."),
+			TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d meshes x %d leaf colors from '%s'%s. Elapsed: %.2fs."),
 			TreesPlaced,
 			TreesSkipped,
 			TilesSpawned,
 			TreeMeshes.Num(),
 			PaletteK,
 			*TreeMeshFolder,
+			bPlaceIRCopies ? TEXT(" + IR copies in TreeIR") : TEXT(""),
 			Result.ElapsedSeconds);
 	}
 	else
 	{
 		Result.Message = FString::Printf(
-			TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d mesh types from '%s'. Elapsed: %.2fs."),
+			TEXT("Added %d trees (%d skipped) from %d tiles onto InstancedFoliageActor using %d mesh types from '%s'%s. Elapsed: %.2fs."),
 			TreesPlaced,
 			TreesSkipped,
 			TilesSpawned,
 			TreeMeshes.Num(),
 			*TreeMeshFolder,
+			bPlaceIRCopies ? TEXT(" + IR copies in TreeIR") : TEXT(""),
 			Result.ElapsedSeconds);
 	}
 

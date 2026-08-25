@@ -91,7 +91,7 @@ namespace
 		}
 
 		TArray<USceneComponent*> Comps;
-		IFA.GetComponents(Comps);
+		IFA.GetComponents<USceneComponent>(Comps);
 		for (USceneComponent* Comp : Comps)
 		{
 			if (!Comp || Comp == Root || Comp->GetClass() != USceneComponent::StaticClass())

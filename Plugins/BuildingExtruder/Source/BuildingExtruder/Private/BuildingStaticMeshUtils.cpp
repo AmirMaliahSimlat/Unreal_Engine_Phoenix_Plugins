@@ -366,10 +366,8 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 
 	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
 	BuildParams.bBuildSimpleCollision = false;
-#if ENGINE_MAJOR_VERSION == 5
 	// Fast build can skip/simplify NTBs; we need real face normals like Maya Set to Face.
 	BuildParams.bFastBuild = false;
-#endif
 
 	TArray<const FMeshDescription*> Descriptions;
 	Descriptions.Add(&MeshDescription);

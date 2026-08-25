@@ -134,16 +134,10 @@ namespace
 		Filter.bRecursivePaths = true;
 		Filter.PackagePaths.Add(*Folder);
 		Filter.bIncludeOnlyOnDiskAssets = false;
-
-#if ENGINE_MAJOR_VERSION >= 5
+		// ClassPaths is the 5.1+ filter; ClassNames is deprecated in 5.1 and removed later.
 		Filter.ClassPaths.Add(UStaticMesh::StaticClass()->GetClassPathName());
 		Filter.ClassPaths.Add(UFoliageType::StaticClass()->GetClassPathName());
 		Filter.ClassPaths.Add(UFoliageType_InstancedStaticMesh::StaticClass()->GetClassPathName());
-#else
-		Filter.ClassNames.Add(UStaticMesh::StaticClass()->GetFName());
-		Filter.ClassNames.Add(UFoliageType::StaticClass()->GetFName());
-		Filter.ClassNames.Add(UFoliageType_InstancedStaticMesh::StaticClass()->GetFName());
-#endif
 
 		AssetRegistry.GetAssets(Filter, OutAssets);
 		if (OutAssets.Num() == 0)
@@ -228,16 +222,11 @@ bool TreeMeshFolderLoader::LoadTreeMeshesFromFolder(
 			continue;
 		}
 
-		// UE 5.1: Mesh lives on InstancedStaticMesh foliage types ("Static Mesh Foliage" in Content Browser).
 		if (UFoliageType_InstancedStaticMesh* FoliageISM = Cast<UFoliageType_InstancedStaticMesh>(Obj))
 		{
 			if (UStaticMesh* Mesh = FoliageISM->GetStaticMesh())
 			{
 				UniqueMeshes.Add(Mesh);
-			}
-			else if (FoliageISM->Mesh)
-			{
-				UniqueMeshes.Add(FoliageISM->Mesh);
 			}
 		}
 	}
