@@ -15,21 +15,5 @@ public class BuildingExtruder : ModuleRules
 			"CoreUObject",
 			"Engine"
 		});
-
-		PrivateDependencyModuleNames.AddRange(new string[]
-		{
-			"UnrealEd",
-			"EditorSubsystem",
-			"Slate",
-			"SlateCore",
-			"MeshDescription",
-			"StaticMeshDescription",
-			"AssetRegistry",
-			"Projects",
-			"Foliage",
-			"CesiumRuntime",
-			"Json",
-			"JsonUtilities"
-		});
 	}
 }
