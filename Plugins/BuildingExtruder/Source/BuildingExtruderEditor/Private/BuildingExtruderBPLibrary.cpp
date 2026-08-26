@@ -3,12 +3,12 @@
 #include "BuildingCesiumPlacement.h"
 #include "BuildingExtrudeUtils.h"
 #include "BuildingExtruderLog.h"
-#include "BuildingExtruderTileActor.h"
 #include "BuildingFoliagePlacement.h"
 #include "BuildingMeshFolderLoader.h"
 #include "BuildingRoofObjectPlacement.h"
 #include "BuildingShapefileReader.h"
 #include "BuildingStaticMeshUtils.h"
+#include "BuildingTileSmaUtils.h"
 
 #include "CesiumGeoreference.h"
 #include "Components/ActorComponent.h"
@@ -16,6 +16,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Editor.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
 #include "InstancedFoliageActor.h"
@@ -439,17 +440,16 @@ namespace
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		SpawnParams.ObjectFlags |= RF_Transactional;
 
-		ABuildingExtruderTileActor* Actor =
-			World.SpawnActor<ABuildingExtruderTileActor>(Origin, FRotator::ZeroRotator, SpawnParams);
+		AStaticMeshActor* Actor =
+			World.SpawnActor<AStaticMeshActor>(Origin, FRotator::ZeroRotator, SpawnParams);
 		if (!Actor || !Actor->GetRootComponent())
 		{
 			OutError = TEXT("Failed to spawn tile actor.");
 			return false;
 		}
 
+		BuildingTileSmaUtils::ConfigureEmptyTileRoot(*Actor);
 		Actor->SetActorLabel(ActorLabel);
-		Actor->bIsEditorOnlyActor = false;
-		Actor->SetActorHiddenInGame(false);
 		Actor->Tags.Add(FName(TEXT("BuildingExtruder")));
 		Actor->Tags.Add(FName(TEXT("BuildingExtruderTile")));
 		Actor->Tags.Add(FName(TEXT("Building")));

@@ -50,7 +50,7 @@ public:
 	/**
 	 * Reads EPSG:4326 building footprints from a shapefile (.shp + .dbf),
 	 * places floors from AltitudeFieldName, and saves tiled StaticMesh assets under
-	 * /Game/BuildingExtruder/Meshes (one tile actor; one mesh per wall/roof material group).
+	 * /Game/BuildingExtruder/Meshes (one StaticMeshActor per tile; Wall/Roof meshes as extra components).
 	 * Recreate this Blueprint node after updating.
 	 *
 	 * Shapefile
