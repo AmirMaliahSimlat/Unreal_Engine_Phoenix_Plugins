@@ -42,7 +42,7 @@ struct FBuildingExtrudeResult
  * Floor Z comes from a shapefile altitude DBF field (no Cesium DTM sampling).
  */
 UCLASS()
-class BUILDINGEXTRUDEREDITOR_API UBuildingExtruderBPLibrary : public UBlueprintFunctionLibrary
+class BUILDINGEXTRUDER_API UBuildingExtruderBPLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 

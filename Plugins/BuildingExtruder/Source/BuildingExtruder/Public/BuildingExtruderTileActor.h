@@ -3,8 +3,7 @@
 #include "GameFramework/Actor.h"
 #include "BuildingExtruderTileActor.generated.h"
 
-/** One map tile: Building → Wall/Roof scene folders, then one StaticMeshComponent per material.
- * Lives in the Runtime module so cooked pak / simulator builds can spawn it. */
+/** Legacy tile actor kept so older levels that already spawned it still load in the editor. New extrudes use AStaticMeshActor. */
 UCLASS()
 class BUILDINGEXTRUDER_API ABuildingExtruderTileActor : public AActor
 {
@@ -12,9 +11,4 @@ class BUILDINGEXTRUDER_API ABuildingExtruderTileActor : public AActor
 
 public:
 	ABuildingExtruderTileActor();
-
-	virtual void PostLoad() override;
-	virtual bool IsEditorOnly() const override;
-	virtual bool NeedsLoadForClient() const override;
-	virtual bool NeedsLoadForServer() const override;
 };

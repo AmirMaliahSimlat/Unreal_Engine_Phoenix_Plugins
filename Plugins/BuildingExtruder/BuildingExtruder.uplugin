@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 20,
-	"VersionName": "2.7.0",
+	"Version": 21,
+	"VersionName": "2.8.0",
 	"FriendlyName": "Building Extruder",
-	"Description": "Editor tool that reads EPSG:4326 building footprint shapefiles with altitude attributes and saves tiled walls/floor and roof StaticMesh assets under /Game. Tile actors are StaticMeshActors with Wall/Roof meshes as extra components so cooked paks load in Phoenix.",
+	"Description": "Editor tool that reads EPSG:4326 building footprint shapefiles with altitude attributes and saves tiled walls/floor and roof StaticMesh assets under /Game. Tile actors are StaticMeshActors with Wall/Roof meshes as extra components.",
 	"Category": "Editor",
 	"CreatedBy": "GeoSim Tools",
 	"CreatedByURL": "",
@@ -23,11 +23,6 @@
 	"Modules": [
 		{
 			"Name": "BuildingExtruder",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "BuildingExtruderEditor",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
 		}
