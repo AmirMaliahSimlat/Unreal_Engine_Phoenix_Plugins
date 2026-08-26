@@ -8,7 +8,6 @@
 #include "BuildingRoofObjectPlacement.h"
 #include "BuildingShapefileReader.h"
 #include "BuildingStaticMeshUtils.h"
-#include "BuildingTileSmaUtils.h"
 
 #include "CesiumGeoreference.h"
 #include "Components/ActorComponent.h"
@@ -448,7 +447,15 @@ namespace
 			return false;
 		}
 
-		BuildingTileSmaUtils::ConfigureEmptyTileRoot(*Actor);
+		Actor->bIsEditorOnlyActor = false;
+		Actor->SetActorHiddenInGame(false);
+		if (UStaticMeshComponent* Native = Actor->GetStaticMeshComponent())
+		{
+			Native->SetMobility(EComponentMobility::Static);
+			Native->bIsEditorOnly = false;
+			Native->SetStaticMesh(nullptr);
+			Native->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
 		Actor->SetActorLabel(ActorLabel);
 		Actor->Tags.Add(FName(TEXT("BuildingExtruder")));
 		Actor->Tags.Add(FName(TEXT("BuildingExtruderTile")));
