@@ -37,6 +37,35 @@ namespace
 		return Path;
 	}
 
+	FString NormalizeMeshContentFolder(const FString& InPath)
+	{
+		FString Folder = InPath.TrimStartAndEnd();
+		while ((Folder.StartsWith(TEXT("\"")) && Folder.EndsWith(TEXT("\"")) && Folder.Len() >= 2)
+			|| (Folder.StartsWith(TEXT("'")) && Folder.EndsWith(TEXT("'")) && Folder.Len() >= 2))
+		{
+			Folder = Folder.Mid(1, Folder.Len() - 2).TrimStartAndEnd();
+		}
+		Folder.ReplaceInline(TEXT("\\"), TEXT("/"));
+		if (Folder.StartsWith(TEXT("/All/")))
+		{
+			Folder = Folder.RightChop(4);
+		}
+		else if (Folder.StartsWith(TEXT("All/")))
+		{
+			Folder = TEXT("/") + Folder.RightChop(4);
+		}
+		Folder.RemoveFromEnd(TEXT("/"));
+		if (Folder.IsEmpty() || Folder == TEXT("/"))
+		{
+			return TEXT("/Game/BuildingExtruder/Meshes");
+		}
+		if (!Folder.StartsWith(TEXT("/")))
+		{
+			Folder = TEXT("/") + Folder;
+		}
+		return Folder;
+	}
+
 	UWorld* ResolveEditorWorld(UObject* WorldContextObject)
 	{
 		UWorld* World = nullptr;
@@ -396,6 +425,8 @@ namespace
 		const FExtrudedPrismMesh& WorldRoofMesh,
 		const FString& ActorLabel,
 		const FString& EditorFolderPath,
+		const FString& MeshContentFolder,
+		bool bEnableNanite,
 		UMaterialInterface* Material,
 		int32 NumWallSlots,
 		int32 NumRoofSlots,
@@ -499,11 +530,12 @@ namespace
 				const FString AssetName = FString::Printf(TEXT("%s_%s_%d"), *ActorLabel, Kind, Slot);
 				const FName CompName(*FString::Printf(TEXT("%s_Material_%d"), Kind, Slot));
 				UStaticMesh* StaticMesh = BuildingStaticMeshUtils::CreatePersistentStaticMesh(
-					TEXT("/Game/BuildingExtruder/Meshes"),
+					MeshContentFolder,
 					AssetName,
 					Parts[Slot],
 					Material,
 					/*NumMaterialSlots*/ 1,
+					bEnableNanite,
 					OutError);
 				if (!StaticMesh)
 				{
@@ -538,6 +570,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const FString& HeightFieldName,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
+	const FString& MeshContentFolder,
+	bool bEnableNanite,
 	int32 TargetTileCount,
 	int32 WallMaterialSlotCount,
 	int32 RoofMaterialSlotCount,
@@ -569,6 +603,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	const int32 RoofSlots = FMath::Clamp(RoofMaterialSlotCount, 1, 64);
 
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
+	const FString MeshFolder = NormalizeMeshContentFolder(MeshContentFolder);
 
 	UE_LOG(LogBuildingExtruder, Display, TEXT("========== Extrude START =========="));
 	UE_LOG(
@@ -577,7 +612,7 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		TEXT("shp='%s' altitudeField='%s' heightField='%s' useRoofTypes=%s roofTypeField='%s' "
 			 "flatIdx=%d hippedIdx=%d parapetIdx=%d parapetH=%.2fm parapetW=%.2fm hippedH=%.2fm "
 			 "targetTiles=%d metersPerUv=%.3f wallSlots=%d roofSlots=%d matSeed=%d "
-			 "roofObjects=%s folder='%s'"),
+			 "roofObjects=%s folder='%s' meshFolder='%s' nanite=%s"),
 		*CleanInputPath,
 		*AltitudeField,
 		*HeightField,
@@ -595,7 +630,9 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 		RoofSlots,
 		MaterialRandomSeed,
 		bPlaceRoofObjects ? TEXT("on") : TEXT("off"),
-		*RoofObjectMeshFolder);
+		*RoofObjectMeshFolder,
+		*MeshFolder,
+		bEnableNanite ? TEXT("on") : TEXT("off"));
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -1038,6 +1075,8 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 					TileRoofMesh,
 					TileLabel,
 					FolderPath,
+					MeshFolder,
+					bEnableNanite,
 					CorrectMaterial,
 					WallSlots,
 					RoofSlots,
@@ -1083,11 +1122,13 @@ FBuildingExtrudeResult UBuildingExtruderBPLibrary::ImportAndExtrudeBuildingsFrom
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 	Result.Message = FString::Printf(
 		TEXT("Spawned %d tiles (%d buildings, %d skipped, %d roof objects), "
-			 "saved per-material meshes under /Game/BuildingExtruder/Meshes. Elapsed: %.2fs."),
+			 "saved per-material meshes under %s%s. Elapsed: %.2fs."),
 		TilesSpawned,
 		BuildingsMeshed,
 		BuildingsSkipped,
 		RoofObjectsPlaced,
+		*MeshFolder,
+		bEnableNanite ? TEXT(" (Nanite)") : TEXT(""),
 		Result.ElapsedSeconds);
 
 	World->MarkPackageDirty();

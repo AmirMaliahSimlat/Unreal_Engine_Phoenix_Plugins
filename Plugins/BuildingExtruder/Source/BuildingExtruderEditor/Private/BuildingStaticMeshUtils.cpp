@@ -277,6 +277,7 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 	const FExtrudedPrismMesh& Mesh,
 	UMaterialInterface* Material,
 	int32 NumMaterialSlots,
+	bool bEnableNanite,
 	FString& OutError)
 {
 	OutError.Reset();
@@ -349,6 +350,7 @@ UStaticMesh* BuildingStaticMeshUtils::CreatePersistentStaticMesh(
 	}
 
 	StaticMesh->Modify();
+	StaticMesh->NaniteSettings.bEnabled = bEnableNanite;
 	StaticMesh->GetStaticMaterials().Reset();
 	UMaterialInterface* Mat = Material;
 	if (!Mat)

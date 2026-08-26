@@ -25,5 +25,6 @@ namespace BuildingStaticMeshUtils
 		const FExtrudedPrismMesh& Mesh,
 		UMaterialInterface* Material,
 		int32 NumMaterialSlots,
+		bool bEnableNanite,
 		FString& OutError);
 }

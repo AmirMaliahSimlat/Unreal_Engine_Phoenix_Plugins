@@ -49,8 +49,8 @@ class BUILDINGEXTRUDEREDITOR_API UBuildingExtruderBPLibrary : public UBlueprintF
 public:
 	/**
 	 * Reads EPSG:4326 building footprints from a shapefile (.shp + .dbf),
-	 * places floors from AltitudeFieldName, and saves tiled StaticMesh assets under
-	 * /Game/BuildingExtruder/Meshes (one StaticMeshActor per tile; Wall/Roof meshes as extra components).
+	 * places floors from AltitudeFieldName, and saves tiled StaticMesh assets under MeshContentFolder
+	 * (one StaticMeshActor per tile; Wall/Roof meshes as extra components).
 	 * Recreate this Blueprint node after updating.
 	 *
 	 * Shapefile
@@ -61,6 +61,9 @@ public:
 	 * Level / tiling
 	 * @param ActorLabelPrefix Prefix for tile actor labels (e.g. BldgTile).
 	 * @param EditorFolderPath World Outliner folder.
+	 * @param MeshContentFolder Content Browser folder for saved wall/roof StaticMesh assets
+	 *        (e.g. /Game/Maps/Balata/Buildings). Empty = /Game/BuildingExtruder/Meshes.
+	 * @param bEnableNanite If true, build each saved StaticMesh with Nanite enabled.
 	 * @param TargetTileCount Tile slot count; XxY chosen for near-square cells. Entire map is processed.
 	 *
 	 * Materials (one component per group)
@@ -95,6 +98,8 @@ public:
 			CPP_Default_HeightFieldName = "height",
 			CPP_Default_ActorLabelPrefix = "BldgTile",
 			CPP_Default_EditorFolderPath = "ExtrudedBuildings",
+			CPP_Default_MeshContentFolder = "/Game/BuildingExtruder/Meshes",
+			CPP_Default_bEnableNanite = "false",
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_WallMaterialSlotCount = "1",
 			CPP_Default_RoofMaterialSlotCount = "1",
@@ -117,6 +122,8 @@ public:
 		const FString& HeightFieldName,
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath,
+		const FString& MeshContentFolder,
+		bool bEnableNanite,
 		int32 TargetTileCount,
 		int32 WallMaterialSlotCount,
 		int32 RoofMaterialSlotCount,
