@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 17,
-	"VersionName": "2.5.0",
+	"Version": 18,
+	"VersionName": "2.5.1",
 	"FriendlyName": "Building Extruder",
 	"Description": "Editor tool that reads EPSG:4326 building footprint shapefiles with altitude attributes and saves tiled walls/floor and roof StaticMesh assets under /Game. Compiles for Unreal Engine 5.1 and 5.3. Tile actors are runtime so cooked paks load buildings.",
 	"Category": "Editor",

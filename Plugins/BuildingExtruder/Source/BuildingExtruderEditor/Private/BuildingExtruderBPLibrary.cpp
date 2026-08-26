@@ -330,6 +330,7 @@ namespace
 			return nullptr;
 		}
 		Folder->SetMobility(EComponentMobility::Static);
+		Folder->bIsEditorOnly = false;
 		Folder->SetupAttachment(&Parent);
 		Owner.AddInstanceComponent(Folder);
 		Folder->RegisterComponent();
@@ -352,6 +353,7 @@ namespace
 			return false;
 		}
 		Comp->SetMobility(EComponentMobility::Static);
+		Comp->bIsEditorOnly = false;
 		Comp->SetupAttachment(&Parent);
 		Owner.AddInstanceComponent(Comp);
 		Comp->RegisterComponent();
@@ -446,6 +448,8 @@ namespace
 		}
 
 		Actor->SetActorLabel(ActorLabel);
+		Actor->bIsEditorOnlyActor = false;
+		Actor->SetActorHiddenInGame(false);
 		Actor->Tags.Add(FName(TEXT("BuildingExtruder")));
 		Actor->Tags.Add(FName(TEXT("BuildingExtruderTile")));
 		Actor->Tags.Add(FName(TEXT("Building")));

@@ -12,4 +12,9 @@ class BUILDINGEXTRUDER_API ABuildingExtruderTileActor : public AActor
 
 public:
 	ABuildingExtruderTileActor();
+
+	virtual void PostLoad() override;
+	virtual bool IsEditorOnly() const override;
+	virtual bool NeedsLoadForClient() const override;
+	virtual bool NeedsLoadForServer() const override;
 };
