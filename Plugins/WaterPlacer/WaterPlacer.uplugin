@@ -1,0 +1,34 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Water Placer",
+	"Description": "Editor tool that reads EPSG:4326 water polygons, clips Cesium tilesets inside (or outside if inverted) those polygons, and places Unreal Water Body Lakes in the holes. Compiles for Unreal Engine 5.1 and 5.3.",
+	"Category": "Editor",
+	"CreatedBy": "GeoSim Tools",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "CesiumForUnreal",
+			"Enabled": true
+		},
+		{
+			"Name": "Water",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "WaterPlacer",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
