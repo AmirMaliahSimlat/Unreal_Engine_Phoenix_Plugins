@@ -6,8 +6,6 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
-#include "MaterialShared.h"
-#include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "MeshDescription.h"
@@ -434,7 +432,6 @@ UMaterialInterface* WaterStaticMesh::PrepareMaterialForStaticMesh(
 		return nullptr;
 	}
 
-	Source->CheckMaterialUsage(MATUSAGE_StaticMesh, false);
 	return CreateTwoSidedInstance(Source, ContentFolder, OutError);
 }
 
