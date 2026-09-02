@@ -6,6 +6,15 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialExpressionAdd.h"
+#include "Materials/MaterialExpressionComponentMask.h"
+#include "Materials/MaterialExpressionConstant3Vector.h"
+#include "Materials/MaterialExpressionFresnel.h"
+#include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialExpressionSine.h"
+#include "Materials/MaterialExpressionTime.h"
+#include "Materials/MaterialExpressionWorldPosition.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "MeshDescription.h"
@@ -221,7 +230,11 @@ namespace
 		Redirector->MarkAsGarbage();
 	}
 
-	void FillMeshDescription(const FWaterFlatMesh& Mesh, FMeshDescription& MeshDescription, FString& OutError)
+	void FillMeshDescription(
+		const FWaterFlatMesh& Mesh,
+		int32 SmoothShadingPasses,
+		FMeshDescription& MeshDescription,
+		FString& OutError)
 	{
 		FStaticMeshAttributes Attributes(MeshDescription);
 		Attributes.Register();
@@ -275,11 +288,26 @@ namespace
 		// Same as Building Extruder: Unreal treats our XY winding as back-facing.
 		MeshDescription.ReverseAllPolygonFacing();
 
+		const int32 Passes = FMath::Clamp(SmoothShadingPasses, 0, 8);
+		const bool bSmooth = Passes > 0;
+
 		TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
 		for (const FEdgeID EdgeId : MeshDescription.Edges().GetElementIDs())
 		{
-			EdgeHardnesses[EdgeId] = true;
+			EdgeHardnesses[EdgeId] = !bSmooth;
 		}
+
+		TMap<FVertexID, FVector3f> VertexNormals;
+		TMap<FVertexID, TArray<FVertexID>> Neighbors;
+
+		auto AddNeighbor = [&Neighbors](FVertexID A, FVertexID B)
+		{
+			if (A != B)
+			{
+				Neighbors.FindOrAdd(A).AddUnique(B);
+				Neighbors.FindOrAdd(B).AddUnique(A);
+			}
+		};
 
 		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
 		{
@@ -305,9 +333,78 @@ namespace
 			{
 				Normal = FVector3f::UpVector;
 			}
-			InstanceNormals[Corners[0]] = Normal;
-			InstanceNormals[Corners[1]] = Normal;
-			InstanceNormals[Corners[2]] = Normal;
+
+			if (!bSmooth)
+			{
+				InstanceNormals[Corners[0]] = Normal;
+				InstanceNormals[Corners[1]] = Normal;
+				InstanceNormals[Corners[2]] = Normal;
+				continue;
+			}
+
+			VertexNormals.FindOrAdd(V0) += Normal;
+			VertexNormals.FindOrAdd(V1) += Normal;
+			VertexNormals.FindOrAdd(V2) += Normal;
+			AddNeighbor(V0, V1);
+			AddNeighbor(V1, V2);
+			AddNeighbor(V2, V0);
+		}
+
+		if (!bSmooth)
+		{
+			return;
+		}
+
+		for (TPair<FVertexID, FVector3f>& Pair : VertexNormals)
+		{
+			Pair.Value = Pair.Value.GetSafeNormal();
+			if (Pair.Value.IsNearlyZero())
+			{
+				Pair.Value = FVector3f::UpVector;
+			}
+		}
+
+		for (int32 Extra = 1; Extra < Passes; ++Extra)
+		{
+			TMap<FVertexID, FVector3f> NextNormals;
+			NextNormals.Reserve(VertexNormals.Num());
+			for (const TPair<FVertexID, FVector3f>& Pair : VertexNormals)
+			{
+				FVector3f Sum = Pair.Value;
+				int32 Count = 1;
+				if (const TArray<FVertexID>* Adj = Neighbors.Find(Pair.Key))
+				{
+					for (const FVertexID Neighbor : *Adj)
+					{
+						if (const FVector3f* NeighborN = VertexNormals.Find(Neighbor))
+						{
+							Sum += *NeighborN;
+							++Count;
+						}
+					}
+				}
+				FVector3f Blurred = (Sum / static_cast<float>(Count)).GetSafeNormal();
+				if (Blurred.IsNearlyZero())
+				{
+					Blurred = FVector3f::UpVector;
+				}
+				NextNormals.Add(Pair.Key, Blurred);
+			}
+			VertexNormals = MoveTemp(NextNormals);
+		}
+
+		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
+		{
+			const TArrayView<const FVertexInstanceID> Corners =
+				MeshDescription.GetTriangleVertexInstances(TriId);
+			for (const FVertexInstanceID Corner : Corners)
+			{
+				const FVertexID Vid = MeshDescription.GetVertexInstanceVertex(Corner);
+				if (const FVector3f* SmoothNormal = VertexNormals.Find(Vid))
+				{
+					InstanceNormals[Corner] = *SmoothNormal;
+				}
+			}
 		}
 	}
 
@@ -376,6 +473,101 @@ namespace
 		OutError.Reset();
 		return MIC;
 	}
+
+	template <typename TExpr>
+	TExpr* NewMatExpr(UMaterial* Mat)
+	{
+		TExpr* Expr = NewObject<TExpr>(Mat);
+		Expr->Material = Mat;
+		Mat->Expressions.Add(Expr);
+		return Expr;
+	}
+
+	void BuildWavyWaterGraph(UMaterial* Mat)
+	{
+		Mat->TwoSided = true;
+		Mat->BlendMode = BLEND_Translucent;
+		Mat->TranslucencyLightingMode = TLM_Surface;
+		Mat->MaterialDomain = MD_Surface;
+
+		UMaterialExpressionConstant3Vector* WaterColor = NewMatExpr<UMaterialExpressionConstant3Vector>(Mat);
+		WaterColor->Constant = FLinearColor(0.02f, 0.18f, 0.28f);
+		Mat->BaseColor.Expression = WaterColor;
+
+		UMaterialExpressionFresnel* Fresnel = NewMatExpr<UMaterialExpressionFresnel>(Mat);
+		UMaterialExpressionAdd* Opacity = NewMatExpr<UMaterialExpressionAdd>(Mat);
+		Opacity->A.Expression = Fresnel;
+		Opacity->ConstA = 0.0f;
+		Opacity->ConstB = 0.35f;
+		Mat->Opacity.Expression = Opacity;
+
+		UMaterialExpressionConstant3Vector* Spec = NewMatExpr<UMaterialExpressionConstant3Vector>(Mat);
+		Spec->Constant = FLinearColor(0.55f, 0.55f, 0.55f);
+		Mat->Specular.Expression = Spec;
+
+		UMaterialExpressionWorldPosition* WorldPos = NewMatExpr<UMaterialExpressionWorldPosition>(Mat);
+		UMaterialExpressionTime* Time = NewMatExpr<UMaterialExpressionTime>(Mat);
+
+		UMaterialExpressionComponentMask* X = NewMatExpr<UMaterialExpressionComponentMask>(Mat);
+		X->Input.Expression = WorldPos;
+		X->R = true;
+		X->G = false;
+		X->B = false;
+		X->A = false;
+
+		UMaterialExpressionComponentMask* Y = NewMatExpr<UMaterialExpressionComponentMask>(Mat);
+		Y->Input.Expression = WorldPos;
+		Y->R = false;
+		Y->G = true;
+		Y->B = false;
+		Y->A = false;
+
+		UMaterialExpressionMultiply* XFreq = NewMatExpr<UMaterialExpressionMultiply>(Mat);
+		XFreq->A.Expression = X;
+		XFreq->ConstB = 0.008f;
+
+		UMaterialExpressionMultiply* Time1 = NewMatExpr<UMaterialExpressionMultiply>(Mat);
+		Time1->A.Expression = Time;
+		Time1->ConstB = 0.7f;
+
+		UMaterialExpressionAdd* Wave1In = NewMatExpr<UMaterialExpressionAdd>(Mat);
+		Wave1In->A.Expression = XFreq;
+		Wave1In->B.Expression = Time1;
+
+		UMaterialExpressionSine* Wave1 = NewMatExpr<UMaterialExpressionSine>(Mat);
+		Wave1->Input.Expression = Wave1In;
+
+		UMaterialExpressionMultiply* YFreq = NewMatExpr<UMaterialExpressionMultiply>(Mat);
+		YFreq->A.Expression = Y;
+		YFreq->ConstB = 0.011f;
+
+		UMaterialExpressionMultiply* Time2 = NewMatExpr<UMaterialExpressionMultiply>(Mat);
+		Time2->A.Expression = Time;
+		Time2->ConstB = 0.95f;
+
+		UMaterialExpressionAdd* Wave2In = NewMatExpr<UMaterialExpressionAdd>(Mat);
+		Wave2In->A.Expression = YFreq;
+		Wave2In->B.Expression = Time2;
+
+		UMaterialExpressionSine* Wave2 = NewMatExpr<UMaterialExpressionSine>(Mat);
+		Wave2->Input.Expression = Wave2In;
+
+		UMaterialExpressionAdd* WaveSum = NewMatExpr<UMaterialExpressionAdd>(Mat);
+		WaveSum->A.Expression = Wave1;
+		WaveSum->B.Expression = Wave2;
+
+		UMaterialExpressionMultiply* WaveHeight = NewMatExpr<UMaterialExpressionMultiply>(Mat);
+		WaveHeight->A.Expression = WaveSum;
+		WaveHeight->ConstB = 18.0f;
+
+		UMaterialExpressionConstant3Vector* Up = NewMatExpr<UMaterialExpressionConstant3Vector>(Mat);
+		Up->Constant = FLinearColor(0.0f, 0.0f, 1.0f);
+
+		UMaterialExpressionMultiply* WPO = NewMatExpr<UMaterialExpressionMultiply>(Mat);
+		WPO->A.Expression = Up;
+		WPO->B.Expression = WaveHeight;
+		Mat->WorldPositionOffset.Expression = WPO;
+	}
 }
 
 bool WaterStaticMesh::BuildFlatPolygonMesh(
@@ -421,15 +613,97 @@ bool WaterStaticMesh::BuildFlatPolygonMesh(
 	return OutMesh.Triangles.Num() >= 3;
 }
 
+UMaterialInterface* WaterStaticMesh::GetOrCreateWavyWaterMaterial(
+	const FString& ContentFolder,
+	FString& OutError)
+{
+	OutError.Reset();
+	FString Folder = ContentFolder.TrimStartAndEnd();
+	Folder.RemoveFromEnd(TEXT("/"));
+	if (Folder.Contains(TEXT("/Meshes")))
+	{
+		Folder = Folder.Replace(TEXT("/Meshes"), TEXT("/Materials"));
+	}
+	if (Folder.IsEmpty() || Folder == TEXT("/Game"))
+	{
+		Folder = TEXT("/Game/WaterPlacer/Materials");
+	}
+	if (!Folder.StartsWith(TEXT("/")))
+	{
+		Folder = TEXT("/") + Folder;
+	}
+
+	const FString AssetName = TEXT("M_WaterPlacer_Waves");
+	const FString PackagePath = Folder / AssetName;
+	const FString ObjectPath = PackagePath + TEXT(".") + AssetName;
+	if (UMaterial* Existing = LoadObject<UMaterial>(nullptr, *ObjectPath))
+	{
+		return Existing;
+	}
+
+	UPackage* Package = CreatePackage(*PackagePath);
+	if (!Package)
+	{
+		OutError = TEXT("Failed to create wavy water material package.");
+		return nullptr;
+	}
+	Package->FullyLoad();
+	ClearRedirectorAt(Package, AssetName);
+
+	UMaterial* Mat = NewObject<UMaterial>(
+		Package,
+		*AssetName,
+		RF_Public | RF_Standalone | RF_Transactional);
+	if (!Mat)
+	{
+		OutError = TEXT("Failed to allocate wavy water material.");
+		return nullptr;
+	}
+
+	BuildWavyWaterGraph(Mat);
+	Mat->PostEditChange();
+	FAssetRegistryModule::AssetCreated(Mat);
+	if (!SaveAssetPackage(Package, Mat, OutError))
+	{
+		return nullptr;
+	}
+
+	UE_LOG(LogWaterPlacer, Display, TEXT("Created wavy water material '%s'."), *ObjectPath);
+	return Mat;
+}
+
 UMaterialInterface* WaterStaticMesh::PrepareMaterialForStaticMesh(
 	UMaterialInterface* Source,
 	const FString& ContentFolder,
 	FString& OutError)
 {
 	OutError.Reset();
-	if (!Source)
+
+	auto IsSingleLayerWaterMaterial = [](UMaterialInterface* Mat) -> bool
 	{
-		return nullptr;
+		if (!Mat)
+		{
+			return false;
+		}
+		const FString Path = Mat->GetPathName();
+		if (Path.Contains(TEXT("Water_Material_Ocean")) || Path.Contains(TEXT("Water_Material_Lake")))
+		{
+			return true;
+		}
+		return Mat->GetShadingModels().HasShadingModel(MSM_SingleLayerWater);
+	};
+
+	if (!Source || IsSingleLayerWaterMaterial(Source))
+	{
+		if (Source)
+		{
+			UE_LOG(
+				LogWaterPlacer,
+				Warning,
+				TEXT("Material '%s' is Single Layer Water and will not draw on StaticMeshActors. Using M_WaterPlacer_Waves instead."),
+				*Source->GetPathName());
+		}
+		return GetOrCreateWavyWaterMaterial(ContentFolder, OutError);
 	}
 
 	return CreateTwoSidedInstance(Source, ContentFolder, OutError);
@@ -440,6 +714,7 @@ UStaticMesh* WaterStaticMesh::CreatePersistentStaticMesh(
 	const FString& AssetName,
 	const FWaterFlatMesh& Mesh,
 	UMaterialInterface* Material,
+	int32 SmoothShadingPasses,
 	FString& OutError)
 {
 	OutError.Reset();
@@ -492,7 +767,7 @@ UStaticMesh* WaterStaticMesh::CreatePersistentStaticMesh(
 	}
 
 	FMeshDescription MeshDescription;
-	FillMeshDescription(Mesh, MeshDescription, OutError);
+	FillMeshDescription(Mesh, SmoothShadingPasses, MeshDescription, OutError);
 	if (!OutError.IsEmpty())
 	{
 		return nullptr;

@@ -23,6 +23,10 @@ namespace WaterStaticMesh
 		FWaterFlatMesh& OutMesh,
 		FString& OutError);
 
+	UMaterialInterface* GetOrCreateWavyWaterMaterial(
+		const FString& ContentFolder,
+		FString& OutError);
+
 	UMaterialInterface* PrepareMaterialForStaticMesh(
 		UMaterialInterface* Source,
 		const FString& ContentFolder,
@@ -33,6 +37,7 @@ namespace WaterStaticMesh
 		const FString& AssetName,
 		const FWaterFlatMesh& Mesh,
 		UMaterialInterface* Material,
+		int32 SmoothShadingPasses,
 		FString& OutError);
 
 	AStaticMeshActor* SpawnMeshActor(

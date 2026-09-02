@@ -118,7 +118,59 @@ namespace
 		}
 	}
 
-	void DecimateRing(const TArray<FVector2D>& In, int32 MaxPoints, TArray<FVector2D>& Out)
+	void ApplyRdp(const TArray<FVector2D>& Unique, double EpsDeg, TArray<FVector2D>& Out)
+	{
+		Out.Reset();
+		if (Unique.Num() < 3)
+		{
+			Out = Unique;
+			return;
+		}
+		if (EpsDeg <= DuplicateEpsDeg)
+		{
+			Out = Unique;
+			return;
+		}
+
+		TArray<uint8> Keep;
+		Keep.Init(0, Unique.Num());
+		RdpKeep(Unique, 0, Unique.Num() - 1, EpsDeg * EpsDeg, Keep);
+		Keep[0] = 1;
+		Keep.Last() = 1;
+		Out.Reserve(Unique.Num());
+		for (int32 I = 0; I < Unique.Num(); ++I)
+		{
+			if (Keep[I])
+			{
+				Out.Add(Unique[I]);
+			}
+		}
+		if (Out.Num() < 3)
+		{
+			Out = Unique;
+		}
+	}
+
+	void ChaikinClosed(const TArray<FVector2D>& In, TArray<FVector2D>& Out)
+	{
+		Out.Reset();
+		const int32 N = In.Num();
+		if (N < 3)
+		{
+			Out = In;
+			return;
+		}
+		Out.Reserve(N * 2);
+		for (int32 I = 0; I < N; ++I)
+		{
+			const FVector2D& A = In[I];
+			const FVector2D& B = In[(I + 1) % N];
+			Out.Add(A * 0.75 + B * 0.25);
+			Out.Add(A * 0.25 + B * 0.75);
+		}
+	}
+
+	void DecimateRing(const TArray<FVector2D>& In, int32 MaxPoints, double SmoothMeters, TArray<FVector2D>& Out)
 	{
 		Out.Reset();
 		if (In.Num() == 0)
@@ -140,36 +192,70 @@ namespace
 			Unique.Pop();
 		}
 
-		if (Unique.Num() <= MaxPoints)
+		TArray<FVector2D> Working;
+		if (SmoothMeters > 0.0)
 		{
-			Out = MoveTemp(Unique);
+			const double EpsDeg = SmoothMeters / 111320.0;
+			ApplyRdp(Unique, EpsDeg, Working);
+			TArray<FVector2D> Rounded;
+			ChaikinClosed(Working, Rounded);
+			ChaikinClosed(Rounded, Working);
+		}
+		else
+		{
+			Working = MoveTemp(Unique);
+		}
+
+		if (Working.Num() <= MaxPoints)
+		{
+			Out = MoveTemp(Working);
 			return;
 		}
 
-		TArray<uint8> Keep;
-		Keep.Init(0, Unique.Num());
-		constexpr double RdpEpsDeg = 1.0e-6;
-		RdpKeep(Unique, 0, Unique.Num() - 1, RdpEpsDeg * RdpEpsDeg, Keep);
-		Keep[0] = 1;
-		Keep.Last() = 1;
-
-		TArray<FVector2D> Simplified;
-		Simplified.Reserve(MaxPoints);
-		for (int32 I = 0; I < Unique.Num(); ++I)
+		ApplyRdp(Working, FMath::Max(SmoothMeters, 1.0) / 111320.0, Out);
+		if (Out.Num() > MaxPoints)
 		{
-			if (Keep[I])
+			UniformSample(Out, MaxPoints, Working);
+			Out = MoveTemp(Working);
+		}
+	}
+
+	void DensifyClosedRing(const TArray<FVector2D>& In, double MaxEdgeMeters, int32 MaxPoints, TArray<FVector2D>& Out)
+	{
+		Out.Reset();
+		if (In.Num() < 3)
+		{
+			Out = In;
+			return;
+		}
+
+		double SpacingM = FMath::Max(MaxEdgeMeters, 5.0);
+		for (int32 Attempt = 0; Attempt < 8; ++Attempt)
+		{
+			Out.Reset();
+			const double MaxDeg = SpacingM / 111320.0;
+			const int32 N = In.Num();
+			Out.Reserve(N * 2);
+			for (int32 I = 0; I < N; ++I)
 			{
-				Simplified.Add(Unique[I]);
+				const FVector2D A = In[I];
+				const FVector2D B = In[(I + 1) % N];
+				Out.Add(A);
+				const double DistDeg = FVector2D::Distance(A, B);
+				const int32 Segments = FMath::Max(
+					1,
+					FMath::CeilToInt(static_cast<float>(DistDeg / FMath::Max(MaxDeg, 1.0e-12))));
+				for (int32 S = 1; S < Segments; ++S)
+				{
+					Out.Add(A + (B - A) * (static_cast<double>(S) / Segments));
+				}
 			}
+			if (Out.Num() <= MaxPoints)
+			{
+				return;
+			}
+			SpacingM *= 1.6;
 		}
-
-		if (Simplified.Num() <= MaxPoints)
-		{
-			Out = MoveTemp(Simplified);
-			return;
-		}
-
-		UniformSample(Simplified, MaxPoints, Out);
 	}
 
 	FString NormalizeUnrealAssetPath(const FString& InPath)
@@ -363,7 +449,8 @@ namespace
 		UMaterialInterface* WaterMaterial,
 		const FString& MeshFolder,
 		const FString& Label,
-		const FString& FolderPath)
+		const FString& FolderPath,
+		int32 SmoothShadingPasses)
 	{
 		if (WorldPoints.Num() < 3)
 		{
@@ -393,7 +480,7 @@ namespace
 		}
 
 		UStaticMesh* StaticMesh = WaterStaticMesh::CreatePersistentStaticMesh(
-			MeshFolder, Label, Mesh, WaterMaterial, MeshError);
+			MeshFolder, Label, Mesh, WaterMaterial, SmoothShadingPasses, MeshError);
 		if (!StaticMesh)
 		{
 			UE_LOG(LogWaterPlacer, Warning, TEXT("Failed to save water mesh '%s': %s"), *Label, *MeshError);
@@ -413,6 +500,10 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	const FString& MeshContentFolder,
 	bool bClipGroundUnderWater,
 	int32 MaxOutlineVertices,
+	float OutlineSmoothMeters,
+	bool bDrapeOnCesiumTerrain,
+	float DrapeHeightOffsetMeters,
+	int32 SmoothShadingPasses,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath)
 {
@@ -425,18 +516,28 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	const FString FolderPath = EditorFolderPath;
 	const FString MeshFolder = MeshContentFolder.IsEmpty() ? TEXT("/Game/WaterPlacer/Meshes") : MeshContentFolder;
 	const int32 OutlineVertexCap = FMath::Clamp(MaxOutlineVertices, MinOutlineVertices, HardMaxOutlineVertices);
+	const double SmoothMeters = FMath::Max(static_cast<double>(OutlineSmoothMeters), 0.0);
+	const bool bDrape = bDrapeOnCesiumTerrain;
+	const double DrapeOffsetM = FMath::Max(static_cast<double>(DrapeHeightOffsetMeters), 0.0);
+	constexpr int32 MaxSmoothShadingPasses = 8;
+	const int32 ShadingPasses = FMath::Clamp(SmoothShadingPasses, 0, MaxSmoothShadingPasses);
+	constexpr double DrapeSampleSpacingM = 25.0;
 
 	UE_LOG(LogWaterPlacer, Display, TEXT("========== Water Place START =========="));
 	UE_LOG(
 		LogWaterPlacer,
 		Display,
-		TEXT("shp='%s' altitudeField='%s' waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d"),
+		TEXT("shp='%s' altitudeField='%s' waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d smoothMeters=%.1f drape=%s drapeOffsetM=%.2f smoothShadingPasses=%d"),
 		*CleanInputPath,
 		AltitudeField.IsEmpty() ? TEXT("(0 ellipsoid)") : *AltitudeField,
-		CleanMaterialPath.IsEmpty() ? TEXT("(empty)") : *CleanMaterialPath,
+		CleanMaterialPath.IsEmpty() ? TEXT("(empty, wavy default)") : *CleanMaterialPath,
 		*MeshFolder,
 		bClipGroundUnderWater ? TEXT("on") : TEXT("off"),
-		OutlineVertexCap);
+		OutlineVertexCap,
+		SmoothMeters,
+		bDrape ? TEXT("on") : TEXT("off"),
+		DrapeOffsetM,
+		ShadingPasses);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -498,8 +599,33 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 
 	RemovePreviousWaterPlacer(*World);
 
-	UMaterialInterface* WaterMaterial = LoadWaterMaterialFromPath(CleanMaterialPath);
-	if (WaterMaterial)
+	ACesium3DTileset* TerrainTileset = nullptr;
+	if (bDrape)
+	{
+		TerrainTileset = WaterCesiumPlacement::FindTerrainTileset(World);
+		if (TerrainTileset)
+		{
+			WaterCesiumPlacement::EnsureTilesetQueryCollision(*TerrainTileset);
+			UE_LOG(
+				LogWaterPlacer,
+				Display,
+				TEXT("Draping water onto tileset '%s'."),
+				*TerrainTileset->GetActorLabel());
+		}
+		else
+		{
+			UE_LOG(
+				LogWaterPlacer,
+				Warning,
+				TEXT("Drape On Cesium Terrain is on but no terrain tileset was found. Shore vertices will use the shapefile altitude field."));
+		}
+	}
+
+	UMaterialInterface* WaterMaterial = nullptr;
+	if (!CleanMaterialPath.IsEmpty())
+	{
+		WaterMaterial = LoadWaterMaterialFromPath(CleanMaterialPath);
+	}
 	{
 		FString MaterialError;
 		if (UMaterialInterface* Prepared = WaterStaticMesh::PrepareMaterialForStaticMesh(
@@ -533,7 +659,13 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		}
 
 		TArray<FVector2D> Ring;
-		DecimateRing(Feature.OuterRingLonLat, OutlineVertexCap, Ring);
+		DecimateRing(Feature.OuterRingLonLat, OutlineVertexCap, SmoothMeters, Ring);
+		if (bDrape)
+		{
+			TArray<FVector2D> Densified;
+			DensifyClosedRing(Ring, DrapeSampleSpacingM, OutlineVertexCap, Densified);
+			Ring = MoveTemp(Densified);
+		}
 		if (Ring.Num() < 3)
 		{
 			++Result.PolygonsSkipped;
@@ -544,8 +676,32 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		WorldPoints.Reserve(Ring.Num());
 		for (const FVector2D& LonLat : Ring)
 		{
-			WorldPoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
-				*Georeference, LonLat.X, LonLat.Y, Feature.AltitudeM));
+			if (bDrape)
+			{
+				bool bHit = false;
+				WorldPoints.Add(WaterCesiumPlacement::DrapeLonLatToUnreal(
+					*World,
+					*Georeference,
+					TerrainTileset,
+					LonLat.X,
+					LonLat.Y,
+					Feature.AltitudeM,
+					DrapeOffsetM,
+					bHit));
+				if (bHit)
+				{
+					++Result.TerrainSamplesHit;
+				}
+				else
+				{
+					++Result.TerrainSamplesMissed;
+				}
+			}
+			else
+			{
+				WorldPoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
+					*Georeference, LonLat.X, LonLat.Y, Feature.AltitudeM));
+			}
 		}
 		LakeWorldPoints.Add(MoveTemp(WorldPoints));
 		LakeRecordIds.Add(Feature.RecordIndex);
@@ -568,7 +724,8 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	for (int32 I = 0; I < LakeWorldPoints.Num(); ++I)
 	{
 		const FString MeshLabel = FString::Printf(TEXT("%s_Mesh_%d"), *LabelPrefix, LakeRecordIds[I]);
-		if (SpawnWaterMesh(*World, LakeWorldPoints[I], WaterMaterial, MeshFolder, MeshLabel, FolderPath))
+		if (SpawnWaterMesh(
+				*World, LakeWorldPoints[I], WaterMaterial, MeshFolder, MeshLabel, FolderPath, ShadingPasses))
 		{
 			++Result.WaterMeshesSpawned;
 		}
@@ -617,6 +774,21 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	}
 
 	FString Extra;
+	if (bDrape)
+	{
+		Extra += FString::Printf(
+			TEXT(" Draped %d shoreline sample(s) onto Cesium terrain (%d miss)."),
+			Result.TerrainSamplesHit,
+			Result.TerrainSamplesMissed);
+		if (Result.TerrainSamplesMissed > 0 && Result.TerrainSamplesHit == 0)
+		{
+			Extra += TEXT(" No terrain hits: look at the water in the viewport so Cesium tiles load, enable Create Physics Meshes on Cesium World Terrain, then Place Water again.");
+		}
+		else if (Result.TerrainSamplesMissed > Result.TerrainSamplesHit)
+		{
+			Extra += TEXT(" Many draping misses: frame the water so terrain tiles are loaded, then re-run.");
+		}
+	}
 	if (bClipGroundUnderWater)
 	{
 		Extra += FString::Printf(

@@ -31,6 +31,12 @@ struct FWaterPlaceResult
 	int32 PolygonsSkipped = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
+	int32 TerrainSamplesHit = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
+	int32 TerrainSamplesMissed = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
 	double ElapsedSeconds = 0.0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
@@ -43,7 +49,8 @@ struct FWaterPlaceResult
 /**
  * Blueprint API for the Water Placer editor plugin.
  * Requires an ACesiumGeoreference in the open editor map.
- * Spawns engine AStaticMeshActor water surfaces from shapefile polygons.
+ * Spawns engine AStaticMeshActor water surfaces from shapefile polygons,
+ * optionally draped onto Cesium World Terrain so shores match DTM elevation.
  * Optional Cesium clip hides imagery and DTM inside those polygons.
  * Recreate this Blueprint node after updating.
  */
@@ -58,10 +65,18 @@ public:
 	 *
 	 * @param ShapefilePath Path to polygon .shp (.dbf required if AltitudeFieldName is set).
 	 * @param AltitudeFieldName DBF column for water-surface altitude in meters. Empty = 0 (ellipsoid).
-	 * @param WaterMaterialPath Unreal asset path of the water material (not a Windows .uasset path).
+	 * @param WaterMaterialPath Optional Unreal asset path. Empty = built-in wavy translucent water
+	 *        (Single Layer Water / Water_Material_Ocean is not visible on StaticMeshActors).
 	 * @param MeshContentFolder Content folder for saved water static meshes.
 	 * @param bClipGroundUnderWater If true, hide Cesium imagery and DTM inside each water polygon.
 	 * @param MaxOutlineVertices Max vertices kept per polygon outline (meshes and clip polygons).
+	 * @param OutlineSmoothMeters If > 0, simplify stair-stepped raster outlines then round corners.
+	 *        Units are meters. 0 = keep the shapefile vertices (then cap with MaxOutlineVertices).
+	 * @param bDrapeOnCesiumTerrain If true, sample Cesium World Terrain at each shoreline vertex so
+	 *        the water mesh follows shore elevation (shapefile Z is not used / not required).
+	 * @param DrapeHeightOffsetMeters Extra height above the sampled terrain to reduce z-fighting.
+	 * @param SmoothShadingPasses 0 = faceted (hard edges). 1 = standard smooth shading.
+	 *        2+ = extra neighbor-normal blur (lighting only; shore positions stay draped). Max 8.
 	 * @param ActorLabelPrefix Prefix for spawned actor labels.
 	 * @param EditorFolderPath World Outliner folder.
 	 */
@@ -71,10 +86,14 @@ public:
 		meta = (
 			WorldContext = "WorldContextObject",
 			CPP_Default_AltitudeFieldName = "altitude",
-			CPP_Default_WaterMaterialPath = "/Water/Materials/WaterSurface/Water_Material_Ocean.Water_Material_Ocean",
+			CPP_Default_WaterMaterialPath = "",
 			CPP_Default_MeshContentFolder = "/Game/WaterPlacer/Meshes",
 			CPP_Default_bClipGroundUnderWater = "false",
 			CPP_Default_MaxOutlineVertices = "8192",
+			CPP_Default_OutlineSmoothMeters = "15.0",
+			CPP_Default_bDrapeOnCesiumTerrain = "true",
+			CPP_Default_DrapeHeightOffsetMeters = "0.3",
+			CPP_Default_SmoothShadingPasses = "2",
 			CPP_Default_ActorLabelPrefix = "Water",
 			CPP_Default_EditorFolderPath = "PlacedWater"))
 	static FWaterPlaceResult PlaceWaterFromShapefile(
@@ -85,6 +104,10 @@ public:
 		const FString& MeshContentFolder,
 		bool bClipGroundUnderWater,
 		int32 MaxOutlineVertices,
+		float OutlineSmoothMeters,
+		bool bDrapeOnCesiumTerrain,
+		float DrapeHeightOffsetMeters,
+		int32 SmoothShadingPasses,
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath);
 };
