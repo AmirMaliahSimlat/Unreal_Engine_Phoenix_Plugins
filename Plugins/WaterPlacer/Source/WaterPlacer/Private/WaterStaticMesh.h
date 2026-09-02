@@ -23,6 +23,11 @@ namespace WaterStaticMesh
 		FWaterFlatMesh& OutMesh,
 		FString& OutError);
 
+	UMaterialInterface* PrepareMaterialForStaticMesh(
+		UMaterialInterface* Source,
+		const FString& ContentFolder,
+		FString& OutError);
+
 	UStaticMesh* CreatePersistentStaticMesh(
 		const FString& PackageFolder,
 		const FString& AssetName,

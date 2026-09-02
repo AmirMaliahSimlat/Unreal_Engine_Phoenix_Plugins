@@ -499,6 +499,19 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	RemovePreviousWaterPlacer(*World);
 
 	UMaterialInterface* WaterMaterial = LoadWaterMaterialFromPath(CleanMaterialPath);
+	if (WaterMaterial)
+	{
+		FString MaterialError;
+		if (UMaterialInterface* Prepared = WaterStaticMesh::PrepareMaterialForStaticMesh(
+				WaterMaterial, MeshFolder, MaterialError))
+		{
+			WaterMaterial = Prepared;
+		}
+		else if (!MaterialError.IsEmpty())
+		{
+			UE_LOG(LogWaterPlacer, Warning, TEXT("%s"), *MaterialError);
+		}
+	}
 
 	TArray<TArray<FVector>> LakeWorldPoints;
 	LakeWorldPoints.Reserve(Polygons.Num());

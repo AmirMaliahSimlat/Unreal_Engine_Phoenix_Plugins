@@ -6,6 +6,10 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "MaterialShared.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialInterface.h"
 #include "MeshDescription.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -270,12 +274,109 @@ namespace
 		}
 
 		MeshDescription.TriangulateMesh();
+		// Same as Building Extruder: Unreal treats our XY winding as back-facing.
+		MeshDescription.ReverseAllPolygonFacing();
 
 		TEdgeAttributesRef<bool> EdgeHardnesses = Attributes.GetEdgeHardnesses();
 		for (const FEdgeID EdgeId : MeshDescription.Edges().GetElementIDs())
 		{
 			EdgeHardnesses[EdgeId] = true;
 		}
+
+		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
+		{
+			const TArrayView<const FVertexInstanceID> Corners =
+				MeshDescription.GetTriangleVertexInstances(TriId);
+			if (Corners.Num() < 3)
+			{
+				continue;
+			}
+
+			const FVertexID V0 = MeshDescription.GetVertexInstanceVertex(Corners[0]);
+			const FVertexID V1 = MeshDescription.GetVertexInstanceVertex(Corners[1]);
+			const FVertexID V2 = MeshDescription.GetVertexInstanceVertex(Corners[2]);
+			const FVector3f PA = VertexPositions[V0];
+			const FVector3f PB = VertexPositions[V1];
+			const FVector3f PC = VertexPositions[V2];
+			FVector3f Normal = FVector3f::CrossProduct(PB - PA, PC - PA).GetSafeNormal();
+			if (Normal.Z < 0.0f)
+			{
+				Normal = -Normal;
+			}
+			if (Normal.IsNearlyZero())
+			{
+				Normal = FVector3f::UpVector;
+			}
+			InstanceNormals[Corners[0]] = Normal;
+			InstanceNormals[Corners[1]] = Normal;
+			InstanceNormals[Corners[2]] = Normal;
+		}
+	}
+
+	UMaterialInterface* CreateTwoSidedInstance(UMaterialInterface* Source, const FString& ContentFolder, FString& OutError)
+	{
+		FString Folder = ContentFolder.TrimStartAndEnd();
+		Folder.RemoveFromEnd(TEXT("/"));
+		if (Folder.Contains(TEXT("/Meshes")))
+		{
+			Folder = Folder.Replace(TEXT("/Meshes"), TEXT("/Materials"));
+		}
+		if (Folder.IsEmpty() || Folder == TEXT("/Game"))
+		{
+			Folder = TEXT("/Game/WaterPlacer/Materials");
+		}
+		if (!Folder.StartsWith(TEXT("/")))
+		{
+			Folder = TEXT("/") + Folder;
+		}
+
+		const FString AssetName = TEXT("MI_WaterPlacer_Surface");
+		const FString PackagePath = Folder / AssetName;
+		UPackage* Package = CreatePackage(*PackagePath);
+		if (!Package)
+		{
+			OutError = TEXT("Failed to create water material package.");
+			return Source;
+		}
+		Package->FullyLoad();
+		ClearRedirectorAt(Package, AssetName);
+
+		UMaterialInstanceConstant* MIC = FindObject<UMaterialInstanceConstant>(Package, *AssetName);
+		if (!MIC)
+		{
+			MIC = LoadObject<UMaterialInstanceConstant>(nullptr, *(PackagePath + TEXT(".") + AssetName));
+		}
+		const bool bCreatedNew = (MIC == nullptr);
+		if (!MIC)
+		{
+			ClearRedirectorAt(Package, AssetName);
+			MIC = NewObject<UMaterialInstanceConstant>(
+				Package,
+				*AssetName,
+				RF_Public | RF_Standalone | RF_Transactional);
+		}
+		if (!MIC)
+		{
+			OutError = TEXT("Failed to allocate water material instance.");
+			return Source;
+		}
+
+		MIC->Modify();
+		MIC->SetParentEditorOnly(Source);
+		MIC->BasePropertyOverrides.bOverride_TwoSided = true;
+		MIC->BasePropertyOverrides.TwoSided = true;
+		MIC->PostEditChange();
+
+		if (bCreatedNew)
+		{
+			FAssetRegistryModule::AssetCreated(MIC);
+		}
+		if (!SaveAssetPackage(Package, MIC, OutError))
+		{
+			return Source;
+		}
+		OutError.Reset();
+		return MIC;
 	}
 }
 
@@ -315,16 +416,26 @@ bool WaterStaticMesh::BuildFlatPolygonMesh(
 		int32 A = Indices[T];
 		int32 B = Indices[T + 1];
 		int32 C = Indices[T + 2];
-		const FVector N = FVector::CrossProduct(Ring[B] - Ring[A], Ring[C] - Ring[A]);
-		if (N.Z < 0.0)
-		{
-			Swap(B, C);
-		}
 		OutMesh.Triangles.Add(A);
 		OutMesh.Triangles.Add(B);
 		OutMesh.Triangles.Add(C);
 	}
 	return OutMesh.Triangles.Num() >= 3;
+}
+
+UMaterialInterface* WaterStaticMesh::PrepareMaterialForStaticMesh(
+	UMaterialInterface* Source,
+	const FString& ContentFolder,
+	FString& OutError)
+{
+	OutError.Reset();
+	if (!Source)
+	{
+		return nullptr;
+	}
+
+	Source->CheckMaterialUsage(MATUSAGE_StaticMesh, false);
+	return CreateTwoSidedInstance(Source, ContentFolder, OutError);
 }
 
 UStaticMesh* WaterStaticMesh::CreatePersistentStaticMesh(
@@ -402,6 +513,13 @@ UStaticMesh* WaterStaticMesh::CreatePersistentStaticMesh(
 	TArray<const FMeshDescription*> Descriptions;
 	Descriptions.Add(&MeshDescription);
 	StaticMesh->BuildFromMeshDescriptions(Descriptions, BuildParams);
+
+	StaticMesh->GetStaticMaterials().Reset();
+	StaticMesh->GetStaticMaterials().Add(FStaticMaterial(Material));
+	if (StaticMesh->GetNumSections(0) > 0)
+	{
+		StaticMesh->GetSectionInfoMap().Set(0, 0, FMeshSectionInfo(0));
+	}
 
 	if (bCreatedNew)
 	{

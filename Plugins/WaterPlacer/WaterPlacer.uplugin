@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 5,
-	"VersionName": "1.4.0",
+	"Version": 6,
+	"VersionName": "1.4.1",
 	"FriendlyName": "Water Placer",
 	"Description": "Editor tool that reads EPSG:4326 water polygons and spawns engine StaticMeshActor water surfaces. Optional Cesium clip hides imagery and DTM under water. Compiles for Unreal Engine 5.1 and 5.3.",
 	"Category": "Editor",
