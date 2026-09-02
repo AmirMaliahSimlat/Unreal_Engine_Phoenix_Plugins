@@ -15,7 +15,13 @@ struct FWaterPlaceResult
 	int32 PolygonsRead = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
-	int32 WaterBodiesSpawned = 0;
+	int32 WaterMeshesSpawned = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
+	int32 ClipPolygonsSpawned = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
+	int32 TilesetsClipped = 0;
 
 	/** Inner rings (islands in a lake) skipped in v1. */
 	UPROPERTY(BlueprintReadOnly, Category = "Water Placer")
@@ -36,10 +42,10 @@ struct FWaterPlaceResult
 
 /**
  * Blueprint API for the Water Placer editor plugin.
- * Requires an ACesiumGeoreference in the open editor map and the Water plugin.
- * Spawns Unreal Water Body Lake actors whose splines match the shapefile polygons.
- * WaterMaterialPath is an Unreal asset path (Content Browser Copy Reference).
- * Does not clip Cesium tilesets. Recreate this Blueprint node after updating.
+ * Requires an ACesiumGeoreference in the open editor map.
+ * Spawns engine AStaticMeshActor water surfaces from shapefile polygons.
+ * Optional Cesium clip hides imagery and DTM inside those polygons.
+ * Recreate this Blueprint node after updating.
  */
 UCLASS()
 class WATERPLACER_API UWaterPlacerBPLibrary : public UBlueprintFunctionLibrary
@@ -48,13 +54,14 @@ class WATERPLACER_API UWaterPlacerBPLibrary : public UBlueprintFunctionLibrary
 
 public:
 	/**
-	 * Reads EPSG:4326 water polygons and spawns AWaterBodyLake actors (Unreal Water plugin)
-	 * shaped to each polygon. Does not punch holes in Cesium.
+	 * Reads EPSG:4326 water polygons and spawns AStaticMeshActor meshes shaped to each polygon.
 	 *
 	 * @param ShapefilePath Path to polygon .shp (.dbf required if AltitudeFieldName is set).
 	 * @param AltitudeFieldName DBF column for water-surface altitude in meters. Empty = 0 (ellipsoid).
 	 * @param WaterMaterialPath Unreal asset path of the water material (not a Windows .uasset path).
-	 *        Default is the Water plugin ocean material.
+	 * @param MeshContentFolder Content folder for saved water static meshes.
+	 * @param bClipGroundUnderWater If true, hide Cesium imagery and DTM inside each water polygon.
+	 * @param MaxOutlineVertices Max vertices kept per polygon outline (meshes and clip polygons).
 	 * @param ActorLabelPrefix Prefix for spawned actor labels.
 	 * @param EditorFolderPath World Outliner folder.
 	 */
@@ -65,6 +72,9 @@ public:
 			WorldContext = "WorldContextObject",
 			CPP_Default_AltitudeFieldName = "altitude",
 			CPP_Default_WaterMaterialPath = "/Water/Materials/WaterSurface/Water_Material_Ocean.Water_Material_Ocean",
+			CPP_Default_MeshContentFolder = "/Game/WaterPlacer/Meshes",
+			CPP_Default_bClipGroundUnderWater = "false",
+			CPP_Default_MaxOutlineVertices = "8192",
 			CPP_Default_ActorLabelPrefix = "Water",
 			CPP_Default_EditorFolderPath = "PlacedWater"))
 	static FWaterPlaceResult PlaceWaterFromShapefile(
@@ -72,6 +82,9 @@ public:
 		const FString& ShapefilePath,
 		const FString& AltitudeFieldName,
 		const FString& WaterMaterialPath,
+		const FString& MeshContentFolder,
+		bool bClipGroundUnderWater,
+		int32 MaxOutlineVertices,
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath);
 };

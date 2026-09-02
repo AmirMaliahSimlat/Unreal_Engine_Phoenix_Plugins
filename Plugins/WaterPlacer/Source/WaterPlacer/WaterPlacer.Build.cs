@@ -25,8 +25,10 @@ public class WaterPlacer : ModuleRules
 			"EditorSubsystem",
 			"Slate",
 			"SlateCore",
+			"MeshDescription",
+			"StaticMeshDescription",
+			"AssetRegistry",
 			"CesiumRuntime",
-			"Water",
 			"Json",
 			"JsonUtilities"
 		});

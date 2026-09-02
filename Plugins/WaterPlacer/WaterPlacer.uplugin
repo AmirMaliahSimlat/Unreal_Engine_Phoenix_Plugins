@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "1.2.0",
+	"Version": 5,
+	"VersionName": "1.4.0",
 	"FriendlyName": "Water Placer",
-	"Description": "Editor tool that reads EPSG:4326 water polygons and spawns Unreal Water Body Lake actors shaped to those polygons. Water material is an Unreal asset path you supply. Does not clip Cesium tilesets. Compiles for Unreal Engine 5.1 and 5.3.",
+	"Description": "Editor tool that reads EPSG:4326 water polygons and spawns engine StaticMeshActor water surfaces. Optional Cesium clip hides imagery and DTM under water. Compiles for Unreal Engine 5.1 and 5.3.",
 	"Category": "Editor",
 	"CreatedBy": "GeoSim Tools",
 	"CreatedByURL": "",
@@ -17,10 +17,6 @@
 	"Plugins": [
 		{
 			"Name": "CesiumForUnreal",
-			"Enabled": true
-		},
-		{
-			"Name": "Water",
 			"Enabled": true
 		}
 	],
