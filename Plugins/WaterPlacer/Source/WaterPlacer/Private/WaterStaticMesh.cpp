@@ -18,6 +18,7 @@
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "MeshDescription.h"
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "StaticMeshAttributes.h"
@@ -474,12 +475,27 @@ namespace
 		return MIC;
 	}
 
+#if UE_VERSION_OLDER_THAN(5, 2, 0)
+	UMaterial* MaterialEditData(UMaterial* Mat)
+	{
+		return Mat;
+	}
+#else
+	UMaterialEditorOnlyData* MaterialEditData(UMaterial* Mat)
+	{
+		return Mat ? Mat->GetEditorOnlyData() : nullptr;
+	}
+#endif
+
 	template <typename TExpr>
 	TExpr* NewMatExpr(UMaterial* Mat)
 	{
 		TExpr* Expr = NewObject<TExpr>(Mat);
 		Expr->Material = Mat;
-		Mat->Expressions.Add(Expr);
+		if (auto* Edit = MaterialEditData(Mat))
+		{
+			Edit->Expressions.Add(Expr);
+		}
 		return Expr;
 	}
 
@@ -490,20 +506,26 @@ namespace
 		Mat->TranslucencyLightingMode = TLM_Surface;
 		Mat->MaterialDomain = MD_Surface;
 
+		auto* Edit = MaterialEditData(Mat);
+		if (!Edit)
+		{
+			return;
+		}
+
 		UMaterialExpressionConstant3Vector* WaterColor = NewMatExpr<UMaterialExpressionConstant3Vector>(Mat);
 		WaterColor->Constant = FLinearColor(0.02f, 0.18f, 0.28f);
-		Mat->BaseColor.Expression = WaterColor;
+		Edit->BaseColor.Expression = WaterColor;
 
 		UMaterialExpressionFresnel* Fresnel = NewMatExpr<UMaterialExpressionFresnel>(Mat);
 		UMaterialExpressionAdd* Opacity = NewMatExpr<UMaterialExpressionAdd>(Mat);
 		Opacity->A.Expression = Fresnel;
 		Opacity->ConstA = 0.0f;
 		Opacity->ConstB = 0.35f;
-		Mat->Opacity.Expression = Opacity;
+		Edit->Opacity.Expression = Opacity;
 
 		UMaterialExpressionConstant3Vector* Spec = NewMatExpr<UMaterialExpressionConstant3Vector>(Mat);
 		Spec->Constant = FLinearColor(0.55f, 0.55f, 0.55f);
-		Mat->Specular.Expression = Spec;
+		Edit->Specular.Expression = Spec;
 
 		UMaterialExpressionWorldPosition* WorldPos = NewMatExpr<UMaterialExpressionWorldPosition>(Mat);
 		UMaterialExpressionTime* Time = NewMatExpr<UMaterialExpressionTime>(Mat);
@@ -566,7 +588,7 @@ namespace
 		UMaterialExpressionMultiply* WPO = NewMatExpr<UMaterialExpressionMultiply>(Mat);
 		WPO->A.Expression = Up;
 		WPO->B.Expression = WaveHeight;
-		Mat->WorldPositionOffset.Expression = WPO;
+		Edit->WorldPositionOffset.Expression = WPO;
 	}
 }
 
