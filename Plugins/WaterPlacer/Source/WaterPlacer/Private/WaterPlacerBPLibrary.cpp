@@ -4,29 +4,36 @@
 #include "WaterPlacerLog.h"
 #include "WaterShapefileReader.h"
 
+#include "Algo/Reverse.h"
 #include "Cesium3DTileset.h"
-#include "CesiumCartographicPolygon.h"
 #include "CesiumGeoreference.h"
 #include "CesiumPolygonRasterOverlay.h"
 #include "Components/SplineComponent.h"
 #include "Editor.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
+#include "Materials/MaterialInterface.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopedSlowTask.h"
+#include "Runtime/Launch/Resources/Version.h"
+#include "UObject/SoftObjectPath.h"
 #include "WaterBodyComponent.h"
 #include "WaterBodyLakeActor.h"
 #include "WaterSplineComponent.h"
+#include "WaterSplineMetadata.h"
 #include "WaterZoneActor.h"
 
 namespace
 {
 	const FName WaterPlacerTag(TEXT("WaterPlacer"));
 	const FName WaterPlacerOverlayName(TEXT("WaterPlacerClip"));
-	constexpr int32 MaxSplinePoints = 256;
+	constexpr int32 MaxSplinePoints = 1024;
 	constexpr double DuplicateEpsDeg = 1.0e-10;
+	constexpr float DefaultLakeDepthCm = 500.0f;
 
 	FString SanitizeFilePath(const FString& InPath)
 	{
@@ -93,12 +100,105 @@ namespace
 		}
 	}
 
-	void ApplyLinearClosedSpline(USplineComponent& Spline, const TArray<FVector>& WorldPoints)
+	void EnsureCounterClockwiseXY(TArray<FVector>& Points)
 	{
-		Spline.ClearSplinePoints(false);
-		for (const FVector& P : WorldPoints)
+		if (Points.Num() < 3)
 		{
-			Spline.AddSplinePoint(P, ESplineCoordinateSpace::World, false);
+			return;
+		}
+
+		double Area = 0.0;
+		for (int32 I = 0; I < Points.Num(); ++I)
+		{
+			const FVector& A = Points[I];
+			const FVector& B = Points[(I + 1) % Points.Num()];
+			Area += (A.X * B.Y - B.X * A.Y);
+		}
+		if (Area < 0.0)
+		{
+			Algo::Reverse(Points);
+		}
+	}
+
+	FString NormalizeUnrealAssetPath(const FString& InPath)
+	{
+		FString Path = SanitizeFilePath(InPath);
+		int32 FirstQuote = INDEX_NONE;
+		if (Path.FindChar(TCHAR('\''), FirstQuote))
+		{
+			const int32 LastQuote = Path.Find(TEXT("'"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+			if (LastQuote > FirstQuote)
+			{
+				Path = Path.Mid(FirstQuote + 1, LastQuote - FirstQuote - 1);
+			}
+		}
+		return Path;
+	}
+
+	UMaterialInterface* LoadWaterMaterialFromPath(const FString& InPath)
+	{
+		const FString Path = NormalizeUnrealAssetPath(InPath);
+		if (Path.IsEmpty())
+		{
+			UE_LOG(
+				LogWaterPlacer,
+				Warning,
+				TEXT("WaterMaterialPath is empty. Lakes will keep the Water plugin default material."));
+			return nullptr;
+		}
+
+		auto TryLoad = [](const FString& Candidate) -> UMaterialInterface*
+		{
+			if (Candidate.IsEmpty())
+			{
+				return nullptr;
+			}
+			if (UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *Candidate))
+			{
+				return Material;
+			}
+			if (UMaterialInterface* Material = Cast<UMaterialInterface>(FSoftObjectPath(Candidate).TryLoad()))
+			{
+				return Material;
+			}
+			return nullptr;
+		};
+
+		if (UMaterialInterface* Material = TryLoad(Path))
+		{
+			UE_LOG(LogWaterPlacer, Display, TEXT("Loaded water material '%s'."), *Path);
+			return Material;
+		}
+
+		if (!Path.Contains(TEXT(".")))
+		{
+			const FString WithObject = Path + TEXT(".") + FPackageName::GetShortName(Path);
+			if (UMaterialInterface* Material = TryLoad(WithObject))
+			{
+				UE_LOG(LogWaterPlacer, Display, TEXT("Loaded water material '%s'."), *WithObject);
+				return Material;
+			}
+		}
+
+		UE_LOG(
+			LogWaterPlacer,
+			Error,
+			TEXT("Could not load water material from '%s'. Copy Reference from the Content Browser (not a Windows file path)."),
+			*InPath);
+		return nullptr;
+	}
+
+	void ApplyClosedSpline(UWaterSplineComponent& Spline, const TArray<FVector>& LocalPoints)
+	{
+		Spline.bSplineHasBeenEdited = true;
+		Spline.bInputSplinePointsToConstructionScript = true;
+		Spline.WaterSplineDefaults.DefaultDepth = DefaultLakeDepthCm;
+
+		Spline.ClearSplinePoints(false);
+		Spline.SetClosedLoop(false, false);
+		for (const FVector& P : LocalPoints)
+		{
+			Spline.AddSplinePoint(P, ESplineCoordinateSpace::Local, false);
 		}
 		Spline.SetClosedLoop(true, false);
 		const int32 Num = Spline.GetNumberOfSplinePoints();
@@ -107,6 +207,42 @@ namespace
 			Spline.SetSplinePointType(I, ESplinePointType::Linear, false);
 		}
 		Spline.UpdateSpline();
+	}
+
+	void RefreshWaterBody(UWaterBodyComponent& Body)
+	{
+#if ENGINE_MINOR_VERSION >= 2
+		FOnWaterBodyChangedParams Params;
+		Params.bShapeOrPositionChanged = true;
+		Body.UpdateAll(Params);
+#else
+		Body.OnWaterBodyChanged(true);
+#endif
+	}
+
+	void AssignOceanMaterial(UWaterBodyComponent& Body, UMaterialInterface* OceanMaterial)
+	{
+		if (!OceanMaterial)
+		{
+			return;
+		}
+
+		Body.WaterMaterial = OceanMaterial;
+		Body.SetWaterAndUnderWaterPostProcessMaterial(OceanMaterial, Body.UnderwaterPostProcessMaterial);
+	}
+
+	void AssignWaterZone(UWaterBodyComponent& Body, AWaterZone* Zone)
+	{
+		if (!Zone)
+		{
+			return;
+		}
+
+#if ENGINE_MINOR_VERSION >= 2
+		Body.SetWaterZoneOverride(Zone);
+#else
+		Body.WaterZoneOverride = Zone;
+#endif
 	}
 
 	void RemovePreviousWaterPlacer(UWorld& World)
@@ -131,6 +267,7 @@ namespace
 				{
 					Overlay->RemoveFromTileset();
 					Overlay->DestroyComponent();
+					Tileset->RefreshTileset();
 				}
 			}
 		}
@@ -150,131 +287,11 @@ namespace
 		}
 	}
 
-	void ApplyClipOverlayToTileset(
-		ACesium3DTileset& Tileset,
-		const TArray<ACesiumCartographicPolygon*>& ClipPolygons,
-		bool bInvertSelection)
-	{
-		UCesiumPolygonRasterOverlay* Overlay = NewObject<UCesiumPolygonRasterOverlay>(
-			&Tileset,
-			WaterPlacerOverlayName,
-			RF_Transactional);
-		if (!Overlay)
-		{
-			return;
-		}
-
-		Overlay->bAutoActivate = false;
-		Tileset.AddInstanceComponent(Overlay);
-		Overlay->RegisterComponent();
-		Overlay->Polygons.Reset();
-		for (ACesiumCartographicPolygon* Poly : ClipPolygons)
-		{
-			if (Poly)
-			{
-				Overlay->Polygons.Add(Poly);
-			}
-		}
-		Overlay->InvertSelection = bInvertSelection;
-		Overlay->ExcludeSelectedTiles = true;
-		Tileset.Modify();
-		Overlay->Activate(true);
-		Overlay->Refresh();
-		Tileset.RefreshTileset();
-	}
-
-	ACesiumCartographicPolygon* SpawnClipPolygon(
-		UWorld& World,
-		ACesiumGeoreference& Georeference,
-		const TArray<FVector2D>& RingLonLat,
-		double AltitudeM,
-		const FString& Label,
-		const FString& FolderPath)
-	{
-		TArray<FVector> WorldPoints;
-		WorldPoints.Reserve(RingLonLat.Num());
-		for (const FVector2D& LonLat : RingLonLat)
-		{
-			WorldPoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
-				Georeference, LonLat.X, LonLat.Y, AltitudeM));
-		}
-		if (WorldPoints.Num() < 3)
-		{
-			return nullptr;
-		}
-
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		ACesiumCartographicPolygon* Poly = World.SpawnActor<ACesiumCartographicPolygon>(
-			WorldPoints[0],
-			FRotator::ZeroRotator,
-			Params);
-		if (!Poly || !Poly->Polygon)
-		{
-			return nullptr;
-		}
-
-		ApplyLinearClosedSpline(*Poly->Polygon, WorldPoints);
-		Poly->SetActorLabel(Label);
-		Poly->Tags.AddUnique(WaterPlacerTag);
-		if (!FolderPath.IsEmpty())
-		{
-			Poly->SetFolderPath(FName(*FolderPath));
-		}
-		Poly->Modify();
-		return Poly;
-	}
-
-	AWaterBodyLake* SpawnLake(
-		UWorld& World,
-		const TArray<FVector>& WorldPoints,
-		const FString& Label,
-		const FString& FolderPath)
-	{
-		if (WorldPoints.Num() < 3)
-		{
-			return nullptr;
-		}
-
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		AWaterBodyLake* Lake = World.SpawnActor<AWaterBodyLake>(
-			WorldPoints[0],
-			FRotator::ZeroRotator,
-			Params);
-		if (!Lake)
-		{
-			return nullptr;
-		}
-
-		UWaterSplineComponent* Spline = Lake->GetWaterSpline();
-		if (!Spline)
-		{
-			World.DestroyActor(Lake);
-			return nullptr;
-		}
-
-		ApplyLinearClosedSpline(*Spline, WorldPoints);
-		if (UWaterBodyComponent* Body = Lake->GetWaterBodyComponent())
-		{
-			Body->OnWaterBodyChanged(true);
-		}
-
-		Lake->SetActorLabel(Label);
-		Lake->Tags.AddUnique(WaterPlacerTag);
-		if (!FolderPath.IsEmpty())
-		{
-			Lake->SetFolderPath(FName(*FolderPath));
-		}
-		Lake->Modify();
-		return Lake;
-	}
-
-	void EnsureWaterZone(UWorld& World, const TArray<FVector>& AllWaterPoints, const FString& FolderPath)
+	AWaterZone* EnsureWaterZone(UWorld& World, const TArray<FVector>& AllWaterPoints, const FString& FolderPath)
 	{
 		if (AllWaterPoints.Num() == 0)
 		{
-			return;
+			return nullptr;
 		}
 
 		FBox Bounds(ForceInit);
@@ -284,55 +301,95 @@ namespace
 		}
 		const FVector Center = Bounds.GetCenter();
 		const FVector Extent = Bounds.GetExtent();
-		constexpr double PadCm = 100000.0;
+		constexpr double PadCm = 50000.0;
 		const FVector2D ZoneExtent(
 			FMath::Max(Extent.X * 2.0 + PadCm, PadCm),
 			FMath::Max(Extent.Y * 2.0 + PadCm, PadCm));
 
-		AWaterZone* Zone = nullptr;
-		for (TActorIterator<AWaterZone> It(&World); It; ++It)
-		{
-			if (*It && (*It)->ActorHasTag(WaterPlacerTag))
-			{
-				Zone = *It;
-				break;
-			}
-		}
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AWaterZone* Zone = World.SpawnActor<AWaterZone>(Center, FRotator::ZeroRotator, Params);
 		if (!Zone)
 		{
-			for (TActorIterator<AWaterZone> It(&World); It; ++It)
-			{
-				if (*It)
-				{
-					Zone = *It;
-					break;
-				}
-			}
-		}
-		if (!Zone)
-		{
-			FActorSpawnParameters Params;
-			Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-			Zone = World.SpawnActor<AWaterZone>(Center, FRotator::ZeroRotator, Params);
-			if (Zone)
-			{
-				Zone->Tags.AddUnique(WaterPlacerTag);
-				Zone->SetActorLabel(TEXT("WaterPlacer_WaterZone"));
-				if (!FolderPath.IsEmpty())
-				{
-					Zone->SetFolderPath(FName(*FolderPath));
-				}
-			}
-		}
-		if (!Zone)
-		{
-			UE_LOG(LogWaterPlacer, Warning, TEXT("Could not spawn or find a Water Zone. Enable the Water plugin and add a Water Zone if lakes do not render."));
-			return;
+			UE_LOG(LogWaterPlacer, Warning, TEXT("Could not spawn a Water Zone. Enable the Water plugin."));
+			return nullptr;
 		}
 
+		Zone->Tags.AddUnique(WaterPlacerTag);
+		Zone->SetActorLabel(TEXT("WaterZone"));
+		if (!FolderPath.IsEmpty())
+		{
+			Zone->SetFolderPath(FName(*FolderPath));
+		}
 		Zone->SetActorLocation(Center);
 		Zone->SetZoneExtent(ZoneExtent);
 		Zone->Modify();
+		return Zone;
+	}
+
+	AWaterBodyLake* SpawnLake(
+		UWorld& World,
+		const TArray<FVector>& WorldPoints,
+		UMaterialInterface* OceanMaterial,
+		AWaterZone* Zone,
+		const FString& Label,
+		const FString& FolderPath)
+	{
+		if (WorldPoints.Num() < 3)
+		{
+			return nullptr;
+		}
+
+		FVector Origin = FVector::ZeroVector;
+		for (const FVector& P : WorldPoints)
+		{
+			Origin += P;
+		}
+		Origin /= static_cast<double>(WorldPoints.Num());
+
+		TArray<FVector> LocalPoints;
+		LocalPoints.Reserve(WorldPoints.Num());
+		for (const FVector& P : WorldPoints)
+		{
+			LocalPoints.Add(P - Origin);
+		}
+		EnsureCounterClockwiseXY(LocalPoints);
+
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AWaterBodyLake* Lake = World.SpawnActor<AWaterBodyLake>(
+			Origin,
+			FRotator::ZeroRotator,
+			Params);
+		if (!Lake)
+		{
+			return nullptr;
+		}
+
+		Lake->SetActorLabel(Label);
+		Lake->Tags.AddUnique(WaterPlacerTag);
+		if (!FolderPath.IsEmpty())
+		{
+			Lake->SetFolderPath(FName(*FolderPath));
+		}
+
+		UWaterSplineComponent* Spline = Lake->GetWaterSpline();
+		UWaterBodyComponent* Body = Lake->GetWaterBodyComponent();
+		if (!Spline || !Body)
+		{
+			World.DestroyActor(Lake);
+			return nullptr;
+		}
+
+		ApplyClosedSpline(*Spline, LocalPoints);
+
+		Body->bAffectsLandscape = false;
+		AssignOceanMaterial(*Body, OceanMaterial);
+		AssignWaterZone(*Body, Zone);
+		RefreshWaterBody(*Body);
+
+		Lake->Modify();
+		return Lake;
 	}
 }
 
@@ -340,8 +397,7 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	UObject* WorldContextObject,
 	const FString& ShapefilePath,
 	const FString& AltitudeFieldName,
-	bool bInvertSelection,
-	bool bPlaceWaterBodies,
+	const FString& WaterMaterialPath,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath)
 {
@@ -349,7 +405,7 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	const double StartTime = FPlatformTime::Seconds();
 	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
 	const FString AltitudeField = AltitudeFieldName;
-	const bool bSpawnLakes = bPlaceWaterBodies && !bInvertSelection;
+	const FString CleanMaterialPath = SanitizeFilePath(WaterMaterialPath);
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("Water") : ActorLabelPrefix;
 	const FString FolderPath = EditorFolderPath;
 
@@ -357,11 +413,10 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	UE_LOG(
 		LogWaterPlacer,
 		Display,
-		TEXT("shp='%s' altitudeField='%s' invert=%s placeLakes=%s"),
+		TEXT("shp='%s' altitudeField='%s' waterMaterial='%s'"),
 		*CleanInputPath,
 		AltitudeField.IsEmpty() ? TEXT("(0 ellipsoid)") : *AltitudeField,
-		bInvertSelection ? TEXT("on (keep inside / clip sea)") : TEXT("off (clip lakes)"),
-		bSpawnLakes ? TEXT("on") : TEXT("off"));
+		CleanMaterialPath.IsEmpty() ? TEXT("(empty)") : *CleanMaterialPath);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -402,32 +457,19 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		Result.HoleRingsIgnored += Poly.HoleRingCount;
 	}
 
-	TArray<ACesium3DTileset*> Tilesets;
-	for (TActorIterator<ACesium3DTileset> It(World); It; ++It)
-	{
-		if (*It)
-		{
-			Tilesets.Add(*It);
-		}
-	}
-	if (Tilesets.Num() == 0)
-	{
-		Result.Message = TEXT("No ACesium3DTileset in the level. Add Cesium World Terrain (and any 3D tiles) first.");
-		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogWaterPlacer, Error, TEXT("%s"), *Result.Message);
-		return Result;
-	}
-
 	RemovePreviousWaterPlacer(*World);
 
-	FScopedSlowTask SlowTask(
-		static_cast<float>(Polygons.Num()),
-		NSLOCTEXT("WaterPlacer", "PlaceProgress", "Placing water clip polygons..."));
-	SlowTask.MakeDialog(true);
+	UMaterialInterface* OceanMaterial = LoadWaterMaterialFromPath(CleanMaterialPath);
 
-	TArray<ACesiumCartographicPolygon*> ClipActors;
-	ClipActors.Reserve(Polygons.Num());
+	TArray<TArray<FVector>> LakeWorldPoints;
+	LakeWorldPoints.Reserve(Polygons.Num());
+	TArray<int32> LakeRecordIds;
 	TArray<FVector> AllLakePoints;
+
+	FScopedSlowTask SlowTask(
+		static_cast<float>(Polygons.Num() + 1),
+		NSLOCTEXT("WaterPlacer", "PlaceProgress", "Placing Water Body Lakes..."));
+	SlowTask.MakeDialog(true);
 
 	for (int32 Index = 0; Index < Polygons.Num(); ++Index)
 	{
@@ -447,94 +489,79 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 			continue;
 		}
 
-		const FString ClipLabel = FString::Printf(TEXT("%s_Clip_%d"), *LabelPrefix, Feature.RecordIndex);
-		ACesiumCartographicPolygon* ClipActor = SpawnClipPolygon(
-			*World, *Georeference, Ring, Feature.AltitudeM, ClipLabel, FolderPath);
-		if (!ClipActor)
+		TArray<FVector> WorldPoints;
+		WorldPoints.Reserve(Ring.Num());
+		for (const FVector2D& LonLat : Ring)
+		{
+			WorldPoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
+				*Georeference, LonLat.X, LonLat.Y, Feature.AltitudeM));
+		}
+		LakeWorldPoints.Add(MoveTemp(WorldPoints));
+		LakeRecordIds.Add(Feature.RecordIndex);
+		AllLakePoints.Append(LakeWorldPoints.Last());
+	}
+
+	if (Result.bCancelled)
+	{
+		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+		Result.Message = FString::Printf(TEXT("Cancelled. Elapsed: %.2fs."), Result.ElapsedSeconds);
+		UE_LOG(LogWaterPlacer, Warning, TEXT("%s"), *Result.Message);
+		return Result;
+	}
+
+	SlowTask.EnterProgressFrame(1.0f, NSLOCTEXT("WaterPlacer", "SpawnLakes", "Spawning lakes..."));
+	AWaterZone* Zone = EnsureWaterZone(*World, AllLakePoints, FolderPath);
+
+	for (int32 I = 0; I < LakeWorldPoints.Num(); ++I)
+	{
+		const FString LakeLabel = FString::Printf(TEXT("%s_Lake_%d"), *LabelPrefix, LakeRecordIds[I]);
+		if (SpawnLake(*World, LakeWorldPoints[I], OceanMaterial, Zone, LakeLabel, FolderPath))
+		{
+			++Result.WaterBodiesSpawned;
+		}
+		else
 		{
 			++Result.PolygonsSkipped;
-			continue;
+			UE_LOG(LogWaterPlacer, Warning, TEXT("Failed to spawn Water Body Lake for record %d."), LakeRecordIds[I]);
 		}
-		ClipActors.Add(ClipActor);
-		++Result.ClipPolygonsSpawned;
-
-		if (bSpawnLakes)
-		{
-			TArray<FVector> LakePoints;
-			LakePoints.Reserve(Ring.Num());
-			for (const FVector2D& LonLat : Ring)
-			{
-				LakePoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
-					*Georeference, LonLat.X, LonLat.Y, Feature.AltitudeM));
-			}
-			const FString LakeLabel = FString::Printf(TEXT("%s_Lake_%d"), *LabelPrefix, Feature.RecordIndex);
-			if (AWaterBodyLake* Lake = SpawnLake(*World, LakePoints, LakeLabel, FolderPath))
-			{
-				++Result.WaterBodiesSpawned;
-				AllLakePoints.Append(LakePoints);
-			}
-			else
-			{
-				UE_LOG(LogWaterPlacer, Warning, TEXT("Failed to spawn Water Body Lake for record %d."), Feature.RecordIndex);
-			}
-		}
-	}
-
-	if (bSpawnLakes)
-	{
-		EnsureWaterZone(*World, AllLakePoints, FolderPath);
-	}
-
-	for (ACesium3DTileset* Tileset : Tilesets)
-	{
-		if (!Tileset)
-		{
-			continue;
-		}
-		ApplyClipOverlayToTileset(*Tileset, ClipActors, bInvertSelection);
-		++Result.TilesetsClipped;
 	}
 
 	World->MarkPackageDirty();
 
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-	Result.bSuccess = !Result.bCancelled && Result.ClipPolygonsSpawned > 0;
-
-	if (Result.bCancelled)
-	{
-		Result.Message = FString::Printf(
-			TEXT("Cancelled. Clip polygons=%d lakes=%d tilesets=%d. Elapsed: %.2fs."),
-			Result.ClipPolygonsSpawned,
-			Result.WaterBodiesSpawned,
-			Result.TilesetsClipped,
-			Result.ElapsedSeconds);
-		UE_LOG(LogWaterPlacer, Warning, TEXT("%s"), *Result.Message);
-		return Result;
-	}
+	Result.bSuccess = Result.WaterBodiesSpawned > 0;
 
 	if (!Result.bSuccess)
 	{
-		Result.Message = TEXT("No clip polygons were spawned.");
+		Result.Message = TEXT("No Water Body Lakes were spawned.");
 		UE_LOG(LogWaterPlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}
 
-	FString InvertNote;
-	if (bInvertSelection)
-	{
-		InvertNote = TEXT(" Invert Selection is on: tileset outside the polygons is hidden (islands kept). Water Body Lakes were not spawned on the land.");
-	}
+	FString Extra;
 	if (Result.HoleRingsIgnored > 0)
 	{
-		InvertNote += FString::Printf(TEXT(" Ignored %d inner rings (islands in lakes)."), Result.HoleRingsIgnored);
+		Extra += FString::Printf(TEXT(" Ignored %d inner rings (islands in lakes)."), Result.HoleRingsIgnored);
+	}
+	if (!OceanMaterial)
+	{
+		if (CleanMaterialPath.IsEmpty())
+		{
+			Extra += TEXT(" WaterMaterialPath was empty; lakes use the Water plugin default.");
+		}
+		else
+		{
+			Extra += FString::Printf(
+				TEXT(" Could not load water material '%s'; lakes use the Water plugin default."),
+				*CleanMaterialPath);
+		}
 	}
 
 	Result.Message = FString::Printf(
-		TEXT("Clipped %d polygon(s) on %d tileset(s), spawned %d Water Body Lake(s)%s. Elapsed: %.2fs."),
-		Result.ClipPolygonsSpawned,
-		Result.TilesetsClipped,
+		TEXT("Spawned %d Water Body Lake(s) from %d polygon(s). Cesium tilesets were not clipped.%s Elapsed: %.2fs."),
 		Result.WaterBodiesSpawned,
-		*InvertNote,
+		Result.PolygonsRead,
+		*Extra,
 		Result.ElapsedSeconds);
 	UE_LOG(LogWaterPlacer, Display, TEXT("%s"), *Result.Message);
 	UE_LOG(LogWaterPlacer, Display, TEXT("========== Water Place END =========="));
