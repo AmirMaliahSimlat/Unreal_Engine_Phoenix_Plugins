@@ -492,10 +492,11 @@ namespace
 	{
 		TExpr* Expr = NewObject<TExpr>(Mat);
 		Expr->Material = Mat;
-		if (auto* Edit = MaterialEditData(Mat))
-		{
-			Edit->Expressions.Add(Expr);
-		}
+#if UE_VERSION_OLDER_THAN(5, 2, 0)
+		Mat->Expressions.Add(Expr);
+#else
+		Mat->GetExpressionCollection().AddExpression(Expr);
+#endif
 		return Expr;
 	}
 
