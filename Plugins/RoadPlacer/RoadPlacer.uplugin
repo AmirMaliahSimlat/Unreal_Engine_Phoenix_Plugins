@@ -1,0 +1,30 @@
+{
+	"FileVersion": 3,
+	"Version": 2,
+	"VersionName": "1.1.0",
+	"FriendlyName": "Road Placer",
+	"Description": "Editor tool that reads an EPSG:4326 road-mask polygon and a PointZ elevation shapefile, triangulates a draped road surface, and places tiled StaticMeshActors. Compiles for Unreal Engine 5.1 and 5.3.",
+	"Category": "Editor",
+	"CreatedBy": "GeoSim Tools",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "CesiumForUnreal",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "RoadPlacer",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
