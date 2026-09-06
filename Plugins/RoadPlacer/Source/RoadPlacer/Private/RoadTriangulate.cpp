@@ -97,7 +97,8 @@ bool RoadTriangulate::BuildTin(
 	const TArray<FRoadShapefileMask>& Masks,
 	double MaxEdgeMeters,
 	FRoadTin& OutTin,
-	FString& OutError)
+	FString& OutError,
+	TFunction<bool(float, const TCHAR*)> Progress)
 {
 	OutTin = FRoadTin();
 	if (Samples.Num() < 3)
@@ -157,8 +158,33 @@ bool RoadTriangulate::BuildTin(
 		return FVector2D(Pts[I].Lon, Pts[I].Lat);
 	};
 
+	auto Report = [&](float Fraction01, const TCHAR* Stage) -> bool
+	{
+		if (!Progress)
+		{
+			return true;
+		}
+		return Progress(FMath::Clamp(Fraction01, 0.0f, 1.0f), Stage);
+	};
+
+	const int32 InsertStride = FMath::Max(S0 / 50, 64);
+	if (!Report(0.0f, TEXT("triangulating")))
+	{
+		OutError = TEXT("Cancelled.");
+		return false;
+	}
+
 	for (int32 Pi = 0; Pi < S0; ++Pi)
 	{
+		if ((Pi % InsertStride) == 0 || Pi + 1 == S0)
+		{
+			const float Frac = 0.85f * static_cast<float>(Pi + 1) / static_cast<float>(S0);
+			if (!Report(Frac, TEXT("triangulating")))
+			{
+				OutError = TEXT("Cancelled.");
+				return false;
+			}
+		}
 		const FVector2D P(Pts[Pi].Lon, Pts[Pi].Lat);
 		TArray<int32> Bad;
 		for (int32 T = 0; T < Tris.Num(); ++T)
@@ -208,8 +234,20 @@ bool RoadTriangulate::BuildTin(
 	OutTin.Vertices = Pts;
 	OutTin.Vertices.SetNum(S0);
 	OutTin.Triangles.Reserve(Tris.Num() * 3);
-	for (const FTri& Tri : Tris)
+	const int32 FilterStride = FMath::Max(Tris.Num() / 25, 32);
+	for (int32 Ti = 0; Ti < Tris.Num(); ++Ti)
 	{
+		if ((Ti % FilterStride) == 0 || Ti + 1 == Tris.Num())
+		{
+			const float Frac = 0.85f + 0.15f * static_cast<float>(Ti + 1)
+				/ static_cast<float>(FMath::Max(Tris.Num(), 1));
+			if (!Report(Frac, TEXT("clipping to mask")))
+			{
+				OutError = TEXT("Cancelled.");
+				return false;
+			}
+		}
+		const FTri& Tri = Tris[Ti];
 		if (Tri.A >= S0 || Tri.B >= S0 || Tri.C >= S0)
 		{
 			continue;

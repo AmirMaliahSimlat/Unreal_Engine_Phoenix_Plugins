@@ -48,12 +48,15 @@ class ROADPLACER_API URoadPlacerBPLibrary : public UBlueprintFunctionLibrary
 public:
 	/**
 	 * @param MaskShapefilePath EPSG:4326 Polygon / PolygonZ road mask.
-	 * @param ElevationPointsPath EPSG:4326 Point / PointZ samples on that mask (Z = ellipsoid meters).
+	 * @param ElevationPointsPath EPSG:4326 Point / PointZ samples along the mask outline
+	 *        (not a filled interior grid). Z = ellipsoid meters. The TIN interpolates those
+	 *        curb heights across the pavement so the slab tilts with the ground around the road.
 	 * @param OptionalAltitudeFieldName DBF column that overrides geometry Z when set. Empty = use PointZ.
 	 * @param RoadMaterialPath Optional Unreal material. Empty = engine default material.
 	 * @param MeshContentFolder Content folder for saved road StaticMeshes.
 	 * @param TargetTileCount Geographic tile slots (one StaticMeshActor per non-empty tile).
-	 * @param MaxEdgeMeters Drop TIN triangles longer than this (prevents filling between roads). ~3x sample spacing.
+	 * @param MaxEdgeMeters Drop TIN triangles longer than this. Must be wider than the road
+	 *        (outline-to-outline) so curb-to-curb triangles stay. Too small leaves only the curb.
 	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.05 m).
 	 * @param ThicknessMeters Slab thickness. Top = Z+offset, bottom = Z+offset-thickness
 	 *        (default 0.10 m so the slab is 0.05 m above and 0.05 m into the DTM). 0 = thin surface.
@@ -68,8 +71,8 @@ public:
 			CPP_Default_OptionalAltitudeFieldName = "",
 			CPP_Default_RoadMaterialPath = "",
 			CPP_Default_MeshContentFolder = "/Game/RoadPlacer/Meshes",
-			CPP_Default_TargetTileCount = "16",
-			CPP_Default_MaxEdgeMeters = "3.5",
+			CPP_Default_TargetTileCount = "64",
+			CPP_Default_MaxEdgeMeters = "40.0",
 			CPP_Default_HeightOffsetMeters = "0.05",
 			CPP_Default_ThicknessMeters = "0.10",
 			CPP_Default_MetersPerUv = "10.0",

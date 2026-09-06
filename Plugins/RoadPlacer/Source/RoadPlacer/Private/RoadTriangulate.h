@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "RoadShapefileReader.h"
+#include "Templates/Function.h"
 
 struct FRoadSample
 {
@@ -25,11 +26,13 @@ namespace RoadTriangulate
 	/**
 	 * Delaunay TIN of Samples. Keeps triangles whose centroid is inside Masks
 	 * and whose longest edge is <= MaxEdgeMeters.
+	 * Progress(Fraction01, Stage) may be called during insert/clip; return false to cancel.
 	 */
 	bool BuildTin(
 		const TArray<FRoadSample>& Samples,
 		const TArray<FRoadShapefileMask>& Masks,
 		double MaxEdgeMeters,
 		FRoadTin& OutTin,
-		FString& OutError);
+		FString& OutError,
+		TFunction<bool(float, const TCHAR*)> Progress = nullptr);
 }
