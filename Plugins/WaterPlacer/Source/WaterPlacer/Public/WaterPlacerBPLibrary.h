@@ -75,6 +75,9 @@ public:
 	 * @param bDrapeOnCesiumTerrain If true, sample Cesium World Terrain at each shoreline vertex so
 	 *        the water mesh follows shore elevation (shapefile Z is not used / not required).
 	 * @param DrapeHeightOffsetMeters Extra height above the sampled terrain to reduce z-fighting.
+	 * @param ElevationFolderPath Optional Windows folder of the best DTM: Cesium quantized-mesh
+	 *        (.terrain tiles), GeoTIFF (.tif), or ESRI ASCII (.asc). If set, shores sample this
+	 *        instead of the live Cesium stream (which is a coarser view-dependent LOD).
 	 * @param SmoothShadingPasses 0 = faceted (hard edges). 1 = standard smooth shading.
 	 *        2+ = extra neighbor-normal blur (lighting only; shore positions stay draped). Max 8.
 	 * @param ActorLabelPrefix Prefix for spawned actor labels.
@@ -93,6 +96,7 @@ public:
 			CPP_Default_OutlineSmoothMeters = "15.0",
 			CPP_Default_bDrapeOnCesiumTerrain = "true",
 			CPP_Default_DrapeHeightOffsetMeters = "0.3",
+			CPP_Default_ElevationFolderPath = "",
 			CPP_Default_SmoothShadingPasses = "2",
 			CPP_Default_ActorLabelPrefix = "Water",
 			CPP_Default_EditorFolderPath = "PlacedWater"))
@@ -107,6 +111,7 @@ public:
 		float OutlineSmoothMeters,
 		bool bDrapeOnCesiumTerrain,
 		float DrapeHeightOffsetMeters,
+		const FString& ElevationFolderPath,
 		int32 SmoothShadingPasses,
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath);

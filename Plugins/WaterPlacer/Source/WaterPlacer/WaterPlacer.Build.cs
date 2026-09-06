@@ -19,6 +19,7 @@ public class WaterPlacer : ModuleRules
 			"Engine"
 		});
 
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "zlib");
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"UnrealEd",

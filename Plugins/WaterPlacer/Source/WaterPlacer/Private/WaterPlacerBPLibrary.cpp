@@ -1,6 +1,7 @@
 #include "WaterPlacerBPLibrary.h"
 
 #include "WaterCesiumPlacement.h"
+#include "WaterElevationSampler.h"
 #include "WaterPlacerLog.h"
 #include "WaterShapefileReader.h"
 #include "WaterStaticMesh.h"
@@ -503,6 +504,7 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	float OutlineSmoothMeters,
 	bool bDrapeOnCesiumTerrain,
 	float DrapeHeightOffsetMeters,
+	const FString& ElevationFolderPath,
 	int32 SmoothShadingPasses,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath)
@@ -517,17 +519,18 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	const FString MeshFolder = MeshContentFolder.IsEmpty() ? TEXT("/Game/WaterPlacer/Meshes") : MeshContentFolder;
 	const int32 OutlineVertexCap = FMath::Clamp(MaxOutlineVertices, MinOutlineVertices, HardMaxOutlineVertices);
 	const double SmoothMeters = FMath::Max(static_cast<double>(OutlineSmoothMeters), 0.0);
-	const bool bDrape = bDrapeOnCesiumTerrain;
+	const bool bDrapeStream = bDrapeOnCesiumTerrain;
 	const double DrapeOffsetM = FMath::Max(static_cast<double>(DrapeHeightOffsetMeters), 0.0);
 	constexpr int32 MaxSmoothShadingPasses = 8;
 	const int32 ShadingPasses = FMath::Clamp(SmoothShadingPasses, 0, MaxSmoothShadingPasses);
 	constexpr double DrapeSampleSpacingM = 25.0;
+	const FString ElevationFolder = SanitizeFilePath(ElevationFolderPath);
 
 	UE_LOG(LogWaterPlacer, Display, TEXT("========== Water Place START =========="));
 	UE_LOG(
 		LogWaterPlacer,
 		Display,
-		TEXT("shp='%s' altitudeField='%s' waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d smoothMeters=%.1f drape=%s drapeOffsetM=%.2f smoothShadingPasses=%d"),
+		TEXT("shp='%s' altitudeField='%s' waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d smoothMeters=%.1f drapeStream=%s drapeOffsetM=%.2f elevationFolder='%s' smoothShadingPasses=%d"),
 		*CleanInputPath,
 		AltitudeField.IsEmpty() ? TEXT("(0 ellipsoid)") : *AltitudeField,
 		CleanMaterialPath.IsEmpty() ? TEXT("(empty, wavy default)") : *CleanMaterialPath,
@@ -535,8 +538,9 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		bClipGroundUnderWater ? TEXT("on") : TEXT("off"),
 		OutlineVertexCap,
 		SmoothMeters,
-		bDrape ? TEXT("on") : TEXT("off"),
+		bDrapeStream ? TEXT("on") : TEXT("off"),
 		DrapeOffsetM,
+		ElevationFolder.IsEmpty() ? TEXT("(none)") : *ElevationFolder,
 		ShadingPasses);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
@@ -599,8 +603,24 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 
 	RemovePreviousWaterPlacer(*World);
 
+	WaterElevation::FSampler Elevation;
+	const bool bLocalElevation = !ElevationFolder.IsEmpty();
+	if (bLocalElevation)
+	{
+		FString ElevError;
+		if (!Elevation.Load(ElevationFolder, ElevError))
+		{
+			Result.Message = ElevError;
+			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogWaterPlacer, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
+	}
+
+	const bool bDrapeSurface = Elevation.IsLoaded() || bDrapeStream;
+
 	ACesium3DTileset* TerrainTileset = nullptr;
-	if (bDrape)
+	if (bDrapeStream && !Elevation.IsLoaded())
 	{
 		TerrainTileset = WaterCesiumPlacement::FindTerrainTileset(World);
 		if (TerrainTileset)
@@ -609,7 +629,7 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 			UE_LOG(
 				LogWaterPlacer,
 				Display,
-				TEXT("Draping water onto tileset '%s'."),
+				TEXT("Draping water onto tileset '%s' (view-dependent LOD). Prefer Elevation Folder Path for best DTM."),
 				*TerrainTileset->GetActorLabel());
 		}
 		else
@@ -660,7 +680,7 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 
 		TArray<FVector2D> Ring;
 		DecimateRing(Feature.OuterRingLonLat, OutlineVertexCap, SmoothMeters, Ring);
-		if (bDrape)
+		if (bDrapeSurface)
 		{
 			TArray<FVector2D> Densified;
 			DensifyClosedRing(Ring, DrapeSampleSpacingM, OutlineVertexCap, Densified);
@@ -676,7 +696,21 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		WorldPoints.Reserve(Ring.Num());
 		for (const FVector2D& LonLat : Ring)
 		{
-			if (bDrape)
+			if (Elevation.IsLoaded())
+			{
+				double HeightM = Feature.AltitudeM;
+				if (Elevation.SampleHeightM(LonLat.X, LonLat.Y, HeightM))
+				{
+					++Result.TerrainSamplesHit;
+				}
+				else
+				{
+					++Result.TerrainSamplesMissed;
+				}
+				WorldPoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
+					*Georeference, LonLat.X, LonLat.Y, HeightM + DrapeOffsetM));
+			}
+			else if (bDrapeStream)
 			{
 				bool bHit = false;
 				WorldPoints.Add(WaterCesiumPlacement::DrapeLonLatToUnreal(
@@ -774,19 +808,27 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	}
 
 	FString Extra;
-	if (bDrape)
+	if (Elevation.IsLoaded())
 	{
 		Extra += FString::Printf(
-			TEXT(" Draped %d shoreline sample(s) onto Cesium terrain (%d miss)."),
+			TEXT(" Draped %d shoreline sample(s) from local elevation (%d miss). %s"),
+			Result.TerrainSamplesHit,
+			Result.TerrainSamplesMissed,
+			*Elevation.Describe());
+	}
+	else if (bDrapeStream)
+	{
+		Extra += FString::Printf(
+			TEXT(" Draped %d shoreline sample(s) onto Cesium stream (%d miss)."),
 			Result.TerrainSamplesHit,
 			Result.TerrainSamplesMissed);
 		if (Result.TerrainSamplesMissed > 0 && Result.TerrainSamplesHit == 0)
 		{
-			Extra += TEXT(" No terrain hits: look at the water in the viewport so Cesium tiles load, enable Create Physics Meshes on Cesium World Terrain, then Place Water again.");
+			Extra += TEXT(" No terrain hits: look at the water in the viewport so Cesium tiles load, or set Elevation Folder Path to the best DTM on disk.");
 		}
 		else if (Result.TerrainSamplesMissed > Result.TerrainSamplesHit)
 		{
-			Extra += TEXT(" Many draping misses: frame the water so terrain tiles are loaded, then re-run.");
+			Extra += TEXT(" Many draping misses: frame the water so terrain tiles are loaded, or use Elevation Folder Path.");
 		}
 	}
 	if (bClipGroundUnderWater)
