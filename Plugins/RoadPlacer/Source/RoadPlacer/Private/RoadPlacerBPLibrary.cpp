@@ -443,6 +443,36 @@ namespace
 			OutTriangles.Add(A + N);
 		}
 	}
+
+	void CompactUsedSamples(
+		const TArray<FRoadSample>& InVerts,
+		const TArray<int32>& InTris,
+		TArray<FRoadSample>& OutVerts,
+		TArray<int32>& OutTris)
+	{
+		TArray<int32> Remap;
+		Remap.Init(INDEX_NONE, InVerts.Num());
+		OutVerts.Reset();
+		OutTris.Reset();
+		OutTris.Reserve(InTris.Num());
+		for (int32 I = 0; I + 2 < InTris.Num(); I += 3)
+		{
+			for (int32 K = 0; K < 3; ++K)
+			{
+				const int32 Old = InTris[I + K];
+				if (!InVerts.IsValidIndex(Old))
+				{
+					continue;
+				}
+				if (Remap[Old] == INDEX_NONE)
+				{
+					Remap[Old] = OutVerts.Num();
+					OutVerts.Add(InVerts[Old]);
+				}
+				OutTris.Add(Remap[Old]);
+			}
+		}
+	}
 }
 
 FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
@@ -467,7 +497,20 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	const FString PointsPath = SanitizeFilePath(ElevationPointsPath);
 	const FString MeshFolder = MeshContentFolder.IsEmpty() ? TEXT("/Game/RoadPlacer/Meshes") : MeshContentFolder;
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("Road") : ActorLabelPrefix;
-	const double MaxEdge = FMath::Max(static_cast<double>(MaxEdgeMeters), 0.25);
+	double MaxEdge = static_cast<double>(MaxEdgeMeters);
+	if (MaxEdge > 0.0 && MaxEdge < 100.0)
+	{
+		UE_LOG(
+			LogRoadPlacer,
+			Warning,
+			TEXT("Max Edge Meters is %.1f (too small for curb-to-curb fill). Ignoring so the pavement is not shredded into slivers. Set 0, or >= 100 to cap triangle length."),
+			MaxEdge);
+		MaxEdge = 0.0;
+	}
+	else if (MaxEdge < 0.0)
+	{
+		MaxEdge = 0.0;
+	}
 	const double HeightOff = static_cast<double>(HeightOffsetMeters);
 	const double Thickness = FMath::Max(static_cast<double>(ThicknessMeters), 0.0);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.1);
@@ -548,7 +591,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	LoadTask.EnterProgressFrame(1.0f, NSLOCTEXT("RoadPlacer", "IndexOutline", "Indexing mask outline..."));
 	FOutlineIndex Outline;
 	Outline.Build(Masks);
-	constexpr double OutlineSnapM = 2.0;
+	constexpr double OutlineSnapM = 15.0;
 
 	LoadTask.EnterProgressFrame(1.0f, NSLOCTEXT("RoadPlacer", "PickSamples", "Selecting outline elevation samples..."));
 	TArray<FRoadSample> AllSamples;
@@ -602,8 +645,9 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("Using %d outline elevation point(s) (mask has %d polygon(s)). Road tilt interpolates curb-to-curb."),
+		TEXT("Using %d of %d outline elevation point(s) (mask has %d polygon(s)). Road tilt interpolates curb-to-curb."),
 		UsedPoints,
+		Points.Num(),
 		Masks.Num());
 
 	double MinLon = AllSamples[0].Lon, MaxLon = AllSamples[0].Lon;
@@ -621,8 +665,9 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	const double LonSpan = FMath::Max(MaxLon - MinLon, 1.0e-9);
 	const double LatSpan = FMath::Max(MaxLat - MinLat, 1.0e-9);
 	const double MidLat = 0.5 * (MinLat + MaxLat);
-	const double PadLon = MaxEdge / FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
-	const double PadLat = MaxEdge / 110540.0;
+	const double PadM = FMath::Max(MaxEdge, 80.0);
+	const double PadLon = PadM / FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
+	const double PadLat = PadM / 110540.0;
 
 	RemovePrevious(*World);
 	UMaterialInterface* Material = LoadMaterial(RoadMaterialPath);
@@ -737,12 +782,16 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				continue;
 			}
 
+			TArray<FRoadSample> UsedVerts;
+			TArray<int32> UsedTris;
+			CompactUsedSamples(Tin.Vertices, Kept, UsedVerts, UsedTris);
+
 			TileTask.EnterProgressFrame(
 				6.0f,
 				FText::FromString(FString::Printf(TEXT("Tile %d / %d — building slab mesh"), TileIndex, NumTiles)));
 			TArray<FVector> WorldPts;
 			TArray<int32> SlabTris;
-			BuildSlabWorld(*Georeference, Tin.Vertices, Kept, HeightOff, Thickness, WorldPts, SlabTris);
+			BuildSlabWorld(*Georeference, UsedVerts, UsedTris, HeightOff, Thickness, WorldPts, SlabTris);
 			if (WorldPts.Num() < 3 || SlabTris.Num() < 3)
 			{
 				++Result.TilesSkipped;
@@ -800,7 +849,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	{
 		Result.Message = Result.bCancelled
 			? TEXT("Cancelled before any road tiles were spawned.")
-			: TEXT("No road StaticMeshActors were spawned. Outline points must sit on the mask, and Max Edge Meters must be wider than the road.");
+			: TEXT("No road StaticMeshActors were spawned. Outline points must sit on the mask.");
 		UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}

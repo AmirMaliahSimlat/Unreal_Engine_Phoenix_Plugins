@@ -1,4 +1,5 @@
 #include "RoadTriangulate.h"
+#include "RoadPlacerLog.h"
 
 namespace
 {
@@ -140,23 +141,42 @@ bool RoadTriangulate::BuildTin(
 		MinY = FMath::Min(MinY, P.Lat);
 		MaxY = FMath::Max(MaxY, P.Lat);
 	}
-	const double Dx = FMath::Max(MaxX - MinX, 1.0e-6);
-	const double Dy = FMath::Max(MaxY - MinY, 1.0e-6);
-	const FRoadSample Super0{ MinX - Dx * 10.0, MinY - Dy * 10.0, 0.0 };
-	const FRoadSample Super1{ MinX + Dx * 0.5, MaxY + Dy * 10.0, 0.0 };
-	const FRoadSample Super2{ MaxX + Dx * 10.0, MinY - Dy * 10.0, 0.0 };
+	const double OriginLon = 0.5 * (MinX + MaxX);
+	const double OriginLat = 0.5 * (MinY + MaxY);
+	const double MetersLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(OriginLat)), 0.05);
+	const double MetersLat = 110540.0;
+	auto ToXY = [&](double Lon, double Lat) -> FVector2D
+	{
+		return FVector2D((Lon - OriginLon) * MetersLon, (Lat - OriginLat) * MetersLat);
+	};
+
+	TArray<FVector2D> XYs;
+	XYs.Reserve(Pts.Num() + 3);
+	for (const FRoadSample& P : Pts)
+	{
+		XYs.Add(ToXY(P.Lon, P.Lat));
+	}
+
+	double MinMX = XYs[0].X, MaxMX = XYs[0].X, MinMY = XYs[0].Y, MaxMY = XYs[0].Y;
+	for (const FVector2D& P : XYs)
+	{
+		MinMX = FMath::Min(MinMX, P.X);
+		MaxMX = FMath::Max(MaxMX, P.X);
+		MinMY = FMath::Min(MinMY, P.Y);
+		MaxMY = FMath::Max(MaxMY, P.Y);
+	}
+	const double Dx = FMath::Max(MaxMX - MinMX, 1.0);
+	const double Dy = FMath::Max(MaxMY - MinMY, 1.0);
 	const int32 S0 = Pts.Num();
-	Pts.Add(Super0);
-	Pts.Add(Super1);
-	Pts.Add(Super2);
+	XYs.Add(FVector2D(MinMX - Dx * 10.0, MinMY - Dy * 10.0));
+	XYs.Add(FVector2D(MinMX + Dx * 0.5, MaxMY + Dy * 10.0));
+	XYs.Add(FVector2D(MaxMX + Dx * 10.0, MinMY - Dy * 10.0));
+	Pts.Add(FRoadSample{ OriginLon, OriginLat, 0.0 });
+	Pts.Add(FRoadSample{ OriginLon, OriginLat, 0.0 });
+	Pts.Add(FRoadSample{ OriginLon, OriginLat, 0.0 });
 
 	TArray<FTri> Tris;
 	Tris.Add(FTri{ S0, S0 + 1, S0 + 2 });
-
-	auto XY = [&](int32 I) -> FVector2D
-	{
-		return FVector2D(Pts[I].Lon, Pts[I].Lat);
-	};
 
 	auto Report = [&](float Fraction01, const TCHAR* Stage) -> bool
 	{
@@ -185,12 +205,12 @@ bool RoadTriangulate::BuildTin(
 				return false;
 			}
 		}
-		const FVector2D P(Pts[Pi].Lon, Pts[Pi].Lat);
+		const FVector2D P = XYs[Pi];
 		TArray<int32> Bad;
 		for (int32 T = 0; T < Tris.Num(); ++T)
 		{
 			const FTri& Tri = Tris[T];
-			if (CircumcircleContains(XY(Tri.A), XY(Tri.B), XY(Tri.C), P))
+			if (CircumcircleContains(XYs[Tri.A], XYs[Tri.B], XYs[Tri.C], P))
 			{
 				Bad.Add(T);
 			}
@@ -230,10 +250,13 @@ bool RoadTriangulate::BuildTin(
 		}
 	}
 
-	const double MaxEdge = FMath::Max(MaxEdgeMeters, 0.25);
+	const double MaxEdge = MaxEdgeMeters;
 	OutTin.Vertices = Pts;
 	OutTin.Vertices.SetNum(S0);
 	OutTin.Triangles.Reserve(Tris.Num() * 3);
+	int32 DroppedSuper = 0;
+	int32 DroppedLong = 0;
+	int32 DroppedOutside = 0;
 	const int32 FilterStride = FMath::Max(Tris.Num() / 25, 32);
 	for (int32 Ti = 0; Ti < Tris.Num(); ++Ti)
 	{
@@ -250,18 +273,22 @@ bool RoadTriangulate::BuildTin(
 		const FTri& Tri = Tris[Ti];
 		if (Tri.A >= S0 || Tri.B >= S0 || Tri.C >= S0)
 		{
+			++DroppedSuper;
 			continue;
 		}
 		const FRoadSample& A = Pts[Tri.A];
 		const FRoadSample& B = Pts[Tri.B];
 		const FRoadSample& C = Pts[Tri.C];
-		if (EdgeMeters(A, B) > MaxEdge || EdgeMeters(B, C) > MaxEdge || EdgeMeters(C, A) > MaxEdge)
+		if (MaxEdge > 0.0
+			&& (EdgeMeters(A, B) > MaxEdge || EdgeMeters(B, C) > MaxEdge || EdgeMeters(C, A) > MaxEdge))
 		{
+			++DroppedLong;
 			continue;
 		}
 		const FVector2D Centroid((A.Lon + B.Lon + C.Lon) / 3.0, (A.Lat + B.Lat + C.Lat) / 3.0);
 		if (!PointInMask(Centroid, Masks))
 		{
+			++DroppedOutside;
 			continue;
 		}
 		OutTin.Triangles.Add(Tri.A);
@@ -269,9 +296,20 @@ bool RoadTriangulate::BuildTin(
 		OutTin.Triangles.Add(Tri.C);
 	}
 
+	UE_LOG(
+		LogRoadPlacer,
+		Verbose,
+		TEXT("TIN: %d Delaunay tri(s), kept %d (dropped super=%d longEdge=%d outsideMask=%d, maxEdgeM=%.1f)."),
+		Tris.Num(),
+		OutTin.Triangles.Num() / 3,
+		DroppedSuper,
+		DroppedLong,
+		DroppedOutside,
+		MaxEdge);
+
 	if (OutTin.Triangles.Num() < 3)
 	{
-		OutError = TEXT("No triangles remained inside the road mask (try a larger Max Edge Meters).");
+		OutError = TEXT("No triangles remained inside the road mask.");
 		return false;
 	}
 	return true;

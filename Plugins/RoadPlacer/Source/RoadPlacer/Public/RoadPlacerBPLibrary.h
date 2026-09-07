@@ -55,8 +55,8 @@ public:
 	 * @param RoadMaterialPath Optional Unreal material. Empty = engine default material.
 	 * @param MeshContentFolder Content folder for saved road StaticMeshes.
 	 * @param TargetTileCount Geographic tile slots (one StaticMeshActor per non-empty tile).
-	 * @param MaxEdgeMeters Drop TIN triangles longer than this. Must be wider than the road
-	 *        (outline-to-outline) so curb-to-curb triangles stay. Too small leaves only the curb.
+	 * @param MaxEdgeMeters Optional longest-edge cap in meters. 0 = off (recommended).
+	 *        Values below 100 are ignored so leftover 3.5 / 40 m pins do not shred the pavement.
 	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.05 m).
 	 * @param ThicknessMeters Slab thickness. Top = Z+offset, bottom = Z+offset-thickness
 	 *        (default 0.10 m so the slab is 0.05 m above and 0.05 m into the DTM). 0 = thin surface.
@@ -72,7 +72,7 @@ public:
 			CPP_Default_RoadMaterialPath = "",
 			CPP_Default_MeshContentFolder = "/Game/RoadPlacer/Meshes",
 			CPP_Default_TargetTileCount = "64",
-			CPP_Default_MaxEdgeMeters = "40.0",
+			CPP_Default_MaxEdgeMeters = "0.0",
 			CPP_Default_HeightOffsetMeters = "0.05",
 			CPP_Default_ThicknessMeters = "0.10",
 			CPP_Default_MetersPerUv = "10.0",

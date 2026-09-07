@@ -24,8 +24,9 @@ namespace RoadTriangulate
 	double EdgeMeters(const FRoadSample& A, const FRoadSample& B);
 
 	/**
-	 * Delaunay TIN of Samples. Keeps triangles whose centroid is inside Masks
-	 * and whose longest edge is <= MaxEdgeMeters.
+	 * Delaunay TIN of Samples in local meters. Keeps triangles whose centroid is
+	 * inside Masks. MaxEdgeMeters <= 0 disables the length cap (required for
+	 * outline-only curb samples so curb-to-curb triangles are not deleted).
 	 * Progress(Fraction01, Stage) may be called during insert/clip; return false to cancel.
 	 */
 	bool BuildTin(
