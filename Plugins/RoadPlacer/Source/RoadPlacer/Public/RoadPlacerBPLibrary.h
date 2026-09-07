@@ -48,18 +48,19 @@ class ROADPLACER_API URoadPlacerBPLibrary : public UBlueprintFunctionLibrary
 public:
 	/**
 	 * @param MaskShapefilePath EPSG:4326 Polygon / PolygonZ road mask.
-	 * @param ElevationPointsPath EPSG:4326 Point / PointZ samples along the mask outline
-	 *        (not a filled interior grid). Z = ellipsoid meters. The TIN interpolates those
-	 *        curb heights across the pavement so the slab tilts with the ground around the road.
+	 * @param ElevationPointsPath EPSG:4326 Point / PointZ. Put outline samples plus only the
+	 *        extra interior points you want raised. Every point on/near the mask is used.
+	 *        Z = ellipsoid meters.
 	 * @param OptionalAltitudeFieldName DBF column that overrides geometry Z when set. Empty = use PointZ.
 	 * @param RoadMaterialPath Optional Unreal material. Empty = engine default material.
 	 * @param MeshContentFolder Content folder for saved road StaticMeshes.
 	 * @param TargetTileCount Geographic tile slots (one StaticMeshActor per non-empty tile).
 	 * @param MaxEdgeMeters Optional longest-edge cap in meters. 0 = off (recommended).
 	 *        Values below 100 are ignored so leftover 3.5 / 40 m pins do not shred the pavement.
-	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.05 m).
+	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.10 m).
 	 * @param ThicknessMeters Slab thickness. Top = Z+offset, bottom = Z+offset-thickness
-	 *        (default 0.10 m so the slab is 0.05 m above and 0.05 m into the DTM). 0 = thin surface.
+	 *        (default 0.20 m so the slab is 0.10 m above and 0.10 m into the DTM). 0 = thin surface.
+	 * @param SmoothShadingPasses 0 = faceted. 1 = averaged normals. 2+ = extra neighbor blur. Max 8.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
 	 */
@@ -73,8 +74,9 @@ public:
 			CPP_Default_MeshContentFolder = "/Game/RoadPlacer/Meshes",
 			CPP_Default_TargetTileCount = "64",
 			CPP_Default_MaxEdgeMeters = "0.0",
-			CPP_Default_HeightOffsetMeters = "0.05",
-			CPP_Default_ThicknessMeters = "0.10",
+			CPP_Default_HeightOffsetMeters = "0.10",
+			CPP_Default_ThicknessMeters = "0.20",
+			CPP_Default_SmoothShadingPasses = "2",
 			CPP_Default_MetersPerUv = "10.0",
 			CPP_Default_bEnableCollision = "true",
 			CPP_Default_ActorLabelPrefix = "Road",
@@ -90,6 +92,7 @@ public:
 		float MaxEdgeMeters,
 		float HeightOffsetMeters,
 		float ThicknessMeters,
+		int32 SmoothShadingPasses,
 		float MetersPerUv,
 		bool bEnableCollision,
 		const FString& ActorLabelPrefix,

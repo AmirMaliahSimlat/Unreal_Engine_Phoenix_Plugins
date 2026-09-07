@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 4,
-	"VersionName": "1.3.0",
+	"Version": 5,
+	"VersionName": "1.4.0",
 	"FriendlyName": "Road Placer",
 	"Description": "Editor tool that reads an EPSG:4326 road-mask polygon and outline PointZ elevations, triangulates a tilted road slab, and places tiled StaticMeshActors. Compiles for Unreal Engine 5.1 and 5.3.",
 	"Category": "Editor",

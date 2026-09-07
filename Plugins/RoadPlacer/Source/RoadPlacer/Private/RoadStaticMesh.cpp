@@ -92,6 +92,7 @@ namespace
 		const TArray<FVector>& Vertices,
 		const TArray<int32>& Triangles,
 		double MetersPerUv,
+		int32 SmoothShadingPasses,
 		FMeshDescription& MeshDescription,
 		FString& OutError)
 	{
@@ -142,13 +143,26 @@ namespace
 		MeshDescription.TriangulateMesh();
 		MeshDescription.ReverseAllPolygonFacing();
 
+		const int32 Passes = FMath::Clamp(SmoothShadingPasses, 0, 8);
+		const bool bSmooth = Passes > 0;
+
 		TEdgeAttributesRef<bool> Hard = Attributes.GetEdgeHardnesses();
 		for (const FEdgeID E : MeshDescription.Edges().GetElementIDs())
 		{
-			Hard[E] = false;
+			Hard[E] = !bSmooth;
 		}
 
 		TMap<FVertexID, FVector3f> Accum;
+		TMap<FVertexID, TArray<FVertexID>> Neighbors;
+		auto AddNeighbor = [&Neighbors](FVertexID A, FVertexID B)
+		{
+			if (A != B)
+			{
+				Neighbors.FindOrAdd(A).AddUnique(B);
+				Neighbors.FindOrAdd(B).AddUnique(A);
+			}
+		};
+
 		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
 		{
 			const TArrayView<const FVertexInstanceID> Corners = MeshDescription.GetTriangleVertexInstances(TriId);
@@ -168,10 +182,26 @@ namespace
 			{
 				N = FVector3f::UpVector;
 			}
+			if (!bSmooth)
+			{
+				Normals[Corners[0]] = N;
+				Normals[Corners[1]] = N;
+				Normals[Corners[2]] = N;
+				continue;
+			}
 			Accum.FindOrAdd(V0) += N;
 			Accum.FindOrAdd(V1) += N;
 			Accum.FindOrAdd(V2) += N;
+			AddNeighbor(V0, V1);
+			AddNeighbor(V1, V2);
+			AddNeighbor(V2, V0);
 		}
+
+		if (!bSmooth)
+		{
+			return;
+		}
+
 		for (TPair<FVertexID, FVector3f>& Pair : Accum)
 		{
 			Pair.Value = Pair.Value.GetSafeNormal();
@@ -180,6 +210,36 @@ namespace
 				Pair.Value = FVector3f::UpVector;
 			}
 		}
+
+		for (int32 Extra = 1; Extra < Passes; ++Extra)
+		{
+			TMap<FVertexID, FVector3f> Next;
+			Next.Reserve(Accum.Num());
+			for (const TPair<FVertexID, FVector3f>& Pair : Accum)
+			{
+				FVector3f Sum = Pair.Value;
+				int32 Count = 1;
+				if (const TArray<FVertexID>* Adj = Neighbors.Find(Pair.Key))
+				{
+					for (const FVertexID Neighbor : *Adj)
+					{
+						if (const FVector3f* NeighborN = Accum.Find(Neighbor))
+						{
+							Sum += *NeighborN;
+							++Count;
+						}
+					}
+				}
+				FVector3f Blurred = (Sum / static_cast<float>(Count)).GetSafeNormal();
+				if (Blurred.IsNearlyZero())
+				{
+					Blurred = FVector3f::UpVector;
+				}
+				Next.Add(Pair.Key, Blurred);
+			}
+			Accum = MoveTemp(Next);
+		}
+
 		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
 		{
 			const TArrayView<const FVertexInstanceID> Corners = MeshDescription.GetTriangleVertexInstances(TriId);
@@ -201,6 +261,7 @@ UStaticMesh* RoadStaticMesh::CreatePersistentStaticMesh(
 	const TArray<int32>& Triangles,
 	UMaterialInterface* Material,
 	double MetersPerUv,
+	int32 SmoothShadingPasses,
 	FString& OutError)
 {
 	OutError.Reset();
@@ -250,7 +311,7 @@ UStaticMesh* RoadStaticMesh::CreatePersistentStaticMesh(
 	}
 
 	FMeshDescription MeshDescription;
-	FillMeshDescription(LocalVertices, Triangles, MetersPerUv, MeshDescription, OutError);
+	FillMeshDescription(LocalVertices, Triangles, MetersPerUv, SmoothShadingPasses, MeshDescription, OutError);
 	if (!OutError.IsEmpty())
 	{
 		return nullptr;

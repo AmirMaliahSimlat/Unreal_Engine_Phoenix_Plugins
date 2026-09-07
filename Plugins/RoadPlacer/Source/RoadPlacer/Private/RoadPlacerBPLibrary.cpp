@@ -436,11 +436,11 @@ namespace
 			const int32 A = Dir.Key;
 			const int32 B = Dir.Value;
 			OutTriangles.Add(A);
+			OutTriangles.Add(B + N);
 			OutTriangles.Add(B);
-			OutTriangles.Add(B + N);
 			OutTriangles.Add(A);
-			OutTriangles.Add(B + N);
 			OutTriangles.Add(A + N);
+			OutTriangles.Add(B + N);
 		}
 	}
 
@@ -486,6 +486,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	float MaxEdgeMeters,
 	float HeightOffsetMeters,
 	float ThicknessMeters,
+	int32 SmoothShadingPasses,
 	float MetersPerUv,
 	bool bEnableCollision,
 	const FString& ActorLabelPrefix,
@@ -513,19 +514,22 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 	const double HeightOff = static_cast<double>(HeightOffsetMeters);
 	const double Thickness = FMath::Max(static_cast<double>(ThicknessMeters), 0.0);
+	constexpr int32 MaxSmoothShadingPasses = 8;
+	const int32 ShadingPasses = FMath::Clamp(SmoothShadingPasses, 0, MaxSmoothShadingPasses);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.1);
 
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place START =========="));
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f"),
+		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f smooth=%d"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
 		MaxEdge,
 		HeightOff,
-		Thickness);
+		Thickness,
+		ShadingPasses);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -645,7 +649,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("Using %d of %d outline elevation point(s) (mask has %d polygon(s)). Road tilt interpolates curb-to-curb."),
+		TEXT("Using %d of %d elevation point(s) (mask has %d polygon(s))."),
 		UsedPoints,
 		Points.Num(),
 		Masks.Num());
@@ -817,7 +821,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				6.0f,
 				FText::FromString(FString::Printf(TEXT("Tile %d / %d — saving mesh"), TileIndex, NumTiles)));
 			UStaticMesh* Mesh = RoadStaticMesh::CreatePersistentStaticMesh(
-				MeshFolder, MeshLabel, LocalPts, SlabTris, Material, UvMeters, MeshError);
+				MeshFolder, MeshLabel, LocalPts, SlabTris, Material, UvMeters, ShadingPasses, MeshError);
 			if (!Mesh)
 			{
 				++Result.TilesSkipped;
