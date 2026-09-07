@@ -1,8 +1,8 @@
 """
 Road Placer geometry clone (no Unreal).
 
-Mirrors CRS checks, outline-point keep rules, max-edge ignore, and
-centroid-in-mask TIN filtering from Road Placer 1.3.0.
+Mirrors CRS checks, outline-point keep rules, sagging-interior drop,
+max-edge ignore, and centroid-in-mask TIN filtering from Road Placer 1.5.0.
 
 Delaunay uses scipy/Qhull, not the plugin Bowyer-Watson. Use this to
 validate thresholds and keep/drop counts, not triangle identity.
@@ -20,8 +20,10 @@ from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 from .constants import (
+    INTERIOR_PROUD_METERS,
     MAX_EDGE_IGNORE_BELOW_METERS,
     METERS_PER_LAT_DEG,
+    OUTLINE_BAND_METERS,
     OUTLINE_SNAP_METERS,
     QUANTIZE_DEG,
     ZERO_Z_EPS,
@@ -30,6 +32,52 @@ from .constants import (
 
 def meters_per_lon_deg(lat_deg: float) -> float:
     return 111320.0 * max(math.cos(math.radians(lat_deg)), 0.05)
+
+
+def keep_proud_interior(
+    outline_lonlat: np.ndarray,
+    outline_z: np.ndarray,
+    interior_lonlat: np.ndarray,
+    interior_z: np.ndarray,
+    proud_m: float = INTERIOR_PROUD_METERS,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Keep interior samples at or above the interpolated curb plane + proud_m.
+
+    Mirrors DropSaggingInteriorSamples: inverse-distance of the 6 nearest
+    outline heights. Drops width-wise bowls (high-low-high); keeps crowns.
+    """
+    if interior_lonlat.shape[0] == 0:
+        empty_ll = interior_lonlat.reshape(0, 2) if interior_lonlat.ndim == 1 else interior_lonlat
+        empty_z = interior_z.reshape(0) if interior_z.ndim == 0 else interior_z
+        return empty_ll, empty_z, 0, 0
+    if outline_lonlat.shape[0] == 0:
+        n = int(interior_lonlat.shape[0])
+        return interior_lonlat, interior_z, n, 0
+
+    lat0 = float(np.mean(outline_lonlat[:, 1]))
+    mlon = meters_per_lon_deg(lat0)
+    origin = outline_lonlat[0]
+
+    def to_xy(ll: np.ndarray) -> np.ndarray:
+        xy = np.empty_like(ll)
+        xy[:, 0] = (ll[:, 0] - origin[0]) * mlon
+        xy[:, 1] = (ll[:, 1] - origin[1]) * METERS_PER_LAT_DEG
+        return xy
+
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(to_xy(outline_lonlat))
+    k = min(6, int(outline_lonlat.shape[0]))
+    dists, idx = tree.query(to_xy(interior_lonlat), k=k)
+    if k == 1:
+        dists = np.asarray(dists)[:, None]
+        idx = np.asarray(idx)[:, None]
+    weights = 1.0 / (np.square(dists) + 0.01)
+    curb_z = np.sum(weights * outline_z[idx], axis=1) / np.sum(weights, axis=1)
+    keep = interior_z + 1.0e-6 >= curb_z + proud_m
+    nkeep = int(np.count_nonzero(keep))
+    nskip = int(np.count_nonzero(~keep))
+    return interior_lonlat[keep], interior_z[keep], nkeep, nskip
 
 
 def effective_max_edge_meters(max_edge_meters: float) -> float:
@@ -79,6 +127,8 @@ class RoadLogicReport:
     points_unique: int = 0
     points_kept: int = 0
     points_strict_inside: int = 0
+    interior_kept: int = 0
+    interior_skipped: int = 0
     zero_z: int = 0
     z_min: float = 0.0
     z_max: float = 0.0
@@ -201,12 +251,14 @@ def simulate_road_tin(
     outline_snap_meters: float = OUTLINE_SNAP_METERS,
     include_mask_vertices: bool = True,
     apply_plugin_max_edge_clamp: bool = True,
+    interior_proud_meters: float = INTERIOR_PROUD_METERS,
 ) -> RoadLogicReport:
     """
     Replay keep-rules + TIN filters. Does not spawn meshes.
 
     apply_plugin_max_edge_clamp=True uses the 1.3.0 ignore-below-100 rule.
     Set False to see what a raw cap (e.g. 3.5 m) would do to the pavement.
+    interior_proud_meters mirrors InteriorProudMeters (0 = drop any sag).
     """
     report = RoadLogicReport(raw_max_edge_m=float(max_edge_meters))
     ok_mask, msg_mask = validate_shapefile_prj(mask_shp)
@@ -252,8 +304,8 @@ def simulate_road_tin(
     buf_deg = outline_snap_meters / min(mlon, METERS_PER_LAT_DEG)
     near = contains_xy(union.boundary.buffer(buf_deg), lonlat_u[:, 0], lonlat_u[:, 1])
     keep = inside | near
-    report.points_kept = int(keep.sum())
-    if report.points_kept < 3:
+    if int(keep.sum()) < 3:
+        report.points_kept = int(keep.sum())
         report.errors.append("Fewer than 3 outline samples on or near the mask.")
         return report
     if report.points_strict_inside / max(report.points_unique, 1) < 0.5:
@@ -264,6 +316,26 @@ def simulate_road_tin(
 
     kept_ll = lonlat_u[keep]
     kept_z = z_u[keep]
+    band_deg = OUTLINE_BAND_METERS / min(mlon, METERS_PER_LAT_DEG)
+    on_curb = contains_xy(union.boundary.buffer(band_deg), kept_ll[:, 0], kept_ll[:, 1])
+    inside_kept = contains_xy(union, kept_ll[:, 0], kept_ll[:, 1])
+    interior = inside_kept & ~on_curb
+    outline = ~interior
+    if np.any(interior) and np.any(outline):
+        i_ll, i_z, nkeep, nskip = keep_proud_interior(
+            kept_ll[outline],
+            kept_z[outline],
+            kept_ll[interior],
+            kept_z[interior],
+            proud_m=interior_proud_meters,
+        )
+        report.interior_kept = nkeep
+        report.interior_skipped = nskip
+        kept_ll = np.vstack([kept_ll[outline], i_ll]) if nkeep else kept_ll[outline]
+        kept_z = np.concatenate([kept_z[outline], i_z]) if nkeep else kept_z[outline]
+    elif np.any(interior):
+        report.interior_kept = int(np.count_nonzero(interior))
+    report.points_kept = int(len(kept_ll))
     if include_mask_vertices:
         mv = _mask_vertices_lonlat(polys)
         if len(mv):
@@ -340,7 +412,8 @@ def format_report(report: RoadLogicReport) -> str:
         f"mask polygons={report.mask_polygons} holes={report.mask_holes} "
         f"ring_verts={report.mask_ring_vertices} area={report.mask_area_m2/1e4:.2f} ha",
         f"points read={report.points_read:,} unique={report.points_unique:,} "
-        f"kept={report.points_kept:,} strict_inside={report.points_strict_inside:,}",
+        f"kept={report.points_kept:,} strict_inside={report.points_strict_inside:,} "
+        f"interior kept/skipped={report.interior_kept}/{report.interior_skipped}",
         f"Z min/median/max={report.z_min:.2f}/{report.z_median:.2f}/{report.z_max:.2f} "
         f"zero={report.zero_z}  nn_p50={report.nn_spacing_p50_m:.3f} m",
         f"TIN delaunay={report.delaunay_triangles:,} in_mask={report.in_mask_triangles:,} "

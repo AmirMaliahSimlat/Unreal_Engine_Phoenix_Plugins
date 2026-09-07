@@ -13,6 +13,7 @@ from shapely.geometry import Polygon
 from plugins_clones_tests.road_placer.clone import (
     effective_max_edge_meters,
     format_report,
+    keep_proud_interior,
     simulate_road_tin,
     validate_epsg4326_prj,
 )
@@ -141,3 +142,68 @@ def test_plugin_clamp_saves_8m_road(tmp_path: Path):
     assert report.effective_max_edge_m == 0.0
     assert report.coverage_of_mask > 0.85
     assert "shredded" not in format_report(report).lower() or report.ok
+
+
+def test_proud_interior_keeps_crown_drops_sag():
+    lon0, lat0 = -96.77, 39.075
+    left = np.array([_lonlat_offset(lon0, lat0, 0.0, y) for y in (0.0, 10.0, 20.0)])
+    right = np.array([_lonlat_offset(lon0, lat0, 8.0, y) for y in (0.0, 10.0, 20.0)])
+    outline = np.vstack([left, right])
+    outline_z = np.full(6, 350.0)
+    high = np.array([_lonlat_offset(lon0, lat0, 4.0, 10.0)])
+    low = np.array([_lonlat_offset(lon0, lat0, 4.0, 12.0)])
+    interior = np.vstack([high, low])
+    interior_z = np.array([350.40, 349.70])
+    kept_ll, kept_z, nkeep, nskip = keep_proud_interior(
+        outline, outline_z, interior, interior_z, proud_m=0.05
+    )
+    assert nkeep == 1 and nskip == 1
+    assert kept_ll.shape[0] == 1
+    assert kept_z[0] == pytest.approx(350.40)
+
+
+def test_proud_zero_keeps_flat_drops_bowl():
+    lon0, lat0 = -96.77, 39.075
+    outline = np.array(
+        [_lonlat_offset(lon0, lat0, x, y) for x in (0.0, 8.0) for y in (0.0, 10.0, 20.0)]
+    )
+    outline_z = np.full(6, 350.0)
+    interior = np.array(
+        [_lonlat_offset(lon0, lat0, 4.0, 10.0), _lonlat_offset(lon0, lat0, 4.0, 12.0)]
+    )
+    interior_z = np.array([350.0, 349.70])
+    _, kept_z, nkeep, nskip = keep_proud_interior(
+        outline, outline_z, interior, interior_z, proud_m=0.0
+    )
+    assert nkeep == 1 and nskip == 1
+    assert kept_z[0] == pytest.approx(350.0)
+
+
+def test_simulate_drops_centerline_bowl(tmp_path: Path):
+    mask, points = _stub_road(tmp_path)
+    lon0, lat0 = -96.77, 39.075
+    extra = []
+    extra_z = []
+    for x in (5.0, 15.0, 25.0, 35.0):
+        curb = 350.0 + 0.02 * x
+        extra.append(_lonlat_offset(lon0, lat0, x, 4.0))
+        extra_z.append(curb - 0.50)
+        extra.append(_lonlat_offset(lon0, lat0, x + 1.0, 4.0))
+        extra_z.append(curb + 0.40)
+    with shapefile.Reader(str(points)) as reader:
+        existing = [(s.points[0][0], s.points[0][1], s.z[0]) for s in reader.iterShapes()]
+    all_ll = np.asarray([(x, y) for x, y, _ in existing] + extra)
+    all_z = np.asarray([z for _, _, z in existing] + extra_z)
+    mixed = tmp_path / "points_bowl.shp"
+    _write_pointz_shp(mixed, all_ll, all_z, WGS84)
+    report = simulate_road_tin(
+        mask,
+        mixed,
+        max_edge_meters=0.0,
+        include_mask_vertices=False,
+        apply_plugin_max_edge_clamp=True,
+        interior_proud_meters=0.0,
+    )
+    assert report.interior_skipped >= 4
+    assert report.interior_kept >= 4
+    assert report.ok

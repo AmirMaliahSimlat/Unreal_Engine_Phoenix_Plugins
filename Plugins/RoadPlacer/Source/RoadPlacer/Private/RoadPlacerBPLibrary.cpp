@@ -365,6 +365,126 @@ namespace
 		}
 	};
 
+	void DropSaggingInteriorSamples(
+		TArray<FRoadSample>& Samples,
+		const FOutlineIndex& Outline,
+		const TArray<FRoadShapefileMask>& Masks,
+		double OutlineBandM,
+		double ProudM,
+		int32& OutKeptInterior,
+		int32& OutSkippedInterior)
+	{
+		OutKeptInterior = 0;
+		OutSkippedInterior = 0;
+		TArray<FRoadSample> OutlinePts;
+		TArray<FRoadSample> InteriorPts;
+		OutlinePts.Reserve(Samples.Num());
+		InteriorPts.Reserve(Samples.Num() / 4);
+		for (const FRoadSample& S : Samples)
+		{
+			const FVector2D LonLat(S.Lon, S.Lat);
+			const bool bOnCurb = Outline.IsNear(LonLat, OutlineBandM);
+			if (bOnCurb || !RoadTriangulate::PointInMask(LonLat, Masks))
+			{
+				OutlinePts.Add(S);
+			}
+			else
+			{
+				InteriorPts.Add(S);
+			}
+		}
+		if (InteriorPts.Num() == 0)
+		{
+			Samples = MoveTemp(OutlinePts);
+			return;
+		}
+		if (OutlinePts.Num() == 0)
+		{
+			OutKeptInterior = InteriorPts.Num();
+			return;
+		}
+
+		const double MidLat = OutlinePts[0].Lat;
+		const double MetersLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
+		const double CellDeg = 2.0 / FMath::Min(MetersLon, 110540.0);
+		TMap<uint64, TArray<int32>> Grid;
+		auto Pack = [](int32 X, int32 Y) -> uint64
+		{
+			return (static_cast<uint64>(static_cast<uint32>(X)) << 32) | static_cast<uint32>(Y);
+		};
+		for (int32 I = 0; I < OutlinePts.Num(); ++I)
+		{
+			const int32 CX = FMath::FloorToInt(OutlinePts[I].Lon / CellDeg);
+			const int32 CY = FMath::FloorToInt(OutlinePts[I].Lat / CellDeg);
+			Grid.FindOrAdd(Pack(CX, CY)).Add(I);
+		}
+
+		auto InterpolateCurbZ = [&](const FRoadSample& P) -> double
+		{
+			const int32 CX = FMath::FloorToInt(P.Lon / CellDeg);
+			const int32 CY = FMath::FloorToInt(P.Lat / CellDeg);
+			TArray<TPair<double, double>> Hits;
+			Hits.Reserve(16);
+			for (int32 R = 0; R <= 20 && Hits.Num() < 8; ++R)
+			{
+				for (int32 DY = -R; DY <= R; ++DY)
+				{
+					for (int32 DX = -R; DX <= R; ++DX)
+					{
+						if (R > 0 && FMath::Abs(DX) != R && FMath::Abs(DY) != R)
+						{
+							continue;
+						}
+						if (const TArray<int32>* Cell = Grid.Find(Pack(CX + DX, CY + DY)))
+						{
+							for (const int32 K : *Cell)
+							{
+								const FRoadSample& O = OutlinePts[K];
+								const double Dx = (P.Lon - O.Lon) * MetersLon;
+								const double Dy = (P.Lat - O.Lat) * 110540.0;
+								Hits.Add(TPair<double, double>(Dx * Dx + Dy * Dy, O.HeightM));
+							}
+						}
+					}
+				}
+			}
+			if (Hits.Num() == 0)
+			{
+				return OutlinePts[0].HeightM;
+			}
+			Hits.Sort([](const TPair<double, double>& A, const TPair<double, double>& B)
+			{
+				return A.Key < B.Key;
+			});
+			const int32 Use = FMath::Min(Hits.Num(), 6);
+			double Wsum = 0.0;
+			double Zsum = 0.0;
+			for (int32 I = 0; I < Use; ++I)
+			{
+				const double W = 1.0 / (Hits[I].Key + 0.01);
+				Wsum += W;
+				Zsum += W * Hits[I].Value;
+			}
+			return (Wsum > 0.0) ? (Zsum / Wsum) : Hits[0].Value;
+		};
+
+		TArray<FRoadSample> Kept = MoveTemp(OutlinePts);
+		for (const FRoadSample& P : InteriorPts)
+		{
+			const double CurbZ = InterpolateCurbZ(P);
+			if (P.HeightM + 1.0e-6 >= CurbZ + ProudM)
+			{
+				Kept.Add(P);
+				++OutKeptInterior;
+			}
+			else
+			{
+				++OutSkippedInterior;
+			}
+		}
+		Samples = MoveTemp(Kept);
+	}
+
 	uint64 UndirectedEdge(int32 A, int32 B)
 	{
 		const int32 Lo = FMath::Min(A, B);
@@ -486,6 +606,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	float MaxEdgeMeters,
 	float HeightOffsetMeters,
 	float ThicknessMeters,
+	float InteriorProudMeters,
 	int32 SmoothShadingPasses,
 	float MetersPerUv,
 	bool bEnableCollision,
@@ -514,6 +635,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 	const double HeightOff = static_cast<double>(HeightOffsetMeters);
 	const double Thickness = FMath::Max(static_cast<double>(ThicknessMeters), 0.0);
+	const double ProudM = FMath::Max(static_cast<double>(InteriorProudMeters), 0.0);
 	constexpr int32 MaxSmoothShadingPasses = 8;
 	const int32 ShadingPasses = FMath::Clamp(SmoothShadingPasses, 0, MaxSmoothShadingPasses);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.1);
@@ -522,13 +644,14 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f smooth=%d"),
+		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f proudM=%.3f smooth=%d"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
 		MaxEdge,
 		HeightOff,
 		Thickness,
+		ProudM,
 		ShadingPasses);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
@@ -630,6 +753,17 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		AllSamples.Add(S);
 	}
 
+	constexpr double OutlineBandM = 1.5;
+	DropSaggingInteriorSamples(
+		AllSamples, Outline, Masks, OutlineBandM, ProudM, Result.InteriorPointsKept, Result.InteriorPointsSkipped);
+	const int32 PointZAfterSag = AllSamples.Num();
+	UE_LOG(
+		LogRoadPlacer,
+		Display,
+		TEXT("Interior points: kept %d (at/above curb plane), skipped %d sagging (bowl) sample(s)."),
+		Result.InteriorPointsKept,
+		Result.InteriorPointsSkipped);
+
 	CollectMaskSamples(Masks, AllSamples);
 	FillMissingHeights(AllSamples);
 
@@ -649,10 +783,12 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("Using %d of %d elevation point(s) (mask has %d polygon(s))."),
-		UsedPoints,
+		TEXT("Using %d of %d elevation point(s) (mask has %d polygon(s); interior kept=%d skipped=%d)."),
+		PointZAfterSag,
 		Points.Num(),
-		Masks.Num());
+		Masks.Num(),
+		Result.InteriorPointsKept,
+		Result.InteriorPointsSkipped);
 
 	double MinLon = AllSamples[0].Lon, MaxLon = AllSamples[0].Lon;
 	double MinLat = AllSamples[0].Lat, MaxLat = AllSamples[0].Lat;
@@ -859,11 +995,12 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d road tile(s) (%d triangles) from %d mask polygon(s) and %d points. Elapsed: %.2fs."),
+		TEXT("Spawned %d road tile(s) (%d triangles) from %d mask polygon(s) and %d points; dropped %d sagging interior sample(s). Elapsed: %.2fs."),
 		Result.TilesSpawned,
 		Result.TrianglesBuilt,
 		Result.MaskPolygonsRead,
 		Result.ElevationPointsRead,
+		Result.InteriorPointsSkipped,
 		Result.ElapsedSeconds);
 	UE_LOG(LogRoadPlacer, Display, TEXT("%s"), *Result.Message);
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place END =========="));
