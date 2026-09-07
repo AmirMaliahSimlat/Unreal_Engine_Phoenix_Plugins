@@ -439,6 +439,10 @@ namespace
 						{
 							for (const int32 K : *Cell)
 							{
+								if (!OutlinePts.IsValidIndex(K))
+								{
+									continue;
+								}
 								const FRoadSample& O = OutlinePts[K];
 								const double Dx = (P.Lon - O.Lon) * MetersLon;
 								const double Dy = (P.Lat - O.Lat) * 110540.0;
@@ -468,7 +472,7 @@ namespace
 			return (Wsum > 0.0) ? (Zsum / Wsum) : Hits[0].Value;
 		};
 
-		TArray<FRoadSample> Kept = MoveTemp(OutlinePts);
+		TArray<FRoadSample> Kept = OutlinePts;
 		for (const FRoadSample& P : InteriorPts)
 		{
 			const double CurbZ = InterpolateCurbZ(P);
