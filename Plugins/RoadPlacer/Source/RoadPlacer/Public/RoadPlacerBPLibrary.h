@@ -27,12 +27,6 @@ struct FRoadPlaceResult
 	int32 TilesSkipped = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
-	int32 InteriorPointsKept = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
-	int32 InteriorPointsSkipped = 0;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
 	double ElapsedSeconds = 0.0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
@@ -43,7 +37,7 @@ struct FRoadPlaceResult
 };
 
 /**
- * Reads a road-mask polygon and PointZ elevations, builds a draped TIN, and
+ * Reads a road-mask polygon and outline PointZ elevations, builds a draped TIN, and
  * places tiled engine StaticMeshActors. Recreate this node after updating.
  */
 UCLASS()
@@ -54,9 +48,8 @@ class ROADPLACER_API URoadPlacerBPLibrary : public UBlueprintFunctionLibrary
 public:
 	/**
 	 * @param MaskShapefilePath EPSG:4326 Polygon / PolygonZ road mask.
-	 * @param ElevationPointsPath EPSG:4326 Point / PointZ. Outline samples plus optional
-	 *        interior/center points (same file). Z = ellipsoid meters. Interior points that sit
-	 *        below the curb-to-curb plane are ignored so the pavement cannot bowl (high-low-high).
+	 * @param ElevationPointsPath EPSG:4326 Point / PointZ curb/outline samples. Z = ellipsoid meters.
+	 *        Interior/center points are not used; flatten the DTM under the mask in QGIS instead.
 	 * @param OptionalAltitudeFieldName DBF column that overrides geometry Z when set. Empty = use PointZ.
 	 * @param RoadMaterialPath Optional Unreal material. Empty = engine default material.
 	 * @param MeshContentFolder Content folder for saved road StaticMeshes.
@@ -66,8 +59,6 @@ public:
 	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.10 m).
 	 * @param ThicknessMeters Slab thickness. Top = Z+offset, bottom = Z+offset-thickness
 	 *        (default 0.20 m so the slab is 0.10 m above and 0.10 m into the DTM). 0 = thin surface.
-	 * @param InteriorProudMeters Keep an interior point only if it is at least this far above the
-	 *        interpolated curb plane (default 0 = keep any crown, drop any sag).
 	 * @param SmoothShadingPasses 0 = faceted. 1 = averaged normals. 2+ = extra neighbor blur. Max 8.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
@@ -84,7 +75,6 @@ public:
 			CPP_Default_MaxEdgeMeters = "0.0",
 			CPP_Default_HeightOffsetMeters = "0.10",
 			CPP_Default_ThicknessMeters = "0.20",
-			CPP_Default_InteriorProudMeters = "0.0",
 			CPP_Default_SmoothShadingPasses = "2",
 			CPP_Default_MetersPerUv = "10.0",
 			CPP_Default_bEnableCollision = "true",
@@ -101,7 +91,6 @@ public:
 		float MaxEdgeMeters,
 		float HeightOffsetMeters,
 		float ThicknessMeters,
-		float InteriorProudMeters,
 		int32 SmoothShadingPasses,
 		float MetersPerUv,
 		bool bEnableCollision,

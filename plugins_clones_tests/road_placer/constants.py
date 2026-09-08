@@ -1,20 +1,17 @@
-"""Thresholds mirrored from Road Placer 1.5.0 C++. Keep in sync with the plugin."""
+"""Thresholds mirrored from Road Placer 1.6.0 C++. Keep in sync with the plugin."""
 
 # Plugins/RoadPlacer/Source/RoadPlacer/Private/RoadPlacerBPLibrary.cpp
 OUTLINE_SNAP_METERS = 15.0
-OUTLINE_BAND_METERS = 1.5
 MAX_EDGE_IGNORE_BELOW_METERS = 100.0
 TILE_PAD_MIN_METERS = 80.0
 QUANTIZE_DEG = 1.0e7
 METERS_PER_LAT_DEG = 110540.0
 ZERO_Z_EPS = 1.0e-9
-INTERIOR_PROUD_METERS = 0.0
 
 # Plugins/RoadPlacer/Source/RoadPlacer/Public/RoadPlacerBPLibrary.h
 DEFAULT_MAX_EDGE_METERS = 0.0
 DEFAULT_HEIGHT_OFFSET_METERS = 0.10
 DEFAULT_THICKNESS_METERS = 0.20
-DEFAULT_INTERIOR_PROUD_METERS = 0.0
 DEFAULT_TARGET_TILE_COUNT = 64
 DEFAULT_MAX_EDGE_OLD_SHRED = 3.5
 DEFAULT_SMOOTH_SHADING_PASSES = 2
