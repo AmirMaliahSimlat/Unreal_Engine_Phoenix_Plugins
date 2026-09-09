@@ -17,7 +17,7 @@ namespace RoadStaticMesh
 		const TArray<int32>& Triangles,
 		UMaterialInterface* Material,
 		double MetersPerUv,
-		int32 SmoothShadingPasses,
+		bool bSoftenEdges,
 		FString& OutError);
 
 	AStaticMeshActor* SpawnMeshActor(

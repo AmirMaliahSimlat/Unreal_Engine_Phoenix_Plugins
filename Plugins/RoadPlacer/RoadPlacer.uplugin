@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 7,
-	"VersionName": "1.6.0",
+	"Version": 8,
+	"VersionName": "1.7.0",
 	"FriendlyName": "Road Placer",
-	"Description": "Editor tool that reads an EPSG:4326 road-mask polygon and outline PointZ elevations, triangulates a draped road slab, and places tiled StaticMeshActors. Compiles for Unreal Engine 5.1 and 5.3.",
+	"Description": "Editor tool that reads an EPSG:4326 road-mask polygon and outline PointZ elevations, triangulates a draped road (top + sides, no underside), and places tiled StaticMeshActors. Compiles for Unreal Engine 5.1 and 5.3.",
 	"Category": "Editor",
 	"CreatedBy": "GeoSim Tools",
 	"CreatedByURL": "",

@@ -2,7 +2,7 @@
 Road Placer geometry clone (no Unreal).
 
 Mirrors CRS checks, outline-point keep rules, max-edge ignore, and
-centroid-in-mask TIN filtering from Road Placer 1.6.0.
+centroid-in-mask TIN filtering from Road Placer 1.7.0.
 
 Delaunay uses scipy/Qhull, not the plugin Bowyer-Watson. Use this to
 validate thresholds and keep/drop counts, not triangle identity.

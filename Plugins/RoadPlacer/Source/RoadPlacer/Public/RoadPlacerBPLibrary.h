@@ -57,9 +57,9 @@ public:
 	 * @param MaxEdgeMeters Optional longest-edge cap in meters. 0 = off (recommended).
 	 *        Values below 100 are ignored so leftover 3.5 / 40 m pins do not shred the pavement.
 	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.10 m).
-	 * @param ThicknessMeters Slab thickness. Top = Z+offset, bottom = Z+offset-thickness
-	 *        (default 0.20 m so the slab is 0.10 m above and 0.10 m into the DTM). 0 = thin surface.
-	 * @param SmoothShadingPasses 0 = faceted. 1 = averaged normals. 2+ = extra neighbor blur. Max 8.
+	 * @param ThicknessMeters Wall depth below the top. Top = Z+offset, wall foot = Z+offset-thickness
+	 *        (default 0.20 m). No underside cap. 0 = top surface only.
+	 * @param bSoftenEdges If true, shared vertices get averaged normals (soft edges). If false, faceted.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
 	 */
@@ -75,7 +75,7 @@ public:
 			CPP_Default_MaxEdgeMeters = "0.0",
 			CPP_Default_HeightOffsetMeters = "0.10",
 			CPP_Default_ThicknessMeters = "0.20",
-			CPP_Default_SmoothShadingPasses = "2",
+			CPP_Default_bSoftenEdges = "true",
 			CPP_Default_MetersPerUv = "10.0",
 			CPP_Default_bEnableCollision = "true",
 			CPP_Default_ActorLabelPrefix = "Road",
@@ -91,7 +91,7 @@ public:
 		float MaxEdgeMeters,
 		float HeightOffsetMeters,
 		float ThicknessMeters,
-		int32 SmoothShadingPasses,
+		bool bSoftenEdges,
 		float MetersPerUv,
 		bool bEnableCollision,
 		const FString& ActorLabelPrefix,

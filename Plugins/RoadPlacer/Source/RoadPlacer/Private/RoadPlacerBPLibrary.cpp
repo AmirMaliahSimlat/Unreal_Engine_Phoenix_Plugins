@@ -396,19 +396,6 @@ namespace
 			return;
 		}
 
-		for (const FRoadSample& S : Samples)
-		{
-			OutWorld.Add(RoadCesiumPlacement::LonLatHeightToUnreal(
-				Georeference, S.Lon, S.Lat, S.HeightM + TopOffsetM - ThicknessM));
-		}
-
-		for (int32 T = 0; T + 2 < TopTriangles.Num(); T += 3)
-		{
-			OutTriangles.Add(TopTriangles[T] + N);
-			OutTriangles.Add(TopTriangles[T + 2] + N);
-			OutTriangles.Add(TopTriangles[T + 1] + N);
-		}
-
 		TMap<uint64, int32> EdgeCount;
 		TMap<uint64, TPair<int32, int32>> EdgeDir;
 		for (int32 T = 0; T + 2 < TopTriangles.Num(); T += 3)
@@ -426,6 +413,21 @@ namespace
 				}
 			}
 		}
+
+		TArray<int32> BottomOf;
+		BottomOf.Init(INDEX_NONE, N);
+		auto EnsureBottom = [&](int32 I) -> int32
+		{
+			if (BottomOf[I] == INDEX_NONE)
+			{
+				const FRoadSample& S = Samples[I];
+				BottomOf[I] = OutWorld.Num();
+				OutWorld.Add(RoadCesiumPlacement::LonLatHeightToUnreal(
+					Georeference, S.Lon, S.Lat, S.HeightM + TopOffsetM - ThicknessM));
+			}
+			return BottomOf[I];
+		};
+
 		for (const TPair<uint64, int32>& Pair : EdgeCount)
 		{
 			if (Pair.Value != 1)
@@ -435,12 +437,14 @@ namespace
 			const TPair<int32, int32>& Dir = EdgeDir.FindChecked(Pair.Key);
 			const int32 A = Dir.Key;
 			const int32 B = Dir.Value;
+			const int32 ABot = EnsureBottom(A);
+			const int32 BBot = EnsureBottom(B);
 			OutTriangles.Add(A);
-			OutTriangles.Add(B + N);
+			OutTriangles.Add(BBot);
 			OutTriangles.Add(B);
 			OutTriangles.Add(A);
-			OutTriangles.Add(A + N);
-			OutTriangles.Add(B + N);
+			OutTriangles.Add(ABot);
+			OutTriangles.Add(BBot);
 		}
 	}
 
@@ -486,7 +490,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	float MaxEdgeMeters,
 	float HeightOffsetMeters,
 	float ThicknessMeters,
-	int32 SmoothShadingPasses,
+	bool bSoftenEdges,
 	float MetersPerUv,
 	bool bEnableCollision,
 	const FString& ActorLabelPrefix,
@@ -514,22 +518,20 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 	const double HeightOff = static_cast<double>(HeightOffsetMeters);
 	const double Thickness = FMath::Max(static_cast<double>(ThicknessMeters), 0.0);
-	constexpr int32 MaxSmoothShadingPasses = 8;
-	const int32 ShadingPasses = FMath::Clamp(SmoothShadingPasses, 0, MaxSmoothShadingPasses);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.1);
 
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place START =========="));
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f smooth=%d"),
+		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f soften=%s"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
 		MaxEdge,
 		HeightOff,
 		Thickness,
-		ShadingPasses);
+		bSoftenEdges ? TEXT("on") : TEXT("off"));
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -821,7 +823,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				6.0f,
 				FText::FromString(FString::Printf(TEXT("Tile %d / %d — saving mesh"), TileIndex, NumTiles)));
 			UStaticMesh* Mesh = RoadStaticMesh::CreatePersistentStaticMesh(
-				MeshFolder, MeshLabel, LocalPts, SlabTris, Material, UvMeters, ShadingPasses, MeshError);
+				MeshFolder, MeshLabel, LocalPts, SlabTris, Material, UvMeters, bSoftenEdges, MeshError);
 			if (!Mesh)
 			{
 				++Result.TilesSkipped;
