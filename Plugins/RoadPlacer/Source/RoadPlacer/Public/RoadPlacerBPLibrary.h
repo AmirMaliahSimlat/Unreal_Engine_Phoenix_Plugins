@@ -60,6 +60,9 @@ public:
 	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.10 m).
 	 * @param ThicknessMeters Wall depth below the top. Top = Z+offset, wall foot = Z+offset-thickness
 	 *        (default 0.20 m). No underside cap. 0 = top surface only.
+	 * @param AltitudeSampleMeters Along-curb spacing of Z control samples. 0 = use every PointZ
+	 *        height. E.g. 10 keeps XY at 1 m but takes altitude every ~10 m and cubically
+	 *        interpolates the points in between (smooths DTM bumps, keeps plan curves).
 	 * @param bSoftenEdges If true, shared vertices get averaged normals (soft edges). If false, faceted.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
@@ -76,6 +79,7 @@ public:
 			CPP_Default_MaxEdgeMeters = "0.0",
 			CPP_Default_HeightOffsetMeters = "0.10",
 			CPP_Default_ThicknessMeters = "0.20",
+			CPP_Default_AltitudeSampleMeters = "0.0",
 			CPP_Default_bSoftenEdges = "true",
 			CPP_Default_MetersPerUv = "10.0",
 			CPP_Default_bEnableCollision = "true",
@@ -92,6 +96,7 @@ public:
 		float MaxEdgeMeters,
 		float HeightOffsetMeters,
 		float ThicknessMeters,
+		float AltitudeSampleMeters,
 		bool bSoftenEdges,
 		float MetersPerUv,
 		bool bEnableCollision,

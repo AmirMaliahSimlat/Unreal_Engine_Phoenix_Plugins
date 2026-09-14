@@ -351,9 +351,13 @@ namespace
 		{
 			FVector2D A;
 			FVector2D B;
+			int32 RingIndex = 0;
+			double SA = 0.0;
+			double LenM = 0.0;
 		};
 
 		TArray<FEdge> Edges;
+		TArray<double> RingLength;
 		TMap<uint64, TArray<int32>> Cells;
 		double CellDeg = 0.00002;
 
@@ -369,12 +373,39 @@ namespace
 			{
 				return;
 			}
-			for (int32 I = 0; I < N; ++I)
+			int32 Count = N;
+			if (FMath::Abs(Ring[0].X - Ring[N - 1].X) < 1.0e-12
+				&& FMath::Abs(Ring[0].Y - Ring[N - 1].Y) < 1.0e-12)
+			{
+				Count = N - 1;
+			}
+			if (Count < 2)
+			{
+				return;
+			}
+
+			const int32 RingIndex = RingLength.Num();
+			double S = 0.0;
+			for (int32 I = 0; I < Count; ++I)
 			{
 				const FVector2D& A = Ring[I];
-				const FVector2D& B = Ring[(I + 1) % N];
+				const FVector2D& B = Ring[(I + 1) % Count];
+				const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(0.5 * (A.Y + B.Y))), 0.05);
+				const double Dx = (B.X - A.X) * MLon;
+				const double Dy = (B.Y - A.Y) * 110540.0;
+				const double LenM = FMath::Sqrt(Dx * Dx + Dy * Dy);
+				if (LenM < 1.0e-4)
+				{
+					continue;
+				}
 				const int32 EdgeIndex = Edges.Num();
-				Edges.Add({ A, B });
+				FEdge E;
+				E.A = A;
+				E.B = B;
+				E.RingIndex = RingIndex;
+				E.SA = S;
+				E.LenM = LenM;
+				Edges.Add(E);
 				const int32 MinX = FMath::FloorToInt(FMath::Min(A.X, B.X) / CellDeg);
 				const int32 MaxX = FMath::FloorToInt(FMath::Max(A.X, B.X) / CellDeg);
 				const int32 MinY = FMath::FloorToInt(FMath::Min(A.Y, B.Y) / CellDeg);
@@ -386,13 +417,16 @@ namespace
 						Cells.FindOrAdd(Pack(X, Y)).Add(EdgeIndex);
 					}
 				}
+				S += LenM;
 			}
+			RingLength.Add(S);
 		}
 
 		void Build(const TArray<FRoadShapefileMask>& Masks)
 		{
 			Edges.Reset();
 			Cells.Reset();
+			RingLength.Reset();
 			double SumLat = 0.0;
 			int32 Count = 0;
 			for (const FRoadShapefileMask& Mask : Masks)
@@ -417,20 +451,32 @@ namespace
 			}
 		}
 
-		double DistPointSegM(const FVector2D& P, const FVector2D& A, const FVector2D& B) const
+		void ProjectOnEdge(const FVector2D& P, const FEdge& E, double& OutDistM, double& OutS) const
 		{
 			const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(P.Y)), 0.05);
 			const double MLat = 110540.0;
-			const double Px = (P.X - A.X) * MLon;
-			const double Py = (P.Y - A.Y) * MLat;
-			const double Bx = (B.X - A.X) * MLon;
-			const double By = (B.Y - A.Y) * MLat;
+			const double Px = (P.X - E.A.X) * MLon;
+			const double Py = (P.Y - E.A.Y) * MLat;
+			const double Bx = (E.B.X - E.A.X) * MLon;
+			const double By = (E.B.Y - E.A.Y) * MLat;
 			const double LenSq = Bx * Bx + By * By;
 			double T = (LenSq > 1.0e-12) ? ((Px * Bx + Py * By) / LenSq) : 0.0;
 			T = FMath::Clamp(T, 0.0, 1.0);
 			const double Dx = Px - T * Bx;
 			const double Dy = Py - T * By;
-			return FMath::Sqrt(Dx * Dx + Dy * Dy);
+			OutDistM = FMath::Sqrt(Dx * Dx + Dy * Dy);
+			OutS = E.SA + T * E.LenM;
+		}
+
+		double DistPointSegM(const FVector2D& P, const FVector2D& A, const FVector2D& B) const
+		{
+			FEdge E;
+			E.A = A;
+			E.B = B;
+			double DistM = 0.0;
+			double DummyS = 0.0;
+			ProjectOnEdge(P, E, DistM, DummyS);
+			return DistM;
 		}
 
 		bool IsNear(const FVector2D& P, double TolM) const
@@ -454,6 +500,265 @@ namespace
 				}
 			}
 			return false;
+		}
+
+		bool Snap(const FVector2D& P, double MaxDistM, int32& OutRing, double& OutS, double& OutDist) const
+		{
+			OutRing = INDEX_NONE;
+			OutS = 0.0;
+			OutDist = TNumericLimits<double>::Max();
+			if (Edges.Num() == 0 || CellDeg <= 0.0)
+			{
+				return false;
+			}
+			const double CellM = CellDeg * FMath::Min(
+				111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(P.Y)), 0.05),
+				110540.0);
+			const int32 MaxR = FMath::Max(2, FMath::CeilToInt(MaxDistM / FMath::Max(CellM, 0.5)) + 2);
+			const int32 CX = FMath::FloorToInt(P.X / CellDeg);
+			const int32 CY = FMath::FloorToInt(P.Y / CellDeg);
+			bool bHit = false;
+			for (int32 R = 0; R <= MaxR; ++R)
+			{
+				for (int32 DY = -R; DY <= R; ++DY)
+				{
+					for (int32 DX = -R; DX <= R; ++DX)
+					{
+						if (R > 0 && FMath::Abs(DX) != R && FMath::Abs(DY) != R)
+						{
+							continue;
+						}
+						if (const TArray<int32>* Hits = Cells.Find(Pack(CX + DX, CY + DY)))
+						{
+							for (const int32 EdgeIndex : *Hits)
+							{
+								const FEdge& E = Edges[EdgeIndex];
+								double DistM = 0.0;
+								double SM = 0.0;
+								ProjectOnEdge(P, E, DistM, SM);
+								if (DistM < OutDist)
+								{
+									OutDist = DistM;
+									OutRing = E.RingIndex;
+									OutS = SM;
+									bHit = true;
+								}
+							}
+						}
+					}
+				}
+				if (bHit && static_cast<double>(R + 1) * CellM >= OutDist)
+				{
+					break;
+				}
+			}
+			return bHit && OutDist <= MaxDistM;
+		}
+
+		static double CatmullRom(double T, double P0, double P1, double P2, double P3)
+		{
+			const double T2 = T * T;
+			const double T3 = T2 * T;
+			return 0.5 * (
+				(2.0 * P1)
+				+ (-P0 + P2) * T
+				+ (2.0 * P0 - 5.0 * P1 + 4.0 * P2 - P3) * T2
+				+ (-P0 + 3.0 * P1 - 3.0 * P2 + P3) * T3);
+		}
+
+		void ResampleHeights(TArray<FRoadSample>& Samples, double SpacingM) const
+		{
+			if (SpacingM <= 1.0e-6 || Samples.Num() == 0 || RingLength.Num() == 0)
+			{
+				return;
+			}
+
+			struct FTagged
+			{
+				int32 SampleIndex = INDEX_NONE;
+				int32 RingIndex = INDEX_NONE;
+				double S = 0.0;
+			};
+			TArray<FTagged> Tagged;
+			Tagged.Reserve(Samples.Num());
+			constexpr double SnapMaxM = 20.0;
+			int32 Unsnapped = 0;
+			for (int32 I = 0; I < Samples.Num(); ++I)
+			{
+				int32 Ring = INDEX_NONE;
+				double S = 0.0;
+				double Dist = 0.0;
+				if (!Snap(FVector2D(Samples[I].Lon, Samples[I].Lat), SnapMaxM, Ring, S, Dist))
+				{
+					++Unsnapped;
+					continue;
+				}
+				FTagged T;
+				T.SampleIndex = I;
+				T.RingIndex = Ring;
+				T.S = S;
+				Tagged.Add(T);
+			}
+
+			TMap<int32, TArray<int32>> ByRing;
+			for (int32 I = 0; I < Tagged.Num(); ++I)
+			{
+				ByRing.FindOrAdd(Tagged[I].RingIndex).Add(I);
+			}
+
+			int32 AnchorsTotal = 0;
+			int32 RingsUsed = 0;
+			for (auto& Pair : ByRing)
+			{
+				TArray<int32>& Idx = Pair.Value;
+				Idx.Sort([&Tagged](const int32 A, const int32 B)
+				{
+					return Tagged[A].S < Tagged[B].S;
+				});
+
+				TArray<int32> Unique;
+				Unique.Reserve(Idx.Num());
+				for (const int32 I : Idx)
+				{
+					if (Unique.Num() == 0 || (Tagged[I].S - Tagged[Unique.Last()].S) > 0.05)
+					{
+						Unique.Add(I);
+					}
+				}
+				if (Unique.Num() == 0)
+				{
+					continue;
+				}
+
+				const double RingLen = RingLength.IsValidIndex(Pair.Key) ? RingLength[Pair.Key] : 0.0;
+				const bool bClosed = RingLen > 1.0;
+
+				TArray<int32> Anchors;
+				Anchors.Add(0);
+				double LastS = Tagged[Unique[0]].S;
+				for (int32 I = 1; I < Unique.Num(); ++I)
+				{
+					if ((Tagged[Unique[I]].S - LastS) >= SpacingM - 1.0e-6)
+					{
+						Anchors.Add(I);
+						LastS = Tagged[Unique[I]].S;
+					}
+				}
+				if (Anchors.Last() != Unique.Num() - 1)
+				{
+					const double WrapToFirst = bClosed
+						? (Tagged[Unique[0]].S + RingLen - Tagged[Unique.Last()].S)
+						: TNumericLimits<double>::Max();
+					if (!bClosed || WrapToFirst >= SpacingM * 0.5)
+					{
+						Anchors.Add(Unique.Num() - 1);
+					}
+				}
+
+				TArray<double> AS;
+				TArray<double> AZ;
+				AS.Reserve(Anchors.Num());
+				AZ.Reserve(Anchors.Num());
+				for (const int32 U : Anchors)
+				{
+					AS.Add(Tagged[Unique[U]].S);
+					AZ.Add(Samples[Tagged[Unique[U]].SampleIndex].HeightM);
+				}
+				AnchorsTotal += AS.Num();
+				++RingsUsed;
+
+				auto EvalZ = [&](double SQuery) -> double
+				{
+					const int32 N = AZ.Num();
+					if (N == 1)
+					{
+						return AZ[0];
+					}
+					if (N == 2)
+					{
+						if (!bClosed)
+						{
+							const double Den = FMath::Max(AS[1] - AS[0], 1.0e-9);
+							const double T = FMath::Clamp((SQuery - AS[0]) / Den, 0.0, 1.0);
+							return AZ[0] + T * (AZ[1] - AZ[0]);
+						}
+						const double Fwd = FMath::Max(AS[1] - AS[0], 1.0e-9);
+						if (SQuery + 1.0e-9 >= AS[0] && SQuery <= AS[1] + 1.0e-9)
+						{
+							const double T = FMath::Clamp((SQuery - AS[0]) / Fwd, 0.0, 1.0);
+							return AZ[0] + T * (AZ[1] - AZ[0]);
+						}
+						const double Back = FMath::Max(RingLen - (AS[1] - AS[0]), 1.0e-9);
+						const double Q = (SQuery + 1.0e-9 < AS[0]) ? (SQuery + RingLen) : SQuery;
+						const double T = FMath::Clamp((Q - AS[1]) / Back, 0.0, 1.0);
+						return AZ[1] + T * (AZ[0] - AZ[1]);
+					}
+
+					int32 Seg = 0;
+					double T = 0.0;
+					bool bFound = false;
+					for (int32 I = 0; I < N; ++I)
+					{
+						const double A = AS[I];
+						const double B = (I + 1 < N) ? AS[I + 1] : (bClosed ? (AS[0] + RingLen) : AS[N - 1]);
+						if (!bClosed && I + 1 >= N)
+						{
+							break;
+						}
+						double QAdj = SQuery;
+						if (bClosed && I + 1 >= N && SQuery + 1.0e-9 < AS[0])
+						{
+							QAdj = SQuery + RingLen;
+						}
+						if (QAdj + 1.0e-9 >= A && QAdj <= B + 1.0e-9)
+						{
+							Seg = I;
+							T = FMath::Clamp((QAdj - A) / FMath::Max(B - A, 1.0e-9), 0.0, 1.0);
+							bFound = true;
+							break;
+						}
+					}
+					if (!bFound)
+					{
+						if (!bClosed)
+						{
+							return (SQuery <= AS[0]) ? AZ[0] : AZ[N - 1];
+						}
+						return AZ[0];
+					}
+
+					double P0, P1, P2, P3;
+					if (bClosed)
+					{
+						P0 = AZ[(Seg - 1 + N) % N];
+						P1 = AZ[Seg];
+						P2 = AZ[(Seg + 1) % N];
+						P3 = AZ[(Seg + 2) % N];
+					}
+					else
+					{
+						P1 = AZ[Seg];
+						P2 = AZ[FMath::Min(Seg + 1, N - 1)];
+						P0 = (Seg > 0) ? AZ[Seg - 1] : P1;
+						P3 = (Seg + 2 < N) ? AZ[Seg + 2] : P2;
+					}
+					return CatmullRom(T, P0, P1, P2, P3);
+				};
+
+				for (const int32 I : Idx)
+				{
+					Samples[Tagged[I].SampleIndex].HeightM = EvalZ(Tagged[I].S);
+				}
+			}
+
+			UE_LOG(
+				LogRoadPlacer,
+				Display,
+				TEXT("Altitude resample: spacing=%.1fm rings=%d anchors=%d unsnapped=%d (kept original Z)."),
+				SpacingM,
+				RingsUsed,
+				AnchorsTotal,
+				Unsnapped);
 		}
 	};
 
@@ -581,9 +886,10 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	int32 TargetTileCount,
 	float MaxEdgeMeters,
 	float HeightOffsetMeters,
-	float ThicknessMeters,
-	bool bSoftenEdges,
-	float MetersPerUv,
+		float ThicknessMeters,
+		float AltitudeSampleMeters,
+		bool bSoftenEdges,
+		float MetersPerUv,
 	bool bEnableCollision,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath)
@@ -610,19 +916,21 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 	const double HeightOff = static_cast<double>(HeightOffsetMeters);
 	const double Thickness = FMath::Max(static_cast<double>(ThicknessMeters), 0.0);
+	const double AltSample = FMath::Max(static_cast<double>(AltitudeSampleMeters), 0.0);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.1);
 
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place START =========="));
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f soften=%s"),
+		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
 		MaxEdge,
 		HeightOff,
 		Thickness,
+		AltSample,
 		bSoftenEdges ? TEXT("on") : TEXT("off"));
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
@@ -722,6 +1030,11 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			++ZeroZ;
 		}
 		AllSamples.Add(S);
+	}
+
+	if (AltSample > 1.0e-6)
+	{
+		Outline.ResampleHeights(AllSamples, AltSample);
 	}
 
 	CollectMaskSamples(Masks, AllSamples);

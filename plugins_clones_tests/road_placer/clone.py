@@ -1,8 +1,9 @@
 """
 Road Placer geometry clone (no Unreal).
 
-Mirrors CRS checks, outline-point keep rules, max-edge ignore, and
-centroid-in-mask TIN filtering from Road Placer 1.8.0.
+Mirrors CRS checks, outline-point keep rules, max-edge ignore,
+along-curb altitude resampling, and centroid-in-mask TIN filtering
+from Road Placer 1.9.0.
 
 Delaunay uses scipy/Qhull, not the plugin Bowyer-Watson. Use this to
 validate thresholds and keep/drop counts, not triangle identity.
@@ -20,6 +21,7 @@ from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 from .constants import (
+    ALTITUDE_SNAP_METERS,
     MAX_EDGE_IGNORE_BELOW_METERS,
     METERS_PER_LAT_DEG,
     OUTLINE_SNAP_METERS,
@@ -187,6 +189,212 @@ def _edge_len_m(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     dx = (a[:, 0] - b[:, 0]) * mlon
     dy = (a[:, 1] - b[:, 1]) * METERS_PER_LAT_DEG
     return np.hypot(dx, dy)
+
+
+def catmull_rom(t: float, p0: float, p1: float, p2: float, p3: float) -> float:
+    t2 = t * t
+    t3 = t2 * t
+    return 0.5 * (
+        (2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    )
+
+
+def pick_chainage_anchors(s: np.ndarray, spacing_m: float, *, closed: bool, ring_length: float) -> np.ndarray:
+    """Indices of Z control samples ~every spacing_m along sorted chainage."""
+    n = int(len(s))
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    anchors = [0]
+    last_s = float(s[0])
+    for i in range(1, n):
+        if float(s[i]) - last_s >= spacing_m - 1.0e-6:
+            anchors.append(i)
+            last_s = float(s[i])
+    if anchors[-1] != n - 1:
+        wrap = (float(s[0]) + ring_length - float(s[-1])) if closed else math.inf
+        if (not closed) or wrap >= spacing_m * 0.5:
+            anchors.append(n - 1)
+    return np.asarray(anchors, dtype=np.int64)
+
+
+def eval_altitude_at_s(
+    s_query: float,
+    anchor_s: np.ndarray,
+    anchor_z: np.ndarray,
+    *,
+    closed: bool,
+    ring_length: float,
+) -> float:
+    n = int(len(anchor_z))
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return float(anchor_z[0])
+    if n == 2:
+        if not closed:
+            den = max(float(anchor_s[1] - anchor_s[0]), 1.0e-9)
+            t = min(max((s_query - float(anchor_s[0])) / den, 0.0), 1.0)
+            return float(anchor_z[0] + t * (anchor_z[1] - anchor_z[0]))
+        fwd = max(float(anchor_s[1] - anchor_s[0]), 1.0e-9)
+        if s_query + 1.0e-9 >= float(anchor_s[0]) and s_query <= float(anchor_s[1]) + 1.0e-9:
+            t = min(max((s_query - float(anchor_s[0])) / fwd, 0.0), 1.0)
+            return float(anchor_z[0] + t * (anchor_z[1] - anchor_z[0]))
+        back = max(ring_length - float(anchor_s[1] - anchor_s[0]), 1.0e-9)
+        q = s_query + ring_length if s_query + 1.0e-9 < float(anchor_s[0]) else s_query
+        t = min(max((q - float(anchor_s[1])) / back, 0.0), 1.0)
+        return float(anchor_z[1] + t * (anchor_z[0] - anchor_z[1]))
+
+    seg = 0
+    t = 0.0
+    found = False
+    for i in range(n):
+        a = float(anchor_s[i])
+        b = float(anchor_s[i + 1]) if i + 1 < n else (float(anchor_s[0]) + ring_length if closed else float(anchor_s[-1]))
+        if (not closed) and i + 1 >= n:
+            break
+        q_adj = s_query
+        if closed and i + 1 >= n and s_query + 1.0e-9 < float(anchor_s[0]):
+            q_adj = s_query + ring_length
+        if q_adj + 1.0e-9 >= a and q_adj <= b + 1.0e-9:
+            seg = i
+            t = min(max((q_adj - a) / max(b - a, 1.0e-9), 0.0), 1.0)
+            found = True
+            break
+    if not found:
+        if not closed:
+            return float(anchor_z[0] if s_query <= float(anchor_s[0]) else anchor_z[-1])
+        return float(anchor_z[0])
+
+    if closed:
+        p0 = float(anchor_z[(seg - 1) % n])
+        p1 = float(anchor_z[seg])
+        p2 = float(anchor_z[(seg + 1) % n])
+        p3 = float(anchor_z[(seg + 2) % n])
+    else:
+        p1 = float(anchor_z[seg])
+        p2 = float(anchor_z[min(seg + 1, n - 1)])
+        p0 = float(anchor_z[seg - 1]) if seg > 0 else p1
+        p3 = float(anchor_z[seg + 2]) if seg + 2 < n else p2
+    return catmull_rom(t, p0, p1, p2, p3)
+
+
+def resample_altitude_along_chainage(
+    s: np.ndarray,
+    z: np.ndarray,
+    spacing_m: float,
+    *,
+    closed: bool = False,
+    ring_length: float | None = None,
+) -> np.ndarray:
+    """Keep XY chainage; take Z every spacing_m and cubically fill the rest."""
+    if spacing_m <= 1.0e-6 or len(s) == 0:
+        return np.asarray(z, dtype=np.float64).copy()
+    order = np.argsort(s, kind="stable")
+    s_sorted = np.asarray(s, dtype=np.float64)[order]
+    z_sorted = np.asarray(z, dtype=np.float64)[order]
+    unique = [0]
+    for i in range(1, len(s_sorted)):
+        if s_sorted[i] - s_sorted[unique[-1]] > 0.05:
+            unique.append(i)
+    su = s_sorted[unique]
+    zu = z_sorted[unique]
+    length = float(ring_length) if ring_length is not None else (float(su[-1] - su[0]) if len(su) else 0.0)
+    if closed and length <= 1.0:
+        length = float(su[-1] - su[0]) + 1.0
+    anchors = pick_chainage_anchors(su, spacing_m, closed=closed, ring_length=length)
+    out = np.asarray(z, dtype=np.float64).copy()
+    for i, si in enumerate(s_sorted):
+        out[order[i]] = eval_altitude_at_s(
+            float(si),
+            su[anchors],
+            zu[anchors],
+            closed=closed,
+            ring_length=length,
+        )
+    return out
+
+
+def _project_point_to_ring(
+    lon: float,
+    lat: float,
+    ring_lonlat: np.ndarray,
+) -> tuple[float, float, float]:
+    """Return (dist_m, chainage_s, ring_length)."""
+    pts = np.asarray(ring_lonlat, dtype=np.float64)
+    if len(pts) >= 2 and np.allclose(pts[0], pts[-1], atol=1.0e-12):
+        pts = pts[:-1]
+    n = len(pts)
+    if n < 2:
+        return math.inf, 0.0, 0.0
+    best_d = math.inf
+    best_s = 0.0
+    s_acc = 0.0
+    for i in range(n):
+        a = pts[i]
+        b = pts[(i + 1) % n]
+        mlon = meters_per_lon_deg(0.5 * (a[1] + b[1]))
+        bx = (b[0] - a[0]) * mlon
+        by = (b[1] - a[1]) * METERS_PER_LAT_DEG
+        len_m = math.hypot(bx, by)
+        if len_m < 1.0e-4:
+            continue
+        px = (lon - a[0]) * mlon
+        py = (lat - a[1]) * METERS_PER_LAT_DEG
+        t = (px * bx + py * by) / (len_m * len_m)
+        t = min(max(t, 0.0), 1.0)
+        dx = px - t * bx
+        dy = py - t * by
+        dist = math.hypot(dx, dy)
+        if dist < best_d:
+            best_d = dist
+            best_s = s_acc + t * len_m
+        s_acc += len_m
+    return best_d, best_s, s_acc
+
+
+def resample_altitude_along_rings(
+    lonlat: np.ndarray,
+    heights: np.ndarray,
+    rings: list[np.ndarray],
+    spacing_m: float,
+    snap_max_m: float = ALTITUDE_SNAP_METERS,
+) -> np.ndarray:
+    """Snap samples to mask rings, then resample Z along each curb separately."""
+    out = np.asarray(heights, dtype=np.float64).copy()
+    if spacing_m <= 1.0e-6 or len(lonlat) == 0 or not rings:
+        return out
+    grouped: dict[int, list[int]] = {}
+    chainage: dict[int, float] = {}
+    lengths: dict[int, float] = {}
+    for i, (lon, lat) in enumerate(np.asarray(lonlat, dtype=np.float64)):
+        best_d = math.inf
+        best_ring = -1
+        best_s = 0.0
+        best_len = 0.0
+        for ri, ring in enumerate(rings):
+            dist, s, length = _project_point_to_ring(float(lon), float(lat), ring)
+            if dist < best_d:
+                best_d = dist
+                best_ring = ri
+                best_s = s
+                best_len = length
+        if best_ring < 0 or best_d > snap_max_m:
+            continue
+        grouped.setdefault(best_ring, []).append(i)
+        chainage[i] = best_s
+        lengths[best_ring] = best_len
+    for ri, idxs in grouped.items():
+        s = np.asarray([chainage[i] for i in idxs], dtype=np.float64)
+        z = out[np.asarray(idxs, dtype=np.int64)]
+        closed = lengths.get(ri, 0.0) > 1.0
+        z_new = resample_altitude_along_chainage(
+            s, z, spacing_m, closed=closed, ring_length=lengths.get(ri, 0.0)
+        )
+        out[np.asarray(idxs, dtype=np.int64)] = z_new
+    return out
 
 
 def _area_m2(polys: list[Polygon], lat0: float) -> float:
