@@ -123,6 +123,62 @@ namespace
 		}
 	}
 
+	struct FRoadLonLatRect
+	{
+		double MinLon = 0.0;
+		double MaxLon = 0.0;
+		double MinLat = 0.0;
+		double MaxLat = 0.0;
+		bool bValid = false;
+
+		bool Contains(double Lon, double Lat) const
+		{
+			return !bValid
+				|| (Lon >= MinLon && Lon <= MaxLon && Lat >= MinLat && Lat <= MaxLat);
+		}
+	};
+
+	bool MaskLonLatBounds(
+		const TArray<FRoadShapefileMask>& Masks,
+		double& MinLon,
+		double& MaxLon,
+		double& MinLat,
+		double& MaxLat)
+	{
+		bool bAny = false;
+		auto Acc = [&](const FVector2D& P)
+		{
+			if (!bAny)
+			{
+				MinLon = MaxLon = P.X;
+				MinLat = MaxLat = P.Y;
+				bAny = true;
+			}
+			else
+			{
+				MinLon = FMath::Min(MinLon, P.X);
+				MaxLon = FMath::Max(MaxLon, P.X);
+				MinLat = FMath::Min(MinLat, P.Y);
+				MaxLat = FMath::Max(MaxLat, P.Y);
+			}
+		};
+		for (const FRoadShapefileMask& Mask : Masks)
+		{
+			for (const FVector2D& P : Mask.Outer.LonLat)
+			{
+				Acc(P);
+			}
+			for (const FRoadShapefileRing& Hole : Mask.Holes)
+			{
+				for (const FVector2D& P : Hole.LonLat)
+				{
+					Acc(P);
+				}
+			}
+		}
+		return bAny;
+	}
+
 	void ChooseSquareTileGrid(
 		double MinLon,
 		double MaxLon,
@@ -162,7 +218,10 @@ namespace
 		OutTilesY = BestY;
 	}
 
-	void CollectMaskSamples(const TArray<FRoadShapefileMask>& Masks, TArray<FRoadSample>& Out)
+	void CollectMaskSamples(
+		const TArray<FRoadShapefileMask>& Masks,
+		TArray<FRoadSample>& Out,
+		const FRoadLonLatRect& ClipBounds)
 	{
 		const int32 Existing = Out.Num();
 		if (Existing == 0 && Masks.Num() == 0)
@@ -220,6 +279,10 @@ namespace
 
 		auto Consider = [&](const FVector2D& LonLat, double HeightM)
 		{
+			if (!ClipBounds.Contains(LonLat.X, LonLat.Y))
+			{
+				return;
+			}
 			if (TooClose(LonLat.X, LonLat.Y))
 			{
 				return;
@@ -1269,8 +1332,9 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		return Result;
 	}
 
+	constexpr int32 SampleProgressChunks = 50;
 	FScopedSlowTask LoadTask(
-		4.0f,
+		3.0f + static_cast<float>(SampleProgressChunks) + 3.0f,
 		NSLOCTEXT("RoadPlacer", "LoadProgress", "Loading road shapefiles..."));
 	LoadTask.MakeDialog(true);
 
@@ -1312,21 +1376,119 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	Outline.Build(Masks);
 	constexpr double OutlineSnapM = 15.0;
 
-	LoadTask.EnterProgressFrame(1.0f, NSLOCTEXT("RoadPlacer", "PickSamples", "Selecting outline elevation samples..."));
+	// Freeze the tile grid from the mask before filtering samples. A one-tile run
+	// must not recompute the grid from the remaining points or indices shift.
+	double MinLon = 0.0, MaxLon = 0.0, MinLat = 0.0, MaxLat = 0.0;
+	if (!MaskLonLatBounds(Masks, MinLon, MaxLon, MinLat, MaxLat))
+	{
+		Result.Message = TEXT("Road mask has no vertices.");
+		UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *Result.Message);
+		return Result;
+	}
+	{
+		const double SnapMidLat = 0.5 * (MinLat + MaxLat);
+		const double SnapLon = OutlineSnapM
+			/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(SnapMidLat)), 1.0);
+		const double SnapLat = OutlineSnapM / 110540.0;
+		MinLon -= SnapLon;
+		MaxLon += SnapLon;
+		MinLat -= SnapLat;
+		MaxLat += SnapLat;
+	}
+
+	int32 TilesX = 1, TilesY = 1;
+	ChooseSquareTileGrid(MinLon, MaxLon, MinLat, MaxLat, TargetTileCount, TilesX, TilesY);
+	const double LonSpan = FMath::Max(MaxLon - MinLon, 1.0e-9);
+	const double LatSpan = FMath::Max(MaxLat - MinLat, 1.0e-9);
+	const double MidLat = 0.5 * (MinLat + MaxLat);
+	const double PadM = FMath::Max(MaxEdge, 80.0);
+	const double PadLon = PadM / FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
+	const double PadLat = PadM / 110540.0;
+	const int32 NumTiles = TilesX * TilesY;
+	const bool bOneTile = OnlyTileIndex > 0;
+	int32 WantedTile = 0;
+	FRoadLonLatRect SampleClip;
+	if (bOneTile)
+	{
+		WantedTile = FMath::Clamp(OnlyTileIndex, 1, NumTiles);
+		if (OnlyTileIndex != WantedTile)
+		{
+			UE_LOG(
+				LogRoadPlacer,
+				Warning,
+				TEXT("Only Tile Index %d is outside 1-%d; using %d."),
+				OnlyTileIndex,
+				NumTiles,
+				WantedTile);
+		}
+		const int32 WantedTX = (WantedTile - 1) % TilesX;
+		const int32 WantedTY = (WantedTile - 1) / TilesX;
+		SampleClip.MinLon = MinLon + LonSpan * (static_cast<double>(WantedTX) / TilesX) - PadLon;
+		SampleClip.MaxLon = MinLon + LonSpan * (static_cast<double>(WantedTX + 1) / TilesX) + PadLon;
+		SampleClip.MinLat = MinLat + LatSpan * (static_cast<double>(WantedTY) / TilesY) - PadLat;
+		SampleClip.MaxLat = MinLat + LatSpan * (static_cast<double>(WantedTY + 1) / TilesY) + PadLat;
+		SampleClip.bValid = true;
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Only Tile Index %d of %d (grid %dx%d, TY then TX, cell %d,%d). Other tiles are skipped."),
+			WantedTile,
+			NumTiles,
+			TilesX,
+			TilesY,
+			WantedTX,
+			WantedTY);
+	}
+	else
+	{
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Tile grid %dx%d from mask bounds (Target Tile Count %d)."),
+			TilesX,
+			TilesY,
+			TargetTileCount);
+	}
+
 	TArray<FRoadSample> AllSamples;
-	AllSamples.Reserve(Points.Num() + 256);
+	AllSamples.Reserve(bOneTile ? 8192 : Points.Num() + 256);
 	int32 ZeroZ = 0;
 	int32 UsedPoints = 0;
-	const int32 PointStride = FMath::Max(Points.Num() / 40, 1024);
+	int32 SkippedOutsideTile = 0;
+	int32 SampleChunksEntered = 0;
+	const int32 SampleChunkSize = FMath::Max((Points.Num() + SampleProgressChunks - 1) / SampleProgressChunks, 1);
+	int32 NextSampleChunkAt = 0;
 	for (int32 Pi = 0; Pi < Points.Num(); ++Pi)
 	{
-		if ((Pi % PointStride) == 0 && LoadTask.ShouldCancel())
+		if (Pi >= NextSampleChunkAt && SampleChunksEntered < SampleProgressChunks)
+		{
+			LoadTask.EnterProgressFrame(
+				1.0f,
+				FText::FromString(FString::Printf(
+					TEXT("Selecting outline elevation samples (%d / %d)..."),
+					Pi,
+					Points.Num())));
+			++SampleChunksEntered;
+			NextSampleChunkAt += SampleChunkSize;
+			if (LoadTask.ShouldCancel())
+			{
+				Result.bCancelled = true;
+				Result.Message = TEXT("Cancelled while selecting elevation samples.");
+				return Result;
+			}
+		}
+		if ((Pi & 8191) == 0 && LoadTask.ShouldCancel())
 		{
 			Result.bCancelled = true;
 			Result.Message = TEXT("Cancelled while selecting elevation samples.");
 			return Result;
 		}
 		const FRoadShapefilePoint& P = Points[Pi];
+		if (!SampleClip.Contains(P.LonDeg, P.LatDeg))
+		{
+			++SkippedOutsideTile;
+			continue;
+		}
 		const FVector2D LonLat(P.LonDeg, P.LatDeg);
 		// Outline PointZ often sits on the ring and fails a strict point-in-polygon test.
 		if (!Outline.IsNear(LonLat, OutlineSnapM) && !RoadTriangulate::PointInMask(LonLat, Masks))
@@ -1344,15 +1506,50 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		}
 		AllSamples.Add(S);
 	}
+	if (SampleChunksEntered < SampleProgressChunks)
+	{
+		LoadTask.EnterProgressFrame(
+			static_cast<float>(SampleProgressChunks - SampleChunksEntered),
+			NSLOCTEXT("RoadPlacer", "PickSamplesDone", "Selecting outline elevation samples..."));
+	}
 
 	LogSampleHeights(TEXT("PointZ"), AllSamples);
+	LoadTask.EnterProgressFrame(
+		1.0f,
+		AltSample > 1.0e-6
+			? NSLOCTEXT("RoadPlacer", "ResampleAlt", "Resampling altitude along curb walks...")
+			: NSLOCTEXT("RoadPlacer", "SkipResampleAlt", "Keeping every PointZ height..."));
+	if (LoadTask.ShouldCancel())
+	{
+		Result.bCancelled = true;
+		Result.Message = TEXT("Cancelled while resampling altitude.");
+		return Result;
+	}
 	if (AltSample > 1.0e-6)
 	{
 		ResampleAltitudeAlongChains(AllSamples, AltSample);
 		LogSampleHeights(TEXT("After altitude resample"), AllSamples);
 	}
 
-	CollectMaskSamples(Masks, AllSamples);
+	LoadTask.EnterProgressFrame(
+		1.0f,
+		NSLOCTEXT("RoadPlacer", "MaskSamples", "Adding mask ring samples..."));
+	if (LoadTask.ShouldCancel())
+	{
+		Result.bCancelled = true;
+		Result.Message = TEXT("Cancelled while adding mask ring samples.");
+		return Result;
+	}
+	CollectMaskSamples(Masks, AllSamples, SampleClip);
+	LoadTask.EnterProgressFrame(
+		1.0f,
+		NSLOCTEXT("RoadPlacer", "FillHeights", "Filling missing sample heights..."));
+	if (LoadTask.ShouldCancel())
+	{
+		Result.bCancelled = true;
+		Result.Message = TEXT("Cancelled while filling sample heights.");
+		return Result;
+	}
 	FillMissingHeights(AllSamples);
 	LogSampleHeights(TEXT("After mask fill"), AllSamples);
 
@@ -1369,64 +1566,34 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			Warning,
 			TEXT("Every PointZ height is 0. Drape the points in QGIS from the DTM before placing roads."));
 	}
-	UE_LOG(
-		LogRoadPlacer,
-		Display,
-		TEXT("Using %d of %d elevation point(s) (mask has %d polygon(s))."),
-		UsedPoints,
-		Points.Num(),
-		Masks.Num());
-
-	double MinLon = AllSamples[0].Lon, MaxLon = AllSamples[0].Lon;
-	double MinLat = AllSamples[0].Lat, MaxLat = AllSamples[0].Lat;
-	for (const FRoadSample& S : AllSamples)
+	if (bOneTile)
 	{
-		MinLon = FMath::Min(MinLon, S.Lon);
-		MaxLon = FMath::Max(MaxLon, S.Lon);
-		MinLat = FMath::Min(MinLat, S.Lat);
-		MaxLat = FMath::Max(MaxLat, S.Lat);
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Using %d of %d elevation point(s); skipped %d outside tile %d pad (mask has %d polygon(s))."),
+			UsedPoints,
+			Points.Num(),
+			SkippedOutsideTile,
+			WantedTile,
+			Masks.Num());
 	}
-
-	int32 TilesX = 1, TilesY = 1;
-	ChooseSquareTileGrid(MinLon, MaxLon, MinLat, MaxLat, TargetTileCount, TilesX, TilesY);
-	const double LonSpan = FMath::Max(MaxLon - MinLon, 1.0e-9);
-	const double LatSpan = FMath::Max(MaxLat - MinLat, 1.0e-9);
-	const double MidLat = 0.5 * (MinLat + MaxLat);
-	const double PadM = FMath::Max(MaxEdge, 80.0);
-	const double PadLon = PadM / FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
-	const double PadLat = PadM / 110540.0;
+	else
+	{
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Using %d of %d elevation point(s) (mask has %d polygon(s))."),
+			UsedPoints,
+			Points.Num(),
+			Masks.Num());
+	}
 
 	RemovePrevious(*World);
 	UMaterialInterface* Material = LoadMaterial(RoadMaterialPath);
 	if (!Material)
 	{
 		UE_LOG(LogRoadPlacer, Warning, TEXT("Road material did not load; meshes will use an empty slot."));
-	}
-
-	const int32 NumTiles = TilesX * TilesY;
-	const bool bOneTile = OnlyTileIndex > 0;
-	int32 WantedTile = 0;
-	if (bOneTile)
-	{
-		WantedTile = FMath::Clamp(OnlyTileIndex, 1, NumTiles);
-		if (OnlyTileIndex != WantedTile)
-		{
-			UE_LOG(
-				LogRoadPlacer,
-				Warning,
-				TEXT("Only Tile Index %d is outside 1-%d; using %d."),
-				OnlyTileIndex,
-				NumTiles,
-				WantedTile);
-		}
-		UE_LOG(
-			LogRoadPlacer,
-			Display,
-			TEXT("Only Tile Index %d of %d (grid %dx%d, TY then TX). Other tiles are skipped."),
-			WantedTile,
-			NumTiles,
-			TilesX,
-			TilesY);
 	}
 
 	FScopedSlowTask SlowTask(
