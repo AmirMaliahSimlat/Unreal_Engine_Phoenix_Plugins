@@ -72,9 +72,9 @@ public:
 	 * @param bSoftenEdges If true, shared vertices get averaged normals (soft edges). If false, faceted.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
-	 * @param bClipGroundUnderRoads If true, hide Cesium imagery and DTM inside the road mask
-	 *        (same cartographic raster overlay as Water Placer). Increase Thickness so the slab
-	 *        walls fill the gap down to the remaining ground at the curb.
+	 * @param bClipGroundUnderRoads If true, hide Cesium imagery and DTM under the road mask
+	 *        polygons only (not courtyards enclosed by a loop of roads). Same cartographic
+	 *        raster overlay as Water Placer. Increase Thickness so slab walls fill the curb gap.
 	 * @param OnlyTileIndex 1-based tile to generate (same numbering as the Output Log).
 	 *        0 = all tiles. With Target Tile Count 64, use 1..64 for a single test tile.
 	 */

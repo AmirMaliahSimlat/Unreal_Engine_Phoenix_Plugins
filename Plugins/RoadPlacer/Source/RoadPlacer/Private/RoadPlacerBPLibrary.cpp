@@ -7,6 +7,7 @@
 #include "RoadStaticMesh.h"
 #include "RoadTriangulate.h"
 
+#include "Algo/Reverse.h"
 #include "Cesium3DTileset.h"
 #include "CesiumCartographicPolygon.h"
 #include "CesiumGeoreference.h"
@@ -136,6 +137,17 @@ namespace
 		{
 			return !bValid
 				|| (Lon >= MinLon && Lon <= MaxLon && Lat >= MinLat && Lat <= MaxLat);
+		}
+
+		bool Overlaps(
+			double OtherMinLon,
+			double OtherMaxLon,
+			double OtherMinLat,
+			double OtherMaxLat) const
+		{
+			return !bValid
+				|| !(OtherMaxLon < MinLon || OtherMinLon > MaxLon
+					|| OtherMaxLat < MinLat || OtherMinLat > MaxLat);
 		}
 	};
 
@@ -501,11 +513,17 @@ namespace
 
 		bool IsNear(const FVector2D& P, double TolM) const
 		{
+			if (Edges.Num() == 0)
+			{
+				return false;
+			}
 			const int32 CX = FMath::FloorToInt(P.X / CellDeg);
 			const int32 CY = FMath::FloorToInt(P.Y / CellDeg);
-			for (int32 DY = -2; DY <= 2; ++DY)
+			// Cells are ~2 m. Search far enough to honor TolM (default 15 m).
+			const int32 CellR = FMath::Clamp(FMath::CeilToInt(TolM / 2.0) + 1, 2, 16);
+			for (int32 DY = -CellR; DY <= CellR; ++DY)
 			{
-				for (int32 DX = -2; DX <= 2; ++DX)
+				for (int32 DX = -CellR; DX <= CellR; ++DX)
 				{
 					if (const TArray<int32>* Hits = Cells.Find(Pack(CX + DX, CY + DY)))
 					{
@@ -970,7 +988,7 @@ namespace
 	void InflateLonLatRing(TArray<FVector2D>& Ring, double MetersOut)
 	{
 		const int32 N = Ring.Num();
-		if (N < 3 || MetersOut <= 1.0e-6)
+		if (N < 3 || FMath::Abs(MetersOut) <= 1.0e-6)
 		{
 			return;
 		}
@@ -1018,111 +1036,181 @@ namespace
 		Ring = MoveTemp(Out);
 	}
 
-	void ExtractBoundaryRings(
-		const TArray<FRoadSample>& Verts,
-		const TArray<int32>& Tris,
-		TArray<TArray<FVector2D>>& OutRings)
+	double ClipRingArea2(const TArray<FVector2D>& Ring)
 	{
-		OutRings.Reset();
-		const int32 N = Verts.Num();
-		if (N < 3 || Tris.Num() < 3)
+		double Area2 = 0.0;
+		const int32 N = Ring.Num();
+		for (int32 I = 0; I < N; ++I)
+		{
+			const FVector2D& A = Ring[I];
+			const FVector2D& B = Ring[(I + 1) % N];
+			Area2 += A.X * B.Y - B.X * A.Y;
+		}
+		return Area2;
+	}
+
+	void EnsureClipWinding(TArray<FVector2D>& Ring, bool bCCW)
+	{
+		if (Ring.Num() < 3)
 		{
 			return;
 		}
-
-		TMap<uint64, int32> EdgeCount;
-		TMap<uint64, TPair<int32, int32>> EdgeDir;
-		for (int32 T = 0; T + 2 < Tris.Num(); T += 3)
+		const bool bIsCCW = ClipRingArea2(Ring) >= 0.0;
+		if (bIsCCW != bCCW)
 		{
-			const int32 I[3] = { Tris[T], Tris[T + 1], Tris[T + 2] };
-			for (int32 E = 0; E < 3; ++E)
+			Algo::Reverse(Ring);
+		}
+	}
+
+	void StripClosedDuplicate(TArray<FVector2D>& Ring)
+	{
+		if (Ring.Num() >= 2 && Ring[0].Equals(Ring.Last(), DuplicateEpsDeg))
+		{
+			Ring.Pop();
+		}
+	}
+
+	bool ClipRingOverlapsKeep(
+		const TArray<FVector2D>& Ring,
+		const FRoadLonLatRect& KeepBounds)
+	{
+		if (!KeepBounds.bValid)
+		{
+			return true;
+		}
+		if (Ring.Num() == 0)
+		{
+			return false;
+		}
+		double RMinLon = Ring[0].X, RMaxLon = Ring[0].X;
+		double RMinLat = Ring[0].Y, RMaxLat = Ring[0].Y;
+		for (int32 I = 1; I < Ring.Num(); ++I)
+		{
+			RMinLon = FMath::Min(RMinLon, Ring[I].X);
+			RMaxLon = FMath::Max(RMaxLon, Ring[I].X);
+			RMinLat = FMath::Min(RMinLat, Ring[I].Y);
+			RMaxLat = FMath::Max(RMaxLat, Ring[I].Y);
+		}
+		return KeepBounds.Overlaps(RMinLon, RMaxLon, RMinLat, RMaxLat);
+	}
+
+	TArray<FVector2D> BridgeJoinOuterAndHole(
+		const TArray<FVector2D>& Outer,
+		const TArray<FVector2D>& Hole)
+	{
+		TArray<FVector2D> Out;
+		if (Outer.Num() < 3 || Hole.Num() < 3)
+		{
+			return Out;
+		}
+		int32 BestO = 0;
+		int32 BestH = 0;
+		double BestD = TNumericLimits<double>::Max();
+		for (int32 O = 0; O < Outer.Num(); ++O)
+		{
+			for (int32 H = 0; H < Hole.Num(); ++H)
 			{
-				const int32 A = I[E];
-				const int32 B = I[(E + 1) % 3];
-				if (!Verts.IsValidIndex(A) || !Verts.IsValidIndex(B))
+				const double Dx = Outer[O].X - Hole[H].X;
+				const double Dy = Outer[O].Y - Hole[H].Y;
+				const double D = Dx * Dx + Dy * Dy;
+				if (D < BestD)
 				{
-					continue;
-				}
-				const uint64 Key = UndirectedEdge(A, B);
-				++EdgeCount.FindOrAdd(Key);
-				if (!EdgeDir.Contains(Key))
-				{
-					EdgeDir.Add(Key, TPair<int32, int32>(A, B));
+					BestD = D;
+					BestO = O;
+					BestH = H;
 				}
 			}
 		}
-
-		TArray<TArray<int32>> Nbr;
-		Nbr.SetNum(N);
-		TSet<uint64> Unused;
-		for (const TPair<uint64, int32>& Pair : EdgeCount)
+		Out.Reserve(Outer.Num() + Hole.Num() + 3);
+		for (int32 I = 0; I <= BestO; ++I)
 		{
-			if (Pair.Value != 1)
+			Out.Add(Outer[I]);
+		}
+		const int32 HN = Hole.Num();
+		for (int32 K = 0; K < HN; ++K)
+		{
+			Out.Add(Hole[(BestH + K) % HN]);
+		}
+		Out.Add(Hole[BestH]);
+		Out.Add(Outer[BestO]);
+		for (int32 I = BestO + 1; I < Outer.Num(); ++I)
+		{
+			Out.Add(Outer[I]);
+		}
+		return Out;
+	}
+
+	void CollectMaskClipRings(
+		const TArray<FRoadShapefileMask>& Masks,
+		const FRoadLonLatRect& KeepBounds,
+		TArray<TArray<FVector2D>>& OutRings)
+	{
+		OutRings.Reset();
+		int32 Used = 0;
+		int32 SkippedBounds = 0;
+		int32 WithHoles = 0;
+		for (const FRoadShapefileMask& Mask : Masks)
+		{
+			if (!ClipRingOverlapsKeep(Mask.Outer.LonLat, KeepBounds))
+			{
+				++SkippedBounds;
+				continue;
+			}
+			TArray<FVector2D> Outer = Mask.Outer.LonLat;
+			StripClosedDuplicate(Outer);
+			if (Outer.Num() < 3)
 			{
 				continue;
 			}
-			const TPair<int32, int32>& Dir = EdgeDir.FindChecked(Pair.Key);
-			Nbr[Dir.Key].Add(Dir.Value);
-			Nbr[Dir.Value].Add(Dir.Key);
-			Unused.Add(Pair.Key);
-		}
-
-		auto PopUnusedNbr = [&](int32 Cur, int32 Prev) -> int32
-		{
-			int32 Best = INDEX_NONE;
-			for (const int32 J : Nbr[Cur])
+			EnsureClipWinding(Outer, true);
 			{
-				if (J == Prev)
+				TArray<FVector2D> Decimated;
+				DecimateClipRing(Outer, Decimated);
+				Outer = MoveTemp(Decimated);
+			}
+			InflateLonLatRing(Outer, ClipInflateMeters);
+			if (Mask.Holes.Num() == 0)
+			{
+				if (Outer.Num() >= 3)
+				{
+					OutRings.Add(MoveTemp(Outer));
+					++Used;
+				}
+				continue;
+			}
+			++WithHoles;
+			TArray<FVector2D> Combined = MoveTemp(Outer);
+			for (const FRoadShapefileRing& HoleRing : Mask.Holes)
+			{
+				TArray<FVector2D> Hole = HoleRing.LonLat;
+				StripClosedDuplicate(Hole);
+				if (Hole.Num() < 3)
 				{
 					continue;
 				}
-				const uint64 Key = UndirectedEdge(Cur, J);
-				if (Unused.Contains(Key))
+				EnsureClipWinding(Hole, false);
 				{
-					return J;
+					TArray<FVector2D> Decimated;
+					DecimateClipRing(Hole, Decimated);
+					Hole = MoveTemp(Decimated);
 				}
-				if (Best == INDEX_NONE)
-				{
-					Best = J;
-				}
+				InflateLonLatRing(Hole, -ClipInflateMeters);
+				EnsureClipWinding(Hole, false);
+				Combined = BridgeJoinOuterAndHole(Combined, Hole);
 			}
-			return Best;
-		};
-
-		TArray<uint8> VertUsed;
-		VertUsed.Init(0, N);
-		for (int32 Start = 0; Start < N; ++Start)
-		{
-			if (VertUsed[Start] || Nbr[Start].Num() == 0)
+			if (Combined.Num() >= 3)
 			{
-				continue;
-			}
-			int32 Cur = Start;
-			int32 Prev = INDEX_NONE;
-			TArray<FVector2D> Ring;
-			Ring.Reserve(64);
-			for (int32 Guard = 0; Guard < N + 2; ++Guard)
-			{
-				VertUsed[Cur] = 1;
-				Ring.Add(FVector2D(Verts[Cur].Lon, Verts[Cur].Lat));
-				const int32 Next = PopUnusedNbr(Cur, Prev);
-				if (Next == INDEX_NONE)
-				{
-					break;
-				}
-				Unused.Remove(UndirectedEdge(Cur, Next));
-				if (Next == Start)
-				{
-					break;
-				}
-				Prev = Cur;
-				Cur = Next;
-			}
-			if (Ring.Num() >= 3)
-			{
-				OutRings.Add(MoveTemp(Ring));
+				OutRings.Add(MoveTemp(Combined));
+				++Used;
 			}
 		}
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Clip rings from mask: %d polygon(s) (%d with holes), skipped %d outside tile bounds."),
+			Used,
+			WithHoles,
+			SkippedBounds);
 	}
 
 	void ApplyWorldClosedSpline(USplineComponent& Spline, const TArray<FVector>& WorldPoints)
@@ -1415,6 +1503,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	int32 ZeroZ = 0;
 	int32 UsedPoints = 0;
 	int32 SkippedOutsideTile = 0;
+	int32 SkippedNotOnMask = 0;
 	int32 SampleChunksEntered = 0;
 	const int32 SampleChunkSize = FMath::Max((Points.Num() + SampleProgressChunks - 1) / SampleProgressChunks, 1);
 	int32 NextSampleChunkAt = 0;
@@ -1453,6 +1542,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		// Outline PointZ often sits on the ring and fails a strict point-in-polygon test.
 		if (!Outline.IsNear(LonLat, OutlineSnapM) && !RoadTriangulate::PointInMask(LonLat, Masks))
 		{
+			++SkippedNotOnMask;
 			continue;
 		}
 		FRoadSample S;
@@ -1542,9 +1632,52 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			TEXT("Using outline PointZ only (no mask ring samples, no height fill)."));
 	}
 
+	if (bOneTile)
+	{
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Using %d of %d elevation point(s); skipped %d outside tile %d pad, %d not on/near mask (mask has %d polygon(s))."),
+			UsedPoints,
+			Points.Num(),
+			SkippedOutsideTile,
+			WantedTile,
+			SkippedNotOnMask,
+			Masks.Num());
+	}
+	else
+	{
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Using %d of %d elevation point(s); %d not on/near mask (mask has %d polygon(s))."),
+			UsedPoints,
+			Points.Num(),
+			SkippedNotOnMask,
+			Masks.Num());
+	}
+
 	if (AllSamples.Num() < 3)
 	{
-		Result.Message = TEXT("Fewer than 3 outline elevation samples sit on or near the road mask.");
+		if (bOneTile)
+		{
+			Result.Message = FString::Printf(
+				TEXT("Only Tile Index %d has %d PointZ on/near the mask (need >= 3). Read %d, skipped %d outside this tile pad, %d not on/near the mask. Try another tile index, or 0 for all tiles."),
+				WantedTile,
+				UsedPoints,
+				Points.Num(),
+				SkippedOutsideTile,
+				SkippedNotOnMask);
+		}
+		else
+		{
+			Result.Message = FString::Printf(
+				TEXT("Only %d of %d PointZ sit on or near the road mask (need >= 3). %d were not within %.0f m of the mask outline."),
+				UsedPoints,
+				Points.Num(),
+				SkippedNotOnMask,
+				OutlineSnapM);
+		}
 		UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}
@@ -1554,28 +1687,6 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			LogRoadPlacer,
 			Warning,
 			TEXT("Every PointZ height is 0. Drape the points in QGIS from the DTM before placing roads."));
-	}
-	if (bOneTile)
-	{
-		UE_LOG(
-			LogRoadPlacer,
-			Display,
-			TEXT("Using %d of %d elevation point(s); skipped %d outside tile %d pad (mask has %d polygon(s))."),
-			UsedPoints,
-			Points.Num(),
-			SkippedOutsideTile,
-			WantedTile,
-			Masks.Num());
-	}
-	else
-	{
-		UE_LOG(
-			LogRoadPlacer,
-			Display,
-			TEXT("Using %d of %d elevation point(s) (mask has %d polygon(s))."),
-			UsedPoints,
-			Points.Num(),
-			Masks.Num());
 	}
 
 	RemovePrevious(*World);
@@ -1592,7 +1703,6 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 
 	int32 TileIndex = 0;
 	bool bStopTiles = false;
-	TArray<TArray<FVector2D>> PendingClipRings;
 	for (int32 TY = 0; TY < TilesY && !bStopTiles; ++TY)
 	{
 		for (int32 TX = 0; TX < TilesX; ++TX)
@@ -1742,22 +1852,6 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			TArray<int32> UsedTris;
 			CompactUsedSamples(Tin.Vertices, Kept, UsedVerts, UsedTris);
 
-			if (bClipGroundUnderRoads)
-			{
-				TArray<TArray<FVector2D>> TileRings;
-				ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
-				for (TArray<FVector2D>& Ring : TileRings)
-				{
-					TArray<FVector2D> Decimated;
-					DecimateClipRing(Ring, Decimated);
-					InflateLonLatRing(Decimated, ClipInflateMeters);
-					if (Decimated.Num() >= 3)
-					{
-						PendingClipRings.Add(MoveTemp(Decimated));
-					}
-				}
-			}
-
 			TileTask.EnterProgressFrame(
 				6.0f,
 				FText::FromString(FString::Printf(TEXT("Tile %d / %d - building slab mesh"), TileIndex, NumTiles)));
@@ -1819,8 +1913,11 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		}
 	}
 
-	if (bClipGroundUnderRoads && !Result.bCancelled)
+	if (bClipGroundUnderRoads && !Result.bCancelled && Result.TilesSpawned > 0)
 	{
+		TArray<TArray<FVector2D>> PendingClipRings;
+		CollectMaskClipRings(Masks, SampleClip, PendingClipRings);
+
 		TArray<ACesium3DTileset*> Tilesets;
 		for (TActorIterator<ACesium3DTileset> It(World); It; ++It)
 		{
