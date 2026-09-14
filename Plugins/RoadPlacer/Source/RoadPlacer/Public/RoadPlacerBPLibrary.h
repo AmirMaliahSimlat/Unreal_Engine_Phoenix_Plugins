@@ -75,9 +75,8 @@ public:
 	 * @param bClipGroundUnderRoads If true, hide Cesium imagery and DTM inside the road mask
 	 *        (same cartographic raster overlay as Water Placer). Increase Thickness so the slab
 	 *        walls fill the gap down to the remaining ground at the curb.
-	 * @param FirstTileIndex 1-based tile index (same numbering as the Output Log). 1 = first slot.
-	 * @param MaxTilesToPlace How many non-empty tiles to triangulate from FirstTileIndex.
-	 *        0 = all remaining. 1 = first tile that actually has road samples (fast test).
+	 * @param OnlyTileIndex 1-based tile to generate (same numbering as the Output Log).
+	 *        0 = all tiles. With Target Tile Count 64, use 1..64 for a single test tile.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -98,8 +97,7 @@ public:
 			CPP_Default_ActorLabelPrefix = "Road",
 			CPP_Default_EditorFolderPath = "PlacedRoads",
 			CPP_Default_bClipGroundUnderRoads = "false",
-			CPP_Default_FirstTileIndex = "1",
-			CPP_Default_MaxTilesToPlace = "0"))
+			CPP_Default_OnlyTileIndex = "0"))
 	static FRoadPlaceResult PlaceRoadsFromShapefiles(
 		UObject* WorldContextObject,
 		const FString& MaskShapefilePath,
@@ -118,6 +116,5 @@ public:
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath,
 		bool bClipGroundUnderRoads,
-		int32 FirstTileIndex,
-		int32 MaxTilesToPlace);
+		int32 OnlyTileIndex);
 };
