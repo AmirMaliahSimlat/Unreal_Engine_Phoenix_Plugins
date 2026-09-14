@@ -1,3 +1,4 @@
+#include "WaterPlacerPrivatePCH.h"
 #include "WaterPlacerBPLibrary.h"
 
 #include "WaterCesiumPlacement.h"

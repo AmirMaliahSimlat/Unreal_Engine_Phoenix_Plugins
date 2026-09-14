@@ -1,3 +1,4 @@
+#include "WaterPlacerPrivatePCH.h"
 #include "WaterShapefileReader.h"
 #include "WaterPlacerLog.h"
 

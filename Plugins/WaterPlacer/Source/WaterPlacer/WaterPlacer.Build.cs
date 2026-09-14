@@ -4,15 +4,16 @@ public class WaterPlacer : ModuleRules
 {
 	public WaterPlacer(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		// Private PCH so UnrealEd's C++20 shared PCH cannot compile <ppltasks.h>
+		// before std::result_of is restored.
+		PCHUsage = PCHUsageMode.NoSharedPCHs;
+		PrivatePCHHeaderFile = "Private/WaterPlacerPrivatePCH.h";
 		bUseUnity = false;
 		// Same include order on 5.1 and 5.3 so one codebase compiles in both editors.
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_1;
 		// Cesium tileset/overlay headers use std::span (C++20). Matching CesiumRuntime.
 		CppStandard = CppStandardVersion.Cpp20;
 		bEnableExceptions = true;
-		// MSVC's <ppltasks.h> still uses std::result_of, which C++20 removed.
-		PrivateDefinitions.Add("_HAS_DEPRECATED_RESULT_OF=1");
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
