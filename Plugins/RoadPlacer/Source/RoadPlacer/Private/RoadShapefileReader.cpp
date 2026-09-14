@@ -444,6 +444,11 @@ bool RoadShapefileReader::ReadMaskPolygons(
 			}
 			if (Mask.Outer.LonLat.Num() >= 3)
 			{
+				Mask.Bounds = FBox2D(ForceInit);
+				for (const FVector2D& P : Mask.Outer.LonLat)
+				{
+					Mask.Bounds += P;
+				}
 				OutMasks.Add(MoveTemp(Mask));
 			}
 		}

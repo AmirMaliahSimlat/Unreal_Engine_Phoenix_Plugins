@@ -54,6 +54,7 @@ public:
 	 * @param RoadMaterialPath Optional Unreal material. Empty = engine default material.
 	 * @param MeshContentFolder Content folder for saved road StaticMeshes.
 	 * @param TargetTileCount Geographic tile slots (one StaticMeshActor per non-empty tile).
+	 *        Use 16–64 for a city. 1 tile triangulates the whole AOI at once and can take hours.
 	 * @param MaxEdgeMeters Optional longest-edge cap in meters. 0 = off (recommended).
 	 *        Values below 100 are ignored so leftover 3.5 / 40 m pins do not shred the pavement.
 	 * @param HeightOffsetMeters How far the road top sits above sampled Z (default 0.10 m).

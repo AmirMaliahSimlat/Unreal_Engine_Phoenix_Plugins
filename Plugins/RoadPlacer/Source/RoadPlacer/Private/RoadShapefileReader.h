@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Math/Box2D.h"
 
 struct FRoadShapefileRing
 {
@@ -13,6 +14,7 @@ struct FRoadShapefileMask
 {
 	FRoadShapefileRing Outer;
 	TArray<FRoadShapefileRing> Holes;
+	FBox2D Bounds = FBox2D(ForceInit);
 	int32 RecordIndex = 0;
 };
 

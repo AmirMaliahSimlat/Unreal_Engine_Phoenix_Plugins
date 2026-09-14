@@ -129,17 +129,101 @@ namespace
 
 	void CollectMaskSamples(const TArray<FRoadShapefileMask>& Masks, TArray<FRoadSample>& Out)
 	{
+		const int32 Existing = Out.Num();
+		if (Existing == 0 && Masks.Num() == 0)
+		{
+			return;
+		}
+		const double MidLat = (Existing > 0) ? Out[0].Lat : Masks[0].Outer.LonLat[0].Y;
+		const double MetersLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
+		const double MetersLat = 110540.0;
+		const double CellDeg = 3.0 / FMath::Min(MetersLon, MetersLat);
+		constexpr double MinSpacingM = 5.0;
+		constexpr double SkipNearM = 3.0;
+		const double SkipNearM2 = SkipNearM * SkipNearM;
+
+		TMap<uint64, TArray<int32>> Grid;
+		auto Pack = [](int32 X, int32 Y) -> uint64
+		{
+			return (static_cast<uint64>(static_cast<uint32>(X)) << 32) | static_cast<uint32>(Y);
+		};
+		auto AddToGrid = [&](int32 I)
+		{
+			const int32 CX = FMath::FloorToInt(Out[I].Lon / CellDeg);
+			const int32 CY = FMath::FloorToInt(Out[I].Lat / CellDeg);
+			Grid.FindOrAdd(Pack(CX, CY)).Add(I);
+		};
+		for (int32 I = 0; I < Existing; ++I)
+		{
+			AddToGrid(I);
+		}
+
+		auto TooClose = [&](double Lon, double Lat) -> bool
+		{
+			const int32 CX = FMath::FloorToInt(Lon / CellDeg);
+			const int32 CY = FMath::FloorToInt(Lat / CellDeg);
+			for (int32 DY = -1; DY <= 1; ++DY)
+			{
+				for (int32 DX = -1; DX <= 1; ++DX)
+				{
+					if (const TArray<int32>* Cell = Grid.Find(Pack(CX + DX, CY + DY)))
+					{
+						for (const int32 K : *Cell)
+						{
+							const double Dx = (Lon - Out[K].Lon) * MetersLon;
+							const double Dy = (Lat - Out[K].Lat) * MetersLat;
+							if (Dx * Dx + Dy * Dy <= SkipNearM2)
+							{
+								return true;
+							}
+						}
+					}
+				}
+			}
+			return false;
+		};
+
+		auto Consider = [&](const FVector2D& LonLat, double HeightM)
+		{
+			if (TooClose(LonLat.X, LonLat.Y))
+			{
+				return;
+			}
+			FRoadSample S;
+			S.Lon = LonLat.X;
+			S.Lat = LonLat.Y;
+			S.HeightM = HeightM;
+			AddToGrid(Out.Add(S));
+		};
+
 		auto AddRing = [&](const FRoadShapefileRing& Ring)
 		{
-			for (int32 I = 0; I < Ring.LonLat.Num(); ++I)
+			const int32 N = Ring.LonLat.Num();
+			if (N < 2)
 			{
-				FRoadSample S;
-				S.Lon = Ring.LonLat[I].X;
-				S.Lat = Ring.LonLat[I].Y;
-				S.HeightM = Ring.HeightM.IsValidIndex(I) ? Ring.HeightM[I] : TNumericLimits<double>::Lowest();
-				Out.Add(S);
+				return;
+			}
+			auto HeightAt = [&](int32 I) -> double
+			{
+				return Ring.HeightM.IsValidIndex(I) ? Ring.HeightM[I] : TNumericLimits<double>::Lowest();
+			};
+			Consider(Ring.LonLat[0], HeightAt(0));
+			double AccM = 0.0;
+			for (int32 I = 1; I < N; ++I)
+			{
+				const FVector2D& A = Ring.LonLat[I - 1];
+				const FVector2D& B = Ring.LonLat[I];
+				const double SegDx = (B.X - A.X) * MetersLon;
+				const double SegDy = (B.Y - A.Y) * MetersLat;
+				AccM += FMath::Sqrt(SegDx * SegDx + SegDy * SegDy);
+				if (AccM >= MinSpacingM)
+				{
+					Consider(B, HeightAt(I));
+					AccM = 0.0;
+				}
 			}
 		};
+
 		for (const FRoadShapefileMask& Mask : Masks)
 		{
 			AddRing(Mask.Outer);
@@ -148,6 +232,14 @@ namespace
 				AddRing(Hole);
 			}
 		}
+
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Mask ring samples: kept %d extra (thinned to %.0fm, skipped if within %.0fm of outline)."),
+			Out.Num() - Existing,
+			MinSpacingM,
+			SkipNearM);
 	}
 
 	void FillMissingHeights(TArray<FRoadSample>& Samples)
@@ -724,6 +816,23 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				continue;
 			}
 
+			const double TileStart = FPlatformTime::Seconds();
+			UE_LOG(
+				LogRoadPlacer,
+				Display,
+				TEXT("Tile %d / %d: %d sample(s)."),
+				TileIndex,
+				NumTiles,
+				TileSamples.Num());
+			if (TileSamples.Num() > 25000 && NumTiles == 1)
+			{
+				UE_LOG(
+					LogRoadPlacer,
+					Warning,
+					TEXT("One tile has %d samples. Prefer Target Tile Count 16–64; a single city mesh is slow to save even after triangulation."),
+					TileSamples.Num());
+			}
+
 			float LastTinFrac = 0.0f;
 			auto OnTinProgress = [&](float Fraction01, const TCHAR* Stage) -> bool
 			{
@@ -760,6 +869,14 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			{
 				TileTask.EnterProgressFrame(88.0f * (1.0f - LastTinFrac));
 			}
+			UE_LOG(
+				LogRoadPlacer,
+				Display,
+				TEXT("Tile %d / %d: triangulated %d tri(s) in %.1fs."),
+				TileIndex,
+				NumTiles,
+				Tin.Triangles.Num() / 3,
+				FPlatformTime::Seconds() - TileStart);
 
 			// Keep triangles whose centroid is in this tile (not only the pad).
 			TArray<int32> Kept;

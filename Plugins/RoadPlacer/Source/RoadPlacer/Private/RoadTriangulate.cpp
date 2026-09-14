@@ -1,6 +1,8 @@
 #include "RoadTriangulate.h"
 #include "RoadPlacerLog.h"
 
+#include "HAL/PlatformTime.h"
+
 namespace
 {
 	bool PointInRing(const FVector2D& P, const TArray<FVector2D>& Ring)
@@ -25,12 +27,37 @@ namespace
 		return bInside;
 	}
 
-	struct FTri
+	bool BoxContains(const FBox2D& B, const FVector2D& P)
 	{
-		int32 A = 0;
-		int32 B = 0;
-		int32 C = 0;
-	};
+		return B.bIsValid
+			&& P.X >= B.Min.X && P.X <= B.Max.X
+			&& P.Y >= B.Min.Y && P.Y <= B.Max.Y;
+	}
+
+	bool PointInMaskOne(const FVector2D& P, const FRoadShapefileMask& Mask)
+	{
+		if (Mask.Bounds.bIsValid && !BoxContains(Mask.Bounds, P))
+		{
+			return false;
+		}
+		if (!PointInRing(P, Mask.Outer.LonLat))
+		{
+			return false;
+		}
+		for (const FRoadShapefileRing& Hole : Mask.Holes)
+		{
+			if (PointInRing(P, Hole.LonLat))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	double Orient2D(const FVector2D& A, const FVector2D& B, const FVector2D& C)
+	{
+		return (B.X - A.X) * (C.Y - A.Y) - (B.Y - A.Y) * (C.X - A.X);
+	}
 
 	bool CircumcircleContains(
 		const FVector2D& A,
@@ -57,26 +84,19 @@ namespace
 		const int32 B = FMath::Max(I, J);
 		return (static_cast<uint64>(static_cast<uint32>(A)) << 32) | static_cast<uint32>(B);
 	}
+
+	struct FDelTri
+	{
+		int32 V[3] = { 0, 0, 0 };
+		int32 N[3] = { INDEX_NONE, INDEX_NONE, INDEX_NONE };
+	};
 }
 
 bool RoadTriangulate::PointInMask(const FVector2D& LonLat, const TArray<FRoadShapefileMask>& Masks)
 {
 	for (const FRoadShapefileMask& Mask : Masks)
 	{
-		if (!PointInRing(LonLat, Mask.Outer.LonLat))
-		{
-			continue;
-		}
-		bool bInHole = false;
-		for (const FRoadShapefileRing& Hole : Mask.Holes)
-		{
-			if (PointInRing(LonLat, Hole.LonLat))
-			{
-				bInHole = true;
-				break;
-			}
-		}
-		if (!bInHole)
+		if (PointInMaskOne(LonLat, Mask))
 		{
 			return true;
 		}
@@ -175,8 +195,22 @@ bool RoadTriangulate::BuildTin(
 	Pts.Add(FRoadSample{ OriginLon, OriginLat, 0.0 });
 	Pts.Add(FRoadSample{ OriginLon, OriginLat, 0.0 });
 
-	TArray<FTri> Tris;
-	Tris.Add(FTri{ S0, S0 + 1, S0 + 2 });
+	TArray<FDelTri> Tris;
+	TArray<uint8> Alive;
+	Tris.Reserve(S0 * 2 + 8);
+	Alive.Reserve(S0 * 2 + 8);
+	{
+		FDelTri Super;
+		Super.V[0] = S0;
+		Super.V[1] = S0 + 1;
+		Super.V[2] = S0 + 2;
+		if (Orient2D(XYs[Super.V[0]], XYs[Super.V[1]], XYs[Super.V[2]]) < 0.0)
+		{
+			Swap(Super.V[1], Super.V[2]);
+		}
+		Tris.Add(Super);
+		Alive.Add(1);
+	}
 
 	auto Report = [&](float Fraction01, const TCHAR* Stage) -> bool
 	{
@@ -187,17 +221,83 @@ bool RoadTriangulate::BuildTin(
 		return Progress(FMath::Clamp(Fraction01, 0.0f, 1.0f), Stage);
 	};
 
-	const int32 InsertStride = FMath::Max(S0 / 50, 64);
 	if (!Report(0.0f, TEXT("triangulating")))
 	{
 		OutError = TEXT("Cancelled.");
 		return false;
 	}
 
+	TArray<int32> MarkGen;
+	int32 Stamp = 1;
+	auto EnsureMark = [&]()
+	{
+		if (MarkGen.Num() < Tris.Num())
+		{
+			MarkGen.SetNumZeroed(Tris.Num());
+		}
+	};
+
+	auto PointInTri = [&](int32 Ti, const FVector2D& P) -> bool
+	{
+		const FDelTri& T = Tris[Ti];
+		return Orient2D(XYs[T.V[0]], XYs[T.V[1]], P) >= -1.0e-6
+			&& Orient2D(XYs[T.V[1]], XYs[T.V[2]], P) >= -1.0e-6
+			&& Orient2D(XYs[T.V[2]], XYs[T.V[0]], P) >= -1.0e-6;
+	};
+
+	auto WalkTo = [&](int32 Start, const FVector2D& P) -> int32
+	{
+		int32 T = (Start >= 0 && Alive.IsValidIndex(Start) && Alive[Start]) ? Start : 0;
+		const int32 GuardMax = FMath::Max(Tris.Num() * 2 + 8, 32);
+		for (int32 Guard = 0; Guard < GuardMax; ++Guard)
+		{
+			if (!Alive.IsValidIndex(T) || !Alive[T])
+			{
+				break;
+			}
+			const FDelTri& Tri = Tris[T];
+			int32 Next = INDEX_NONE;
+			if (Orient2D(XYs[Tri.V[1]], XYs[Tri.V[2]], P) < -1.0e-6)
+			{
+				Next = Tri.N[0];
+			}
+			else if (Orient2D(XYs[Tri.V[2]], XYs[Tri.V[0]], P) < -1.0e-6)
+			{
+				Next = Tri.N[1];
+			}
+			else if (Orient2D(XYs[Tri.V[0]], XYs[Tri.V[1]], P) < -1.0e-6)
+			{
+				Next = Tri.N[2];
+			}
+			else
+			{
+				return T;
+			}
+			if (Next == INDEX_NONE || !Alive.IsValidIndex(Next) || !Alive[Next])
+			{
+				break;
+			}
+			T = Next;
+		}
+		for (int32 Ti = 0; Ti < Tris.Num(); ++Ti)
+		{
+			if (Alive[Ti] && PointInTri(Ti, P))
+			{
+				return Ti;
+			}
+		}
+		return INDEX_NONE;
+	};
+
+	int32 Hint = 0;
+	double LastReportTime = FPlatformTime::Seconds();
+	const int32 InsertStride = FMath::Max(S0 / 200, 32);
 	for (int32 Pi = 0; Pi < S0; ++Pi)
 	{
-		if ((Pi % InsertStride) == 0 || Pi + 1 == S0)
+		const double Now = FPlatformTime::Seconds();
+		if ((Pi % InsertStride) == 0 || Pi + 1 == S0 || (Now - LastReportTime) > 0.25)
 		{
+			LastReportTime = Now;
 			const float Frac = 0.85f * static_cast<float>(Pi + 1) / static_cast<float>(S0);
 			if (!Report(Frac, TEXT("triangulating")))
 			{
@@ -205,48 +305,151 @@ bool RoadTriangulate::BuildTin(
 				return false;
 			}
 		}
+
 		const FVector2D P = XYs[Pi];
-		TArray<int32> Bad;
-		for (int32 T = 0; T < Tris.Num(); ++T)
+		const int32 Start = WalkTo(Hint, P);
+		if (Start == INDEX_NONE)
 		{
-			const FTri& Tri = Tris[T];
-			if (CircumcircleContains(XYs[Tri.A], XYs[Tri.B], XYs[Tri.C], P))
-			{
-				Bad.Add(T);
-			}
+			continue;
 		}
 
-		TMap<uint64, int32> EdgeCount;
-		TArray<TPair<int32, int32>> Edges;
-		for (const int32 Ti : Bad)
+		++Stamp;
+		if (Stamp == TNumericLimits<int32>::Max())
 		{
-			const FTri& Tri = Tris[Ti];
-			const int32 E[3][2] = { {Tri.A, Tri.B}, {Tri.B, Tri.C}, {Tri.C, Tri.A} };
-			for (int32 Eidx = 0; Eidx < 3; ++Eidx)
+			MarkGen.Reset();
+			Stamp = 1;
+		}
+		EnsureMark();
+		TArray<int32> Cavity;
+		Cavity.Reserve(16);
+		TArray<int32> Stack;
+		Stack.Add(Start);
+		MarkGen[Start] = Stamp;
+		Cavity.Add(Start);
+		while (Stack.Num() > 0)
+		{
+			const int32 Ti = Stack.Pop();
+			const FDelTri& Tri = Tris[Ti];
+			for (int32 E = 0; E < 3; ++E)
 			{
-				const uint64 Key = EdgeKey(E[Eidx][0], E[Eidx][1]);
-				int32& Count = EdgeCount.FindOrAdd(Key);
-				if (Count == 0)
+				const int32 Nbr = Tri.N[E];
+				if (Nbr == INDEX_NONE || !Alive.IsValidIndex(Nbr) || !Alive[Nbr])
 				{
-					Edges.Add(TPair<int32, int32>(E[Eidx][0], E[Eidx][1]));
+					continue;
 				}
-				++Count;
+				EnsureMark();
+				if (MarkGen[Nbr] == Stamp)
+				{
+					continue;
+				}
+				const FDelTri& NT = Tris[Nbr];
+				if (CircumcircleContains(XYs[NT.V[0]], XYs[NT.V[1]], XYs[NT.V[2]], P))
+				{
+					MarkGen[Nbr] = Stamp;
+					Cavity.Add(Nbr);
+					Stack.Add(Nbr);
+				}
 			}
 		}
 
-		Bad.Sort();
-		for (int32 B = Bad.Num() - 1; B >= 0; --B)
+		struct FBoundEdge
 		{
-			Tris.RemoveAtSwap(Bad[B]);
-		}
-
-		for (const TPair<int32, int32>& E : Edges)
+			int32 A = 0;
+			int32 B = 0;
+			int32 Outer = INDEX_NONE;
+			int32 OuterEdge = INDEX_NONE;
+		};
+		TArray<FBoundEdge> Boundary;
+		Boundary.Reserve(Cavity.Num() + 3);
+		for (const int32 Ti : Cavity)
 		{
-			if (EdgeCount.FindRef(EdgeKey(E.Key, E.Value)) != 1)
+			const FDelTri& Tri = Tris[Ti];
+			for (int32 E = 0; E < 3; ++E)
 			{
-				continue;
+				const int32 Nbr = Tri.N[E];
+				const bool bOuter = (Nbr == INDEX_NONE)
+					|| !Alive.IsValidIndex(Nbr)
+					|| !Alive[Nbr]
+					|| MarkGen[Nbr] != Stamp;
+				if (!bOuter)
+				{
+					continue;
+				}
+				FBoundEdge Edge;
+				Edge.A = Tri.V[(E + 1) % 3];
+				Edge.B = Tri.V[(E + 2) % 3];
+				Edge.Outer = Nbr;
+				if (Nbr != INDEX_NONE && Alive.IsValidIndex(Nbr) && Alive[Nbr])
+				{
+					for (int32 K = 0; K < 3; ++K)
+					{
+						if (Tris[Nbr].N[K] == Ti)
+						{
+							Edge.OuterEdge = K;
+							break;
+						}
+					}
+				}
+				Boundary.Add(Edge);
 			}
-			Tris.Add(FTri{ E.Key, E.Value, Pi });
+		}
+
+		for (const int32 Ti : Cavity)
+		{
+			Alive[Ti] = 0;
+		}
+
+		TArray<int32> NewTris;
+		NewTris.Reserve(Boundary.Num());
+		for (const FBoundEdge& Edge : Boundary)
+		{
+			int32 A = Edge.A;
+			int32 B = Edge.B;
+			if (Orient2D(XYs[A], XYs[B], P) < 0.0)
+			{
+				Swap(A, B);
+			}
+			FDelTri Neu;
+			Neu.V[0] = A;
+			Neu.V[1] = B;
+			Neu.V[2] = Pi;
+			Neu.N[0] = INDEX_NONE;
+			Neu.N[1] = INDEX_NONE;
+			Neu.N[2] = Edge.Outer;
+			const int32 Ni = Tris.Add(Neu);
+			Alive.Add(1);
+			NewTris.Add(Ni);
+			if (Edge.Outer != INDEX_NONE && Edge.OuterEdge != INDEX_NONE
+				&& Alive.IsValidIndex(Edge.Outer) && Alive[Edge.Outer])
+			{
+				Tris[Edge.Outer].N[Edge.OuterEdge] = Ni;
+			}
+		}
+
+		TMap<uint64, TPair<int32, int32>> EdgeOwner;
+		for (const int32 Ni : NewTris)
+		{
+			FDelTri& Tri = Tris[Ni];
+			for (int32 E = 0; E < 3; ++E)
+			{
+				const int32 VA = Tri.V[(E + 1) % 3];
+				const int32 VB = Tri.V[(E + 2) % 3];
+				const uint64 Key = EdgeKey(VA, VB);
+				if (TPair<int32, int32>* Other = EdgeOwner.Find(Key))
+				{
+					Tri.N[E] = Other->Key;
+					Tris[Other->Key].N[Other->Value] = Ni;
+				}
+				else
+				{
+					EdgeOwner.Add(Key, TPair<int32, int32>(Ni, E));
+				}
+			}
+		}
+
+		if (NewTris.Num() > 0)
+		{
+			Hint = NewTris.Last();
 		}
 	}
 
@@ -257,28 +460,45 @@ bool RoadTriangulate::BuildTin(
 	int32 DroppedSuper = 0;
 	int32 DroppedLong = 0;
 	int32 DroppedOutside = 0;
-	const int32 FilterStride = FMath::Max(Tris.Num() / 25, 32);
+	int32 Live = 0;
 	for (int32 Ti = 0; Ti < Tris.Num(); ++Ti)
 	{
-		if ((Ti % FilterStride) == 0 || Ti + 1 == Tris.Num())
+		if (Alive[Ti])
 		{
-			const float Frac = 0.85f + 0.15f * static_cast<float>(Ti + 1)
-				/ static_cast<float>(FMath::Max(Tris.Num(), 1));
+			++Live;
+		}
+	}
+	const int32 FilterStride = FMath::Max(Live / 50, 32);
+	int32 SeenLive = 0;
+	LastReportTime = FPlatformTime::Seconds();
+	for (int32 Ti = 0; Ti < Tris.Num(); ++Ti)
+	{
+		if (!Alive[Ti])
+		{
+			continue;
+		}
+		++SeenLive;
+		const double Now = FPlatformTime::Seconds();
+		if ((SeenLive % FilterStride) == 0 || SeenLive == Live || (Now - LastReportTime) > 0.25)
+		{
+			LastReportTime = Now;
+			const float Frac = 0.85f + 0.15f * static_cast<float>(SeenLive)
+				/ static_cast<float>(FMath::Max(Live, 1));
 			if (!Report(Frac, TEXT("clipping to mask")))
 			{
 				OutError = TEXT("Cancelled.");
 				return false;
 			}
 		}
-		const FTri& Tri = Tris[Ti];
-		if (Tri.A >= S0 || Tri.B >= S0 || Tri.C >= S0)
+		const FDelTri& Tri = Tris[Ti];
+		if (Tri.V[0] >= S0 || Tri.V[1] >= S0 || Tri.V[2] >= S0)
 		{
 			++DroppedSuper;
 			continue;
 		}
-		const FRoadSample& A = Pts[Tri.A];
-		const FRoadSample& B = Pts[Tri.B];
-		const FRoadSample& C = Pts[Tri.C];
+		const FRoadSample& A = Pts[Tri.V[0]];
+		const FRoadSample& B = Pts[Tri.V[1]];
+		const FRoadSample& C = Pts[Tri.V[2]];
 		if (MaxEdge > 0.0
 			&& (EdgeMeters(A, B) > MaxEdge || EdgeMeters(B, C) > MaxEdge || EdgeMeters(C, A) > MaxEdge))
 		{
@@ -291,21 +511,21 @@ bool RoadTriangulate::BuildTin(
 			++DroppedOutside;
 			continue;
 		}
-		OutTin.Triangles.Add(Tri.A);
-		OutTin.Triangles.Add(Tri.B);
-		OutTin.Triangles.Add(Tri.C);
+		OutTin.Triangles.Add(Tri.V[0]);
+		OutTin.Triangles.Add(Tri.V[1]);
+		OutTin.Triangles.Add(Tri.V[2]);
 	}
 
 	UE_LOG(
 		LogRoadPlacer,
-		Verbose,
-		TEXT("TIN: %d Delaunay tri(s), kept %d (dropped super=%d longEdge=%d outsideMask=%d, maxEdgeM=%.1f)."),
-		Tris.Num(),
+		Display,
+		TEXT("TIN: %d insert(s), %d live tri(s), kept %d (dropped super=%d longEdge=%d outsideMask=%d)."),
+		S0,
+		Live,
 		OutTin.Triangles.Num() / 3,
 		DroppedSuper,
 		DroppedLong,
-		DroppedOutside,
-		MaxEdge);
+		DroppedOutside);
 
 	if (OutTin.Triangles.Num() < 3)
 	{

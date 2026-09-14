@@ -1,4 +1,4 @@
-"""Thresholds mirrored from Road Placer 1.7.0 C++. Keep in sync with the plugin."""
+"""Thresholds mirrored from Road Placer 1.8.0 C++. Keep in sync with the plugin."""
 
 # Plugins/RoadPlacer/Source/RoadPlacer/Private/RoadPlacerBPLibrary.cpp
 OUTLINE_SNAP_METERS = 15.0
