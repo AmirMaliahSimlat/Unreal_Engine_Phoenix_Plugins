@@ -1,3 +1,4 @@
+#include "RoadPlacerPrivatePCH.h"
 #include "RoadTriangulate.h"
 #include "RoadPlacerLog.h"
 

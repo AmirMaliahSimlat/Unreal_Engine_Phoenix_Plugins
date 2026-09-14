@@ -1,3 +1,4 @@
+#include "RoadPlacerPrivatePCH.h"
 #include "RoadCesiumPlacement.h"
 
 #include "CesiumGeoreference.h"

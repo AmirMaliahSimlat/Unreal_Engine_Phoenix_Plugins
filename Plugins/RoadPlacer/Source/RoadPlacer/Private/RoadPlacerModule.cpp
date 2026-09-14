@@ -1,3 +1,4 @@
+#include "RoadPlacerPrivatePCH.h"
 #include "RoadPlacerModule.h"
 #include "RoadPlacerLog.h"
 

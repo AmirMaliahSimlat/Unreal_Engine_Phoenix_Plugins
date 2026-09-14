@@ -1,3 +1,4 @@
+#include "RoadPlacerPrivatePCH.h"
 #include "RoadPlacerBPLibrary.h"
 
 #include "RoadCesiumPlacement.h"
@@ -6,12 +7,17 @@
 #include "RoadStaticMesh.h"
 #include "RoadTriangulate.h"
 
+#include "Cesium3DTileset.h"
+#include "CesiumCartographicPolygon.h"
 #include "CesiumGeoreference.h"
+#include "CesiumPolygonRasterOverlay.h"
+#include "Components/SplineComponent.h"
 #include "Editor.h"
 #include "Engine/Engine.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "GameFramework/Actor.h"
 #include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
 #include "Materials/MaterialInterface.h"
@@ -22,6 +28,10 @@
 namespace
 {
 	const FName RoadPlacerTag(TEXT("RoadPlacer"));
+	const FName RoadPlacerOverlayName(TEXT("RoadPlacerClip"));
+	constexpr double DuplicateEpsDeg = 1.0e-10;
+	constexpr int32 ClipOutlineMaxVertices = 8192;
+	constexpr double ClipSimplifyMeters = 2.0;
 
 	FString SanitizeFilePath(const FString& InPath)
 	{
@@ -74,6 +84,30 @@ namespace
 
 	void RemovePrevious(UWorld& World)
 	{
+		for (TActorIterator<ACesium3DTileset> It(&World); It; ++It)
+		{
+			ACesium3DTileset* Tileset = *It;
+			if (!Tileset)
+			{
+				continue;
+			}
+			TArray<UCesiumPolygonRasterOverlay*> Overlays;
+			Tileset->GetComponents<UCesiumPolygonRasterOverlay>(Overlays);
+			for (UCesiumPolygonRasterOverlay* Overlay : Overlays)
+			{
+				if (!Overlay)
+				{
+					continue;
+				}
+				if (Overlay->GetFName().ToString().StartsWith(RoadPlacerOverlayName.ToString()))
+				{
+					Overlay->RemoveFromTileset();
+					Overlay->DestroyComponent();
+					Tileset->RefreshTileset();
+				}
+			}
+		}
+
 		TArray<AActor*> ToDestroy;
 		for (TActorIterator<AActor> It(&World); It; ++It)
 		{
@@ -955,6 +989,178 @@ namespace
 			}
 		}
 	}
+
+	double PerpDistSqLonLat(const FVector2D& Point, const FVector2D& A, const FVector2D& B)
+	{
+		const FVector2D AB = B - A;
+		const double LenSq = AB.SizeSquared();
+		if (LenSq < 1.0e-30)
+		{
+			return FVector2D::DistSquared(Point, A);
+		}
+		const double T = FMath::Clamp(FVector2D::DotProduct(Point - A, AB) / LenSq, 0.0, 1.0);
+		return FVector2D::DistSquared(Point, A + AB * T);
+	}
+
+	void RdpKeepClip(const TArray<FVector2D>& Pts, int32 Start, int32 End, double EpsSq, TArray<uint8>& Keep)
+	{
+		double MaxD = -1.0;
+		int32 MaxI = Start;
+		for (int32 I = Start + 1; I < End; ++I)
+		{
+			const double D = PerpDistSqLonLat(Pts[I], Pts[Start], Pts[End]);
+			if (D > MaxD)
+			{
+				MaxD = D;
+				MaxI = I;
+			}
+		}
+		if (MaxD > EpsSq && MaxI > Start && MaxI < End)
+		{
+			RdpKeepClip(Pts, Start, MaxI, EpsSq, Keep);
+			RdpKeepClip(Pts, MaxI, End, EpsSq, Keep);
+		}
+		else
+		{
+			Keep[Start] = 1;
+			Keep[End] = 1;
+		}
+	}
+
+	void DecimateClipRing(const TArray<FVector2D>& In, TArray<FVector2D>& Out)
+	{
+		Out.Reset();
+		TArray<FVector2D> Unique;
+		Unique.Reserve(In.Num());
+		for (const FVector2D& P : In)
+		{
+			if (Unique.Num() == 0 || !Unique.Last().Equals(P, DuplicateEpsDeg))
+			{
+				Unique.Add(P);
+			}
+		}
+		if (Unique.Num() >= 2 && Unique[0].Equals(Unique.Last(), DuplicateEpsDeg))
+		{
+			Unique.Pop();
+		}
+		if (Unique.Num() < 3)
+		{
+			Out = Unique;
+			return;
+		}
+
+		const double EpsDeg = ClipSimplifyMeters / 111320.0;
+		TArray<uint8> Keep;
+		Keep.Init(0, Unique.Num());
+		RdpKeepClip(Unique, 0, Unique.Num() - 1, EpsDeg * EpsDeg, Keep);
+		Keep[0] = 1;
+		Keep.Last() = 1;
+		Out.Reserve(Unique.Num());
+		for (int32 I = 0; I < Unique.Num(); ++I)
+		{
+			if (Keep[I])
+			{
+				Out.Add(Unique[I]);
+			}
+		}
+		if (Out.Num() < 3)
+		{
+			Out = Unique;
+		}
+		if (Out.Num() > ClipOutlineMaxVertices)
+		{
+			TArray<FVector2D> Sampled;
+			Sampled.Reserve(ClipOutlineMaxVertices);
+			for (int32 I = 0; I < ClipOutlineMaxVertices; ++I)
+			{
+				const int32 Src = (I * (Out.Num() - 1)) / (ClipOutlineMaxVertices - 1);
+				Sampled.Add(Out[Src]);
+			}
+			Out = MoveTemp(Sampled);
+		}
+	}
+
+	void ApplyWorldClosedSpline(USplineComponent& Spline, const TArray<FVector>& WorldPoints)
+	{
+		Spline.ClearSplinePoints(false);
+		Spline.SetClosedLoop(false, false);
+		for (const FVector& P : WorldPoints)
+		{
+			Spline.AddSplinePoint(P, ESplineCoordinateSpace::World, false);
+		}
+		Spline.SetClosedLoop(true, false);
+		const int32 Num = Spline.GetNumberOfSplinePoints();
+		for (int32 I = 0; I < Num; ++I)
+		{
+			Spline.SetSplinePointType(I, ESplinePointType::Linear, false);
+		}
+		Spline.UpdateSpline();
+	}
+
+	ACesiumCartographicPolygon* SpawnClipPolygon(
+		UWorld& World,
+		const TArray<FVector>& WorldPoints,
+		const FString& Label,
+		const FString& FolderPath)
+	{
+		if (WorldPoints.Num() < 3)
+		{
+			return nullptr;
+		}
+
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		ACesiumCartographicPolygon* Poly = World.SpawnActor<ACesiumCartographicPolygon>(
+			WorldPoints[0],
+			FRotator::ZeroRotator,
+			Params);
+		if (!Poly || !Poly->Polygon)
+		{
+			return nullptr;
+		}
+
+		ApplyWorldClosedSpline(*Poly->Polygon, WorldPoints);
+		Poly->SetActorLabel(Label);
+		Poly->Tags.AddUnique(RoadPlacerTag);
+		if (!FolderPath.IsEmpty())
+		{
+			Poly->SetFolderPath(FName(*FolderPath));
+		}
+		Poly->Modify();
+		return Poly;
+	}
+
+	void ApplyClipOverlayToTileset(
+		ACesium3DTileset& Tileset,
+		const TArray<ACesiumCartographicPolygon*>& ClipPolygons)
+	{
+		UCesiumPolygonRasterOverlay* Overlay = NewObject<UCesiumPolygonRasterOverlay>(
+			&Tileset,
+			RoadPlacerOverlayName,
+			RF_Transactional);
+		if (!Overlay)
+		{
+			return;
+		}
+
+		Overlay->bAutoActivate = false;
+		Tileset.AddInstanceComponent(Overlay);
+		Overlay->RegisterComponent();
+		Overlay->Polygons.Reset();
+		for (ACesiumCartographicPolygon* Poly : ClipPolygons)
+		{
+			if (Poly)
+			{
+				Overlay->Polygons.Add(Poly);
+			}
+		}
+		Overlay->InvertSelection = false;
+		Overlay->ExcludeSelectedTiles = true;
+		Tileset.Modify();
+		Overlay->Activate(true);
+		Overlay->Refresh();
+		Tileset.RefreshTileset();
+	}
 }
 
 FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
@@ -967,13 +1173,14 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	int32 TargetTileCount,
 	float MaxEdgeMeters,
 	float HeightOffsetMeters,
-		float ThicknessMeters,
-		float AltitudeSampleMeters,
-		bool bSoftenEdges,
-		float MetersPerUv,
+	float ThicknessMeters,
+	float AltitudeSampleMeters,
+	bool bSoftenEdges,
+	float MetersPerUv,
 	bool bEnableCollision,
 	const FString& ActorLabelPrefix,
-	const FString& EditorFolderPath)
+	const FString& EditorFolderPath,
+	bool bClipGroundUnderRoads)
 {
 	FRoadPlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -1004,7 +1211,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s"),
+		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s clipGround=%s"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
@@ -1012,7 +1219,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		HeightOff,
 		Thickness,
 		AltSample,
-		bSoftenEdges ? TEXT("on") : TEXT("off"));
+		bSoftenEdges ? TEXT("on") : TEXT("off"),
+		bClipGroundUnderRoads ? TEXT("on") : TEXT("off"));
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -1225,7 +1433,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				UE_LOG(
 					LogRoadPlacer,
 					Warning,
-					TEXT("One tile has %d samples. Prefer Target Tile Count 16â€“64; a single city mesh is slow to save even after triangulation."),
+					TEXT("One tile has %d samples. Prefer Target Tile Count 16-64; a single city mesh is slow to save even after triangulation."),
 					TileSamples.Num());
 			}
 
@@ -1241,7 +1449,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				TileTask.EnterProgressFrame(
 					88.0f * Delta,
 					FText::FromString(FString::Printf(
-						TEXT("Tile %d / %d â€” %s"),
+						TEXT("Tile %d / %d - %s"),
 						TileIndex,
 						NumTiles,
 						Stage)));
@@ -1307,7 +1515,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 
 			TileTask.EnterProgressFrame(
 				6.0f,
-				FText::FromString(FString::Printf(TEXT("Tile %d / %d â€” building slab mesh"), TileIndex, NumTiles)));
+				FText::FromString(FString::Printf(TEXT("Tile %d / %d - building slab mesh"), TileIndex, NumTiles)));
 			TArray<FVector> WorldPts;
 			TArray<int32> SlabTris;
 			BuildSlabWorld(*Georeference, UsedVerts, UsedTris, HeightOff, Thickness, WorldPts, SlabTris);
@@ -1334,7 +1542,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			FString MeshError;
 			TileTask.EnterProgressFrame(
 				6.0f,
-				FText::FromString(FString::Printf(TEXT("Tile %d / %d â€” saving mesh"), TileIndex, NumTiles)));
+				FText::FromString(FString::Printf(TEXT("Tile %d / %d - saving mesh"), TileIndex, NumTiles)));
 			UStaticMesh* Mesh = RoadStaticMesh::CreatePersistentStaticMesh(
 				MeshFolder, MeshLabel, LocalPts, SlabTris, Material, UvMeters, bSoftenEdges, MeshError);
 			if (!Mesh)
@@ -1361,6 +1569,76 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		}
 	}
 
+	if (bClipGroundUnderRoads && !Result.bCancelled)
+	{
+		TArray<ACesium3DTileset*> Tilesets;
+		for (TActorIterator<ACesium3DTileset> It(World); It; ++It)
+		{
+			if (*It)
+			{
+				Tilesets.Add(*It);
+			}
+		}
+		if (Tilesets.Num() == 0)
+		{
+			UE_LOG(
+				LogRoadPlacer,
+				Warning,
+				TEXT("Clip Ground Under Roads is on but no ACesium3DTileset is in the level. Road meshes will still spawn."));
+		}
+
+		int32 HoleRings = 0;
+		TArray<ACesiumCartographicPolygon*> ClipActors;
+		ClipActors.Reserve(Masks.Num());
+		for (int32 Mi = 0; Mi < Masks.Num(); ++Mi)
+		{
+			HoleRings += Masks[Mi].Holes.Num();
+			TArray<FVector2D> Ring;
+			DecimateClipRing(Masks[Mi].Outer.LonLat, Ring);
+			if (Ring.Num() < 3)
+			{
+				continue;
+			}
+			TArray<FVector> WorldPts;
+			WorldPts.Reserve(Ring.Num());
+			for (const FVector2D& LonLat : Ring)
+			{
+				WorldPts.Add(RoadCesiumPlacement::LonLatHeightToUnreal(
+					*Georeference, LonLat.X, LonLat.Y, 0.0));
+			}
+			const FString ClipLabel = FString::Printf(TEXT("%s_Clip_%d"), *LabelPrefix, Mi);
+			if (ACesiumCartographicPolygon* ClipActor = SpawnClipPolygon(
+					*World, WorldPts, ClipLabel, EditorFolderPath))
+			{
+				ClipActors.Add(ClipActor);
+				++Result.ClipPolygonsSpawned;
+			}
+		}
+		if (HoleRings > 0)
+		{
+			UE_LOG(
+				LogRoadPlacer,
+				Display,
+				TEXT("Clip uses outer rings only; %d hole ring(s) are not subtracted (medians stay clipped)."),
+				HoleRings);
+		}
+		for (ACesium3DTileset* Tileset : Tilesets)
+		{
+			if (!Tileset || ClipActors.Num() == 0)
+			{
+				continue;
+			}
+			ApplyClipOverlayToTileset(*Tileset, ClipActors);
+			++Result.TilesetsClipped;
+		}
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Clipped ground under roads on %d tileset(s) (%d clip polygons)."),
+			Result.TilesetsClipped,
+			Result.ClipPolygonsSpawned);
+	}
+
 	World->MarkPackageDirty();
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
 	Result.bSuccess = Result.TilesSpawned > 0;
@@ -1374,11 +1652,13 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d road tile(s) (%d triangles) from %d mask polygon(s) and %d points. Elapsed: %.2fs."),
+		TEXT("Spawned %d road tile(s) (%d triangles) from %d mask polygon(s) and %d points. Clip polygons=%d tilesets=%d. Elapsed: %.2fs."),
 		Result.TilesSpawned,
 		Result.TrianglesBuilt,
 		Result.MaskPolygonsRead,
 		Result.ElevationPointsRead,
+		Result.ClipPolygonsSpawned,
+		Result.TilesetsClipped,
 		Result.ElapsedSeconds);
 	UE_LOG(LogRoadPlacer, Display, TEXT("%s"), *Result.Message);
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place END =========="));

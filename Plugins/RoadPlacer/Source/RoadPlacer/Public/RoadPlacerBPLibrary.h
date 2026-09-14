@@ -27,6 +27,12 @@ struct FRoadPlaceResult
 	int32 TilesSkipped = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
+	int32 ClipPolygonsSpawned = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
+	int32 TilesetsClipped = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
 	double ElapsedSeconds = 0.0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
@@ -66,6 +72,9 @@ public:
 	 * @param bSoftenEdges If true, shared vertices get averaged normals (soft edges). If false, faceted.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
+	 * @param bClipGroundUnderRoads If true, hide Cesium imagery and DTM inside the road mask
+	 *        (same cartographic raster overlay as Water Placer). Increase Thickness so the slab
+	 *        walls fill the gap down to the remaining ground at the curb.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -84,7 +93,8 @@ public:
 			CPP_Default_MetersPerUv = "10.0",
 			CPP_Default_bEnableCollision = "true",
 			CPP_Default_ActorLabelPrefix = "Road",
-			CPP_Default_EditorFolderPath = "PlacedRoads"))
+			CPP_Default_EditorFolderPath = "PlacedRoads",
+			CPP_Default_bClipGroundUnderRoads = "false"))
 	static FRoadPlaceResult PlaceRoadsFromShapefiles(
 		UObject* WorldContextObject,
 		const FString& MaskShapefilePath,
@@ -101,5 +111,6 @@ public:
 		float MetersPerUv,
 		bool bEnableCollision,
 		const FString& ActorLabelPrefix,
-		const FString& EditorFolderPath);
+		const FString& EditorFolderPath,
+		bool bClipGroundUnderRoads);
 };
