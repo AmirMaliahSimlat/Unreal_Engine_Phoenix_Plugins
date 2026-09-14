@@ -475,28 +475,20 @@ namespace
 		return MIC;
 	}
 
-#if UE_VERSION_OLDER_THAN(5, 2, 0)
-	UMaterial* MaterialEditData(UMaterial* Mat)
-	{
-		return Mat;
-	}
-#else
 	UMaterialEditorOnlyData* MaterialEditData(UMaterial* Mat)
 	{
 		return Mat ? Mat->GetEditorOnlyData() : nullptr;
 	}
-#endif
 
 	template <typename TExpr>
 	TExpr* NewMatExpr(UMaterial* Mat)
 	{
 		TExpr* Expr = NewObject<TExpr>(Mat);
 		Expr->Material = Mat;
-#if UE_VERSION_OLDER_THAN(5, 2, 0)
-		Mat->Expressions.Add(Expr);
-#else
-		Mat->GetExpressionCollection().AddExpression(Expr);
-#endif
+		if (UMaterialEditorOnlyData* Edit = MaterialEditData(Mat))
+		{
+			Edit->ExpressionCollection.AddExpression(Expr);
+		}
 		return Expr;
 	}
 

@@ -11,6 +11,8 @@ public class WaterPlacer : ModuleRules
 		// Cesium tileset/overlay headers use std::span (C++20). Matching CesiumRuntime.
 		CppStandard = CppStandardVersion.Cpp20;
 		bEnableExceptions = true;
+		// MSVC's <ppltasks.h> still uses std::result_of, which C++20 removed.
+		PrivateDefinitions.Add("_HAS_DEPRECATED_RESULT_OF=1");
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
