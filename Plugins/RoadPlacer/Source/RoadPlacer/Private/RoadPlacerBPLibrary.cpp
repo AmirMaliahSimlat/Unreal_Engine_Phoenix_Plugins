@@ -1035,7 +1035,9 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	bool bEnableCollision,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
-	bool bClipGroundUnderRoads)
+	bool bClipGroundUnderRoads,
+	int32 FirstTileIndex,
+	int32 MaxTilesToPlace)
 {
 	FRoadPlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -1066,10 +1068,12 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s clipGround=%s"),
+		TEXT("mask='%s' points='%s' tiles=%d firstTile=%d maxPlace=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s clipGround=%s"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
+		FirstTileIndex,
+		MaxTilesToPlace,
 		MaxEdge,
 		HeightOff,
 		Thickness,
@@ -1234,26 +1238,47 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 
 	const int32 NumTiles = TilesX * TilesY;
+	const int32 PlaceFrom = FMath::Clamp(FirstTileIndex <= 0 ? 1 : FirstTileIndex, 1, NumTiles);
+	const int32 PlaceTo = (MaxTilesToPlace <= 0)
+		? NumTiles
+		: FMath::Clamp(PlaceFrom + MaxTilesToPlace - 1, PlaceFrom, NumTiles);
+	const int32 PlaceCount = PlaceTo - PlaceFrom + 1;
+	if (PlaceFrom > 1 || MaxTilesToPlace > 0)
+	{
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Tile subset: start at index %d, place %s (grid %dx%d, TY then TX). Empty slots do not count."),
+			PlaceFrom,
+			MaxTilesToPlace > 0
+				? *FString::Printf(TEXT("up to %d non-empty tile(s)"), MaxTilesToPlace)
+				: TEXT("all remaining"),
+			TilesX,
+			TilesY);
+	}
+
 	FScopedSlowTask SlowTask(
-		static_cast<float>(NumTiles),
+		static_cast<float>(PlaceCount),
 		NSLOCTEXT("RoadPlacer", "PlaceProgress", "Placing road tiles..."));
 	SlowTask.MakeDialog(true);
 
 	int32 TileIndex = 0;
-	for (int32 TY = 0; TY < TilesY; ++TY)
+	int32 TriedWithSamples = 0;
+	bool bStopTiles = false;
+	for (int32 TY = 0; TY < TilesY && !bStopTiles; ++TY)
 	{
 		for (int32 TX = 0; TX < TilesX; ++TX)
 		{
 			++TileIndex;
-			const FText TileLabel = FText::FromString(FString::Printf(
-				TEXT("Road tile %d / %d"), TileIndex, NumTiles));
-			SlowTask.EnterProgressFrame(1.0f, TileLabel);
-			if (SlowTask.ShouldCancel())
+			if (TileIndex < PlaceFrom)
 			{
-				Result.bCancelled = true;
+				continue;
+			}
+			if (MaxTilesToPlace > 0 && TriedWithSamples >= MaxTilesToPlace)
+			{
+				bStopTiles = true;
 				break;
 			}
-			FScopedSlowTask TileTask(100.0f, TileLabel);
 
 			const double TMinLon = MinLon + LonSpan * (static_cast<double>(TX) / TilesX);
 			const double TMaxLon = MinLon + LonSpan * (static_cast<double>(TX + 1) / TilesX);
@@ -1274,14 +1299,28 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				++Result.TilesSkipped;
 				continue;
 			}
+			++TriedWithSamples;
+
+			const FText TileLabel = FText::FromString(FString::Printf(
+				TEXT("Road tile %d / %d (grid %d,%d)"), TileIndex, NumTiles, TX, TY));
+			SlowTask.EnterProgressFrame(1.0f, TileLabel);
+			if (SlowTask.ShouldCancel())
+			{
+				Result.bCancelled = true;
+				bStopTiles = true;
+				break;
+			}
+			FScopedSlowTask TileTask(100.0f, TileLabel);
 
 			const double TileStart = FPlatformTime::Seconds();
 			UE_LOG(
 				LogRoadPlacer,
 				Display,
-				TEXT("Tile %d / %d: %d sample(s)."),
+				TEXT("Tile %d / %d (grid %d,%d): %d sample(s)."),
 				TileIndex,
 				NumTiles,
+				TX,
+				TY,
 				TileSamples.Num());
 			if (TileSamples.Num() > 25000 && NumTiles == 1)
 			{
@@ -1319,6 +1358,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				if (TinError == TEXT("Cancelled."))
 				{
 					Result.bCancelled = true;
+					bStopTiles = true;
 					break;
 				}
 				UE_LOG(LogRoadPlacer, Verbose, TEXT("Tile %d,%d: %s"), TX, TY, *TinError);
@@ -1507,11 +1547,14 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d road tile(s) (%d triangles) from %d mask polygon(s) and %d points. Clip polygons=%d tilesets=%d. Elapsed: %.2fs."),
+		TEXT("Spawned %d road tile(s) (%d triangles) from %d mask polygon(s) and %d points. Tile subset from %d (%d non-empty of %d). Clip polygons=%d tilesets=%d. Elapsed: %.2fs."),
 		Result.TilesSpawned,
 		Result.TrianglesBuilt,
 		Result.MaskPolygonsRead,
 		Result.ElevationPointsRead,
+		PlaceFrom,
+		TriedWithSamples,
+		NumTiles,
 		Result.ClipPolygonsSpawned,
 		Result.TilesetsClipped,
 		Result.ElapsedSeconds);
