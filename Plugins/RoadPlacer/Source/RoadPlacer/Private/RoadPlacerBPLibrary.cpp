@@ -31,7 +31,8 @@ namespace
 	const FName RoadPlacerOverlayName(TEXT("RoadPlacerClip"));
 	constexpr double DuplicateEpsDeg = 1.0e-10;
 	constexpr int32 ClipOutlineMaxVertices = 8192;
-	constexpr double ClipSimplifyMeters = 2.0;
+	constexpr double ClipSimplifyMeters = 0.35;
+	constexpr double ClipInflateMeters = 1.0;
 
 	FString SanitizeFilePath(const FString& InPath)
 	{
@@ -237,11 +238,8 @@ namespace
 			{
 				return;
 			}
-			auto HeightAt = [&](int32 I) -> double
-			{
-				return Ring.HeightM.IsValidIndex(I) ? Ring.HeightM[I] : TNumericLimits<double>::Lowest();
-			};
-			Consider(Ring.LonLat[0], HeightAt(0));
+			const double MissingZ = TNumericLimits<double>::Lowest();
+			Consider(Ring.LonLat[0], MissingZ);
 			double AccM = 0.0;
 			for (int32 I = 1; I < N; ++I)
 			{
@@ -252,7 +250,7 @@ namespace
 				AccM += FMath::Sqrt(SegDx * SegDx + SegDy * SegDy);
 				if (AccM >= MinSpacingM)
 				{
-					Consider(B, HeightAt(I));
+					Consider(B, MissingZ);
 					AccM = 0.0;
 				}
 			}
@@ -281,9 +279,20 @@ namespace
 		TArray<int32> Known;
 		TArray<int32> Unknown;
 		Known.Reserve(Samples.Num());
+		double MaxAbsH = 0.0;
+		for (const FRoadSample& S : Samples)
+		{
+			if (S.HeightM > -1.0e20)
+			{
+				MaxAbsH = FMath::Max(MaxAbsH, FMath::Abs(S.HeightM));
+			}
+		}
+		const bool bZeroIsMissing = MaxAbsH > 10.0;
 		for (int32 I = 0; I < Samples.Num(); ++I)
 		{
-			if (Samples[I].HeightM > -1.0e20)
+			const bool bKnown = Samples[I].HeightM > -1.0e20
+				&& !(bZeroIsMissing && FMath::Abs(Samples[I].HeightM) < 1.0e-9);
+			if (bKnown)
 			{
 				Known.Add(I);
 			}
@@ -935,6 +944,164 @@ namespace
 		}
 	}
 
+	void InflateLonLatRing(TArray<FVector2D>& Ring, double MetersOut)
+	{
+		const int32 N = Ring.Num();
+		if (N < 3 || MetersOut <= 1.0e-6)
+		{
+			return;
+		}
+		double SumLat = 0.0;
+		for (const FVector2D& P : Ring)
+		{
+			SumLat += P.Y;
+		}
+		const double MidLat = SumLat / static_cast<double>(N);
+		const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
+		const double MLat = 110540.0;
+
+		double Area2 = 0.0;
+		for (int32 I = 0; I < N; ++I)
+		{
+			const FVector2D& A = Ring[I];
+			const FVector2D& B = Ring[(I + 1) % N];
+			Area2 += A.X * B.Y - B.X * A.Y;
+		}
+		const double Sign = (Area2 >= 0.0) ? 1.0 : -1.0;
+
+		TArray<FVector2D> Out;
+		Out.SetNum(N);
+		for (int32 I = 0; I < N; ++I)
+		{
+			const FVector2D& Prev = Ring[(I + N - 1) % N];
+			const FVector2D& Cur = Ring[I];
+			const FVector2D& Next = Ring[(I + 1) % N];
+			FVector2D E0((Cur.X - Prev.X) * MLon, (Cur.Y - Prev.Y) * MLat);
+			FVector2D E1((Next.X - Cur.X) * MLon, (Next.Y - Cur.Y) * MLat);
+			FVector2D N0(-E0.Y, E0.X);
+			FVector2D N1(-E1.Y, E1.X);
+			N0.Normalize();
+			N1.Normalize();
+			FVector2D Avg = (N0 + N1) * Sign;
+			if (Avg.SizeSquared() < 1.0e-12)
+			{
+				Avg = N0 * Sign;
+			}
+			Avg.Normalize();
+			Out[I] = FVector2D(
+				Cur.X + (Avg.X * MetersOut) / MLon,
+				Cur.Y + (Avg.Y * MetersOut) / MLat);
+		}
+		Ring = MoveTemp(Out);
+	}
+
+	void ExtractBoundaryRings(
+		const TArray<FRoadSample>& Verts,
+		const TArray<int32>& Tris,
+		TArray<TArray<FVector2D>>& OutRings)
+	{
+		OutRings.Reset();
+		const int32 N = Verts.Num();
+		if (N < 3 || Tris.Num() < 3)
+		{
+			return;
+		}
+
+		TMap<uint64, int32> EdgeCount;
+		TMap<uint64, TPair<int32, int32>> EdgeDir;
+		for (int32 T = 0; T + 2 < Tris.Num(); T += 3)
+		{
+			const int32 I[3] = { Tris[T], Tris[T + 1], Tris[T + 2] };
+			for (int32 E = 0; E < 3; ++E)
+			{
+				const int32 A = I[E];
+				const int32 B = I[(E + 1) % 3];
+				if (!Verts.IsValidIndex(A) || !Verts.IsValidIndex(B))
+				{
+					continue;
+				}
+				const uint64 Key = UndirectedEdge(A, B);
+				++EdgeCount.FindOrAdd(Key);
+				if (!EdgeDir.Contains(Key))
+				{
+					EdgeDir.Add(Key, TPair<int32, int32>(A, B));
+				}
+			}
+		}
+
+		TArray<TArray<int32>> Nbr;
+		Nbr.SetNum(N);
+		TSet<uint64> Unused;
+		for (const TPair<uint64, int32>& Pair : EdgeCount)
+		{
+			if (Pair.Value != 1)
+			{
+				continue;
+			}
+			const TPair<int32, int32>& Dir = EdgeDir.FindChecked(Pair.Key);
+			Nbr[Dir.Key].Add(Dir.Value);
+			Nbr[Dir.Value].Add(Dir.Key);
+			Unused.Add(Pair.Key);
+		}
+
+		auto PopUnusedNbr = [&](int32 Cur, int32 Prev) -> int32
+		{
+			int32 Best = INDEX_NONE;
+			for (const int32 J : Nbr[Cur])
+			{
+				if (J == Prev)
+				{
+					continue;
+				}
+				const uint64 Key = UndirectedEdge(Cur, J);
+				if (Unused.Contains(Key))
+				{
+					return J;
+				}
+				if (Best == INDEX_NONE)
+				{
+					Best = J;
+				}
+			}
+			return Best;
+		};
+
+		TArray<uint8> VertUsed;
+		VertUsed.Init(0, N);
+		for (int32 Start = 0; Start < N; ++Start)
+		{
+			if (VertUsed[Start] || Nbr[Start].Num() == 0)
+			{
+				continue;
+			}
+			int32 Cur = Start;
+			int32 Prev = INDEX_NONE;
+			TArray<FVector2D> Ring;
+			Ring.Reserve(64);
+			for (int32 Guard = 0; Guard < N + 2; ++Guard)
+			{
+				VertUsed[Cur] = 1;
+				Ring.Add(FVector2D(Verts[Cur].Lon, Verts[Cur].Lat));
+				const int32 Next = PopUnusedNbr(Cur, Prev);
+				if (Next == INDEX_NONE)
+				{
+					break;
+				}
+				Unused.Remove(UndirectedEdge(Cur, Next));
+				if (Next == Start)
+				{
+					break;
+				}
+				Prev = Cur;
+				Cur = Next;
+			}
+			if (Ring.Num() >= 3)
+			{
+				OutRings.Add(MoveTemp(Ring));
+			}
+		}
+	}
+
 	void ApplyWorldClosedSpline(USplineComponent& Spline, const TArray<FVector>& WorldPoints)
 	{
 		Spline.ClearSplinePoints(false);
@@ -1187,6 +1354,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 
 	CollectMaskSamples(Masks, AllSamples);
 	FillMissingHeights(AllSamples);
+	LogSampleHeights(TEXT("After mask fill"), AllSamples);
 
 	if (AllSamples.Num() < 3)
 	{
@@ -1268,6 +1436,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 
 	int32 TileIndex = 0;
 	bool bStopTiles = false;
+	TArray<TArray<FVector2D>> PendingClipRings;
 	for (int32 TY = 0; TY < TilesY && !bStopTiles; ++TY)
 	{
 		for (int32 TX = 0; TX < TilesX; ++TX)
@@ -1417,6 +1586,22 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			TArray<int32> UsedTris;
 			CompactUsedSamples(Tin.Vertices, Kept, UsedVerts, UsedTris);
 
+			if (bClipGroundUnderRoads)
+			{
+				TArray<TArray<FVector2D>> TileRings;
+				ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
+				for (TArray<FVector2D>& Ring : TileRings)
+				{
+					TArray<FVector2D> Decimated;
+					DecimateClipRing(Ring, Decimated);
+					InflateLonLatRing(Decimated, ClipInflateMeters);
+					if (Decimated.Num() >= 3)
+					{
+						PendingClipRings.Add(MoveTemp(Decimated));
+					}
+				}
+			}
+
 			TileTask.EnterProgressFrame(
 				6.0f,
 				FText::FromString(FString::Printf(TEXT("Tile %d / %d - building slab mesh"), TileIndex, NumTiles)));
@@ -1496,14 +1681,11 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				TEXT("Clip Ground Under Roads is on but no ACesium3DTileset is in the level. Road meshes will still spawn."));
 		}
 
-		int32 HoleRings = 0;
 		TArray<ACesiumCartographicPolygon*> ClipActors;
-		ClipActors.Reserve(Masks.Num());
-		for (int32 Mi = 0; Mi < Masks.Num(); ++Mi)
+		ClipActors.Reserve(PendingClipRings.Num());
+		for (int32 Ri = 0; Ri < PendingClipRings.Num(); ++Ri)
 		{
-			HoleRings += Masks[Mi].Holes.Num();
-			TArray<FVector2D> Ring;
-			DecimateClipRing(Masks[Mi].Outer.LonLat, Ring);
+			const TArray<FVector2D>& Ring = PendingClipRings[Ri];
 			if (Ring.Num() < 3)
 			{
 				continue;
@@ -1515,21 +1697,13 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				WorldPts.Add(RoadCesiumPlacement::LonLatHeightToUnreal(
 					*Georeference, LonLat.X, LonLat.Y, 0.0));
 			}
-			const FString ClipLabel = FString::Printf(TEXT("%s_Clip_%d"), *LabelPrefix, Mi);
+			const FString ClipLabel = FString::Printf(TEXT("%s_Clip_%d"), *LabelPrefix, Ri);
 			if (ACesiumCartographicPolygon* ClipActor = SpawnClipPolygon(
 					*World, WorldPts, ClipLabel, EditorFolderPath))
 			{
 				ClipActors.Add(ClipActor);
 				++Result.ClipPolygonsSpawned;
 			}
-		}
-		if (HoleRings > 0)
-		{
-			UE_LOG(
-				LogRoadPlacer,
-				Display,
-				TEXT("Clip uses outer rings only; %d hole ring(s) are not subtracted (medians stay clipped)."),
-				HoleRings);
 		}
 		for (ACesium3DTileset* Tileset : Tilesets)
 		{
