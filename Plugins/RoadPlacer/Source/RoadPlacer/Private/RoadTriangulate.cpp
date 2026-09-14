@@ -511,9 +511,18 @@ bool RoadTriangulate::BuildTin(
 			++DroppedOutside;
 			continue;
 		}
-		OutTin.Triangles.Add(Tri.V[0]);
-		OutTin.Triangles.Add(Tri.V[1]);
-		OutTin.Triangles.Add(Tri.V[2]);
+		// Walking Delaunay keeps CCW in east/north. 1.7 Bowyer–Watson emitted CW;
+		// ReverseAllPolygonFacing then made the top visible from above. Match 1.7.
+		int32 I0 = Tri.V[0];
+		int32 I1 = Tri.V[1];
+		int32 I2 = Tri.V[2];
+		if (Orient2D(XYs[I0], XYs[I1], XYs[I2]) > 0.0)
+		{
+			Swap(I1, I2);
+		}
+		OutTin.Triangles.Add(I0);
+		OutTin.Triangles.Add(I1);
+		OutTin.Triangles.Add(I2);
 	}
 
 	UE_LOG(

@@ -14,7 +14,7 @@ from plugins_clones_tests.road_placer.clone import (
     effective_max_edge_meters,
     format_report,
     resample_altitude_along_chainage,
-    resample_altitude_along_rings,
+    resample_altitude_along_neighbor_chains,
     simulate_road_tin,
     validate_epsg4326_prj,
 )
@@ -168,41 +168,22 @@ def test_altitude_resample_smooths_dtm_noise_keeps_slope():
 def test_altitude_resample_does_not_blend_opposite_curbs():
     lon0, lat0 = -96.77, 39.075
     length, width, step = 40.0, 8.0, 1.0
-    ring = [
-        _lonlat_offset(lon0, lat0, 0.0, 0.0),
-        _lonlat_offset(lon0, lat0, length, 0.0),
-        _lonlat_offset(lon0, lat0, length, width),
-        _lonlat_offset(lon0, lat0, 0.0, width),
-        _lonlat_offset(lon0, lat0, 0.0, 0.0),
-    ]
     pts = []
     zs = []
     south = []
     north = []
-    edges = [
-        ((0.0, 0.0), (length, 0.0), 100.0),
-        ((length, 0.0), (length, width), 150.0),
-        ((length, width), (0.0, width), 200.0),
-        ((0.0, width), (0.0, 0.0), 150.0),
-    ]
-    for (x0, y0), (x1, y1), z_edge in edges:
-        dist = math.hypot(x1 - x0, y1 - y0)
-        n = max(int(round(dist / step)), 1)
-        for i in range(n):
-            t = i / n
-            e = x0 + t * (x1 - x0)
-            nrt = y0 + t * (y1 - y0)
-            lon, lat = _lonlat_offset(lon0, lat0, e, nrt)
+    for y, z_edge, bucket in ((0.0, 100.0, south), (width, 200.0, north)):
+        n = max(int(round(length / step)), 1)
+        for i in range(n + 1):
+            e = i * step
+            lon, lat = _lonlat_offset(lon0, lat0, e, y)
             pts.append((lon, lat))
             spike = 5.0 if i % 10 else 0.0
             zs.append(z_edge + spike)
-            if abs(nrt) < 0.1:
-                south.append(len(pts) - 1)
-            if abs(nrt - width) < 0.1:
-                north.append(len(pts) - 1)
+            bucket.append(len(pts) - 1)
     lonlat = np.asarray(pts)
     z = np.asarray(zs)
-    out = resample_altitude_along_rings(lonlat, z, [np.asarray(ring)], 10.0)
+    out = resample_altitude_along_neighbor_chains(lonlat, z, 10.0)
     assert np.mean(out[south]) < 115.0
     assert np.mean(out[north]) > 185.0
     assert abs(np.mean(out[south]) - np.mean(out[north])) > 70.0

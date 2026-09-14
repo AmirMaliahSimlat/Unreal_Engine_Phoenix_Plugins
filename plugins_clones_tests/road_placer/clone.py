@@ -397,6 +397,113 @@ def resample_altitude_along_rings(
     return out
 
 
+def resample_altitude_along_neighbor_chains(
+    lonlat: np.ndarray,
+    heights: np.ndarray,
+    spacing_m: float,
+    max_delta_m: float = 20.0,
+) -> np.ndarray:
+    """Walk 3 m PointZ curb chains (not the mask ring) and resample Z along each."""
+    out = np.asarray(heights, dtype=np.float64).copy()
+    ll = np.asarray(lonlat, dtype=np.float64)
+    n = len(ll)
+    if spacing_m <= 1.0e-6 or n < 3:
+        return out
+    lat0 = float(np.mean(ll[:, 1]))
+    mlon = meters_per_lon_deg(lat0)
+
+    def dist_m(a: int, b: int) -> float:
+        dx = (ll[a, 0] - ll[b, 0]) * mlon
+        dy = (ll[a, 1] - ll[b, 1]) * METERS_PER_LAT_DEG
+        return math.hypot(dx, dy)
+
+    nns = []
+    for i in range(n):
+        best = math.inf
+        for j in range(n):
+            if i == j:
+                continue
+            best = min(best, dist_m(i, j))
+        if best < 1.0e20:
+            nns.append(best)
+    if not nns:
+        return out
+    nns.sort()
+    median_nn = nns[len(nns) // 2]
+    link_m = min(max(median_nn * 1.75, 2.0), 7.0)
+    adj: list[list[int]] = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = dist_m(i, j)
+            if 0.15 < d <= link_m:
+                adj[i].append(j)
+                adj[j].append(i)
+
+    used = [False] * n
+
+    def closest_unused(i: int) -> int | None:
+        best = None
+        best_d = link_m + 1.0
+        for j in adj[i]:
+            if used[j]:
+                continue
+            d = dist_m(i, j)
+            if d < best_d:
+                best_d = d
+                best = j
+        return best
+
+    def apply_chain(chain: list[int], closed: bool) -> None:
+        if len(chain) < 2:
+            return
+        s = [0.0]
+        for k in range(1, len(chain)):
+            s.append(s[-1] + dist_m(chain[k - 1], chain[k]))
+        ring_len = (s[-1] + dist_m(chain[-1], chain[0])) if closed else s[-1]
+        anchors = [0]
+        last_s = 0.0
+        for k in range(1, len(chain)):
+            if s[k] - last_s >= spacing_m - 1.0e-6:
+                anchors.append(k)
+                last_s = s[k]
+        if (not closed) and anchors[-1] != len(chain) - 1:
+            anchors.append(len(chain) - 1)
+        as_ = np.asarray([s[u] for u in anchors], dtype=np.float64)
+        az = np.asarray([out[chain[u]] for u in anchors], dtype=np.float64)
+        for k, idx in enumerate(chain):
+            new_z = eval_altitude_at_s(
+                s[k], as_, az, closed=closed, ring_length=ring_len
+            )
+            old = out[idx]
+            out[idx] = min(max(new_z, old - max_delta_m), old + max_delta_m)
+
+    seeds = [i for i in range(n) if len(adj[i]) == 1]
+    seeds.extend(i for i in range(n) if len(adj[i]) != 1)
+    for seed in seeds:
+        if used[seed]:
+            continue
+        if not adj[seed]:
+            used[seed] = True
+            continue
+        chain = []
+        cur: int | None = seed
+        while cur is not None and not used[cur]:
+            chain.append(cur)
+            used[cur] = True
+            cur = closest_unused(cur)
+        back = []
+        prev = closest_unused(chain[0])
+        while prev is not None:
+            back.append(prev)
+            used[prev] = True
+            prev = closest_unused(prev)
+        if back:
+            chain = list(reversed(back)) + chain
+        closed = len(chain) > 3 and dist_m(chain[0], chain[-1]) <= link_m
+        apply_chain(chain, closed)
+    return out
+
+
 def _area_m2(polys: list[Polygon], lat0: float) -> float:
     mlon = meters_per_lon_deg(lat0)
     return float(sum(p.area for p in polys) * mlon * METERS_PER_LAT_DEG)

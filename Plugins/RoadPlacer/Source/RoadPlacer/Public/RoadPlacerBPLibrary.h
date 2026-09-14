@@ -61,8 +61,8 @@ public:
 	 * @param ThicknessMeters Wall depth below the top. Top = Z+offset, wall foot = Z+offset-thickness
 	 *        (default 0.20 m). No underside cap. 0 = top surface only.
 	 * @param AltitudeSampleMeters Along-curb spacing of Z control samples. 0 = use every PointZ
-	 *        height. E.g. 10 keeps XY at 1 m but takes altitude every ~10 m and cubically
-	 *        interpolates the points in between (smooths DTM bumps, keeps plan curves).
+	 *        height. E.g. 10 keeps XY at 1–3 m but takes altitude every ~10 m along each curb
+	 *        chain (neighboring PointZ, not the mask ring) and cubically interpolates the rest.
 	 * @param bSoftenEdges If true, shared vertices get averaged normals (soft edges). If false, faceted.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
