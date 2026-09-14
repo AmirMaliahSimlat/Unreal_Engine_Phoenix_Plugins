@@ -23,6 +23,7 @@
 #include "Materials/MaterialInterface.h"
 #include "Misc/PackageName.h"
 #include "Misc/ScopedSlowTask.h"
+#include "Templates/Function.h"
 #include "UObject/SoftObjectPath.h"
 
 namespace
@@ -135,6 +136,17 @@ namespace
 		{
 			return !bValid
 				|| (Lon >= MinLon && Lon <= MaxLon && Lat >= MinLat && Lat <= MaxLat);
+		}
+
+		bool Overlaps(
+			double OtherMinLon,
+			double OtherMaxLon,
+			double OtherMinLat,
+			double OtherMaxLat) const
+		{
+			return !bValid
+				|| !(OtherMaxLon < MinLon || OtherMinLon > MaxLon
+					|| OtherMaxLat < MinLat || OtherMinLat > MaxLat);
 		}
 	};
 
@@ -277,9 +289,63 @@ namespace
 			return false;
 		};
 
+		// Occupancy at 20 m: skip mask verts with no outline PointZ nearby so
+		// FillMissingHeights does not scan empty space for a city-wide nearest Z.
+		constexpr double NearOutlineM = 20.0;
+		const double CoarseDeg = NearOutlineM / FMath::Min(MetersLon, MetersLat);
+		TSet<uint64> OutlineOccupied;
+		for (int32 I = 0; I < Existing; ++I)
+		{
+			const int32 CX = FMath::FloorToInt(Out[I].Lon / CoarseDeg);
+			const int32 CY = FMath::FloorToInt(Out[I].Lat / CoarseDeg);
+			OutlineOccupied.Add(Pack(CX, CY));
+		}
+		auto NearOutline = [&](double Lon, double Lat) -> bool
+		{
+			if (Existing == 0)
+			{
+				return true;
+			}
+			const int32 CX = FMath::FloorToInt(Lon / CoarseDeg);
+			const int32 CY = FMath::FloorToInt(Lat / CoarseDeg);
+			for (int32 DY = -1; DY <= 1; ++DY)
+			{
+				for (int32 DX = -1; DX <= 1; ++DX)
+				{
+					if (OutlineOccupied.Contains(Pack(CX + DX, CY + DY)))
+					{
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+
+		auto RingOverlapsClip = [&](const FRoadShapefileRing& Ring) -> bool
+		{
+			if (!ClipBounds.bValid || Ring.LonLat.Num() == 0)
+			{
+				return ClipBounds.bValid ? Ring.LonLat.Num() > 0 : true;
+			}
+			double RMinLon = Ring.LonLat[0].X, RMaxLon = Ring.LonLat[0].X;
+			double RMinLat = Ring.LonLat[0].Y, RMaxLat = Ring.LonLat[0].Y;
+			for (int32 I = 1; I < Ring.LonLat.Num(); ++I)
+			{
+				RMinLon = FMath::Min(RMinLon, Ring.LonLat[I].X);
+				RMaxLon = FMath::Max(RMaxLon, Ring.LonLat[I].X);
+				RMinLat = FMath::Min(RMinLat, Ring.LonLat[I].Y);
+				RMaxLat = FMath::Max(RMaxLat, Ring.LonLat[I].Y);
+			}
+			return ClipBounds.Overlaps(RMinLon, RMaxLon, RMinLat, RMaxLat);
+		};
+
 		auto Consider = [&](const FVector2D& LonLat, double HeightM)
 		{
 			if (!ClipBounds.Contains(LonLat.X, LonLat.Y))
+			{
+				return;
+			}
+			if (!NearOutline(LonLat.X, LonLat.Y))
 			{
 				return;
 			}
@@ -321,6 +387,10 @@ namespace
 
 		for (const FRoadShapefileMask& Mask : Masks)
 		{
+			if (!RingOverlapsClip(Mask.Outer))
+			{
+				continue;
+			}
 			AddRing(Mask.Outer);
 			for (const FRoadShapefileRing& Hole : Mask.Holes)
 			{
@@ -331,13 +401,16 @@ namespace
 		UE_LOG(
 			LogRoadPlacer,
 			Display,
-			TEXT("Mask ring samples: kept %d extra (thinned to %.0fm, skipped if within %.0fm of outline)."),
+			TEXT("Mask ring samples: kept %d extra (thinned to %.0fm, skip if <%.0fm of outline or >%.0fm away)."),
 			Out.Num() - Existing,
 			MinSpacingM,
-			SkipNearM);
+			SkipNearM,
+			NearOutlineM);
 	}
 
-	void FillMissingHeights(TArray<FRoadSample>& Samples)
+	bool FillMissingHeights(
+		TArray<FRoadSample>& Samples,
+		const TFunctionRef<bool(int32, int32)> OnProgress)
 	{
 		TArray<int32> Known;
 		TArray<int32> Unknown;
@@ -366,9 +439,27 @@ namespace
 		}
 		if (Known.Num() == 0 || Unknown.Num() == 0)
 		{
-			return;
+			OnProgress(1, 1);
+			return true;
 		}
 
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Fill missing heights: %d known, %d unknown."),
+			Known.Num(),
+			Unknown.Num());
+
+		auto Report = [&](int32 Done) -> bool
+		{
+			return OnProgress(Done, Unknown.Num());
+		};
+		if (!Report(0))
+		{
+			return false;
+		}
+
+		int32 Dropped = 0;
 		auto AssignNearestNaive = [&](int32 I)
 		{
 			double BestD = TNumericLimits<double>::Max();
@@ -388,16 +479,23 @@ namespace
 
 		if (static_cast<int64>(Unknown.Num()) * static_cast<int64>(Known.Num()) < 250000)
 		{
-			for (const int32 I : Unknown)
+			for (int32 Ui = 0; Ui < Unknown.Num(); ++Ui)
 			{
-				AssignNearestNaive(I);
+				if ((Ui & 255) == 0 && !Report(Ui))
+				{
+					return false;
+				}
+				AssignNearestNaive(Unknown[Ui]);
 			}
-			return;
+			return Report(Unknown.Num());
 		}
 
 		const double MidLat = Samples[Known[0]].Lat;
 		const double MetersLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
-		const double CellDeg = 2.0 / FMath::Min(MetersLon, 110540.0);
+		constexpr double CellM = 10.0;
+		constexpr double MaxSearchM = 50.0;
+		const double CellDeg = CellM / FMath::Min(MetersLon, 110540.0);
+		const int32 MaxR = FMath::Max(FMath::CeilToInt(MaxSearchM / CellM), 1);
 		TMap<uint64, TArray<int32>> Grid;
 		auto Pack = [](int32 X, int32 Y) -> uint64
 		{
@@ -409,14 +507,19 @@ namespace
 			const int32 CY = FMath::FloorToInt(Samples[K].Lat / CellDeg);
 			Grid.FindOrAdd(Pack(CX, CY)).Add(K);
 		}
-		for (const int32 I : Unknown)
+		for (int32 Ui = 0; Ui < Unknown.Num(); ++Ui)
 		{
+			if ((Ui & 255) == 0 && !Report(Ui))
+			{
+				return false;
+			}
+			const int32 I = Unknown[Ui];
 			const int32 CX = FMath::FloorToInt(Samples[I].Lon / CellDeg);
 			const int32 CY = FMath::FloorToInt(Samples[I].Lat / CellDeg);
 			double BestD = TNumericLimits<double>::Max();
 			double BestH = Samples[Known[0]].HeightM;
 			bool bHit = false;
-			for (int32 R = 0; R <= 25; ++R)
+			for (int32 R = 0; R <= MaxR; ++R)
 			{
 				for (int32 DY = -R; DY <= R; ++DY)
 				{
@@ -447,8 +550,31 @@ namespace
 					break;
 				}
 			}
-			Samples[I].HeightM = BestH;
+			if (bHit)
+			{
+				Samples[I].HeightM = BestH;
+			}
+			else
+			{
+				Samples[I].HeightM = TNumericLimits<double>::Lowest();
+				++Dropped;
+			}
 		}
+
+		if (Dropped > 0)
+		{
+			Samples.RemoveAll([](const FRoadSample& S)
+			{
+				return S.HeightM <= -1.0e20;
+			});
+			UE_LOG(
+				LogRoadPlacer,
+				Display,
+				TEXT("Fill missing heights: dropped %d sample(s) with no PointZ within %.0fm."),
+				Dropped,
+				MaxSearchM);
+		}
+		return Report(Unknown.Num());
 	}
 
 	struct FOutlineIndex
@@ -1333,8 +1459,9 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 
 	constexpr int32 SampleProgressChunks = 50;
+	constexpr int32 FillProgressChunks = 20;
 	FScopedSlowTask LoadTask(
-		3.0f + static_cast<float>(SampleProgressChunks) + 3.0f,
+		3.0f + static_cast<float>(SampleProgressChunks) + 2.0f + static_cast<float>(FillProgressChunks),
 		NSLOCTEXT("RoadPlacer", "LoadProgress", "Loading road shapefiles..."));
 	LoadTask.MakeDialog(true);
 
@@ -1541,16 +1668,43 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		return Result;
 	}
 	CollectMaskSamples(Masks, AllSamples, SampleClip);
-	LoadTask.EnterProgressFrame(
-		1.0f,
-		NSLOCTEXT("RoadPlacer", "FillHeights", "Filling missing sample heights..."));
-	if (LoadTask.ShouldCancel())
+	int32 FillChunksEntered = 0;
+	auto OnFillProgress = [&](int32 Done, int32 Total) -> bool
+	{
+		const int32 SafeTotal = FMath::Max(Total, 1);
+		int32 Want = FMath::Clamp((Done * FillProgressChunks) / SafeTotal, 0, FillProgressChunks);
+		if (FillChunksEntered == 0)
+		{
+			Want = FMath::Max(Want, 1);
+		}
+		while (FillChunksEntered < Want)
+		{
+			LoadTask.EnterProgressFrame(
+				1.0f,
+				FText::FromString(FString::Printf(
+					TEXT("Filling missing sample heights (%d / %d)..."),
+					Done,
+					Total)));
+			++FillChunksEntered;
+			if (LoadTask.ShouldCancel())
+			{
+				return false;
+			}
+		}
+		return !LoadTask.ShouldCancel();
+	};
+	if (!FillMissingHeights(AllSamples, OnFillProgress))
 	{
 		Result.bCancelled = true;
 		Result.Message = TEXT("Cancelled while filling sample heights.");
 		return Result;
 	}
-	FillMissingHeights(AllSamples);
+	if (FillChunksEntered < FillProgressChunks)
+	{
+		LoadTask.EnterProgressFrame(
+			static_cast<float>(FillProgressChunks - FillChunksEntered),
+			NSLOCTEXT("RoadPlacer", "FillHeightsDone", "Filling missing sample heights..."));
+	}
 	LogSampleHeights(TEXT("After mask fill"), AllSamples);
 
 	if (AllSamples.Num() < 3)
