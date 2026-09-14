@@ -397,13 +397,54 @@ def resample_altitude_along_rings(
     return out
 
 
+def eval_linear_z(
+    s_query: float,
+    anchor_s: np.ndarray,
+    anchor_z: np.ndarray,
+    *,
+    closed: bool,
+    ring_length: float,
+) -> float:
+    """Mirrors RoadPlacer EvalLinearZ (open curb walk, optional wrap)."""
+    n = int(len(anchor_z))
+    if n <= 0:
+        return float("-inf")
+    if n == 1:
+        return float(anchor_z[0])
+    as_ = np.asarray(anchor_s, dtype=np.float64)
+    az = np.asarray(anchor_z, dtype=np.float64)
+
+    def lerp(i0: int, i1: int, a: float, b: float, q: float) -> float:
+        t = min(max((q - a) / max(b - a, 1.0e-9), 0.0), 1.0)
+        return float(az[i0] + t * (az[i1] - az[i0]))
+
+    if not closed:
+        if s_query <= float(as_[0]):
+            return float(az[0])
+        if s_query >= float(as_[-1]):
+            return float(az[-1])
+        for i in range(n - 1):
+            if s_query <= float(as_[i + 1]) + 1.0e-9:
+                return lerp(i, i + 1, float(as_[i]), float(as_[i + 1]), s_query)
+        return float(az[-1])
+
+    q = s_query + ring_length if s_query + 1.0e-9 < float(as_[0]) else s_query
+    for i in range(n - 1):
+        if q + 1.0e-9 >= float(as_[i]) and q <= float(as_[i + 1]) + 1.0e-9:
+            return lerp(i, i + 1, float(as_[i]), float(as_[i + 1]), q)
+    wrap_end = float(as_[0]) + ring_length
+    if q + 1.0e-9 >= float(as_[-1]) and q <= wrap_end + 1.0e-9:
+        return lerp(n - 1, 0, float(as_[-1]), wrap_end, q)
+    return float(az[0])
+
+
 def resample_altitude_along_neighbor_chains(
     lonlat: np.ndarray,
     heights: np.ndarray,
     spacing_m: float,
     max_delta_m: float = 20.0,
 ) -> np.ndarray:
-    """Walk 3 m PointZ curb chains (not the mask ring) and resample Z along each."""
+    """Split shapefile curb-walk order on jumps, then linearly resample Z."""
     out = np.asarray(heights, dtype=np.float64).copy()
     ll = np.asarray(lonlat, dtype=np.float64)
     n = len(ll)
@@ -417,48 +458,31 @@ def resample_altitude_along_neighbor_chains(
         dy = (ll[a, 1] - ll[b, 1]) * METERS_PER_LAT_DEG
         return math.hypot(dx, dy)
 
-    nns = []
-    for i in range(n):
-        best = math.inf
-        for j in range(n):
-            if i == j:
-                continue
-            best = min(best, dist_m(i, j))
-        if best < 1.0e20:
-            nns.append(best)
-    if not nns:
-        return out
-    nns.sort()
-    median_nn = nns[len(nns) // 2]
-    link_m = min(max(median_nn * 1.75, 2.0), 7.0)
-    adj: list[list[int]] = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = dist_m(i, j)
-            if 0.15 < d <= link_m:
-                adj[i].append(j)
-                adj[j].append(i)
+    steps = [dist_m(i - 1, i) for i in range(1, n)]
+    median_step = float(sorted(steps)[len(steps) // 2])
+    break_m = min(max(median_step * 8.0, 1.5), 6.0)
 
-    used = [False] * n
+    chains: list[list[int]] = []
+    current = [0]
+    for i in range(1, n):
+        if steps[i - 1] <= break_m:
+            current.append(i)
+        else:
+            if len(current) >= 2:
+                chains.append(current)
+            current = [i]
+    if len(current) >= 2:
+        chains.append(current)
 
-    def closest_unused(i: int) -> int | None:
-        best = None
-        best_d = link_m + 1.0
-        for j in adj[i]:
-            if used[j]:
-                continue
-            d = dist_m(i, j)
-            if d < best_d:
-                best_d = d
-                best = j
-        return best
-
-    def apply_chain(chain: list[int], closed: bool) -> None:
-        if len(chain) < 2:
-            return
+    for chain in chains:
         s = [0.0]
         for k in range(1, len(chain)):
             s.append(s[-1] + dist_m(chain[k - 1], chain[k]))
+        closed = (
+            len(chain) > 3
+            and dist_m(chain[0], chain[-1]) <= break_m
+            and s[-1] >= spacing_m * 2.0
+        )
         ring_len = (s[-1] + dist_m(chain[-1], chain[0])) if closed else s[-1]
         anchors = [0]
         last_s = 0.0
@@ -468,39 +492,18 @@ def resample_altitude_along_neighbor_chains(
                 last_s = s[k]
         if (not closed) and anchors[-1] != len(chain) - 1:
             anchors.append(len(chain) - 1)
+        if len(anchors) < 2:
+            continue
         as_ = np.asarray([s[u] for u in anchors], dtype=np.float64)
         az = np.asarray([out[chain[u]] for u in anchors], dtype=np.float64)
         for k, idx in enumerate(chain):
-            new_z = eval_altitude_at_s(
+            new_z = eval_linear_z(
                 s[k], as_, az, closed=closed, ring_length=ring_len
             )
+            if new_z <= -1.0e20:
+                continue
             old = out[idx]
             out[idx] = min(max(new_z, old - max_delta_m), old + max_delta_m)
-
-    seeds = [i for i in range(n) if len(adj[i]) == 1]
-    seeds.extend(i for i in range(n) if len(adj[i]) != 1)
-    for seed in seeds:
-        if used[seed]:
-            continue
-        if not adj[seed]:
-            used[seed] = True
-            continue
-        chain = []
-        cur: int | None = seed
-        while cur is not None and not used[cur]:
-            chain.append(cur)
-            used[cur] = True
-            cur = closest_unused(cur)
-        back = []
-        prev = closest_unused(chain[0])
-        while prev is not None:
-            back.append(prev)
-            used[prev] = True
-            prev = closest_unused(prev)
-        if back:
-            chain = list(reversed(back)) + chain
-        closed = len(chain) > 3 and dist_m(chain[0], chain[-1]) <= link_m
-        apply_chain(chain, closed)
     return out
 
 

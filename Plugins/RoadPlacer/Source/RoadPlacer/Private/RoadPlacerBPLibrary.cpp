@@ -491,18 +491,7 @@ namespace
 		}
 	};
 
-	double CatmullRomZ(double T, double P0, double P1, double P2, double P3)
-	{
-		const double T2 = T * T;
-		const double T3 = T2 * T;
-		return 0.5 * (
-			(2.0 * P1)
-			+ (-P0 + P2) * T
-			+ (2.0 * P0 - 5.0 * P1 + 4.0 * P2 - P3) * T2
-			+ (-P0 + 3.0 * P1 - 3.0 * P2 + P3) * T3);
-	}
-
-	double EvalChainZ(
+	double EvalLinearZ(
 		double SQuery,
 		const TArray<double>& AS,
 		const TArray<double>& AZ,
@@ -512,81 +501,57 @@ namespace
 		const int32 N = AZ.Num();
 		if (N <= 0)
 		{
-			return 0.0;
+			return TNumericLimits<double>::Lowest();
 		}
 		if (N == 1)
 		{
 			return AZ[0];
 		}
-		if (N == 2)
+
+		auto LerpAB = [&](int32 I0, int32 I1, double A, double B, double Q) -> double
 		{
-			if (!bClosed)
+			const double T = FMath::Clamp((Q - A) / FMath::Max(B - A, 1.0e-9), 0.0, 1.0);
+			return AZ[I0] + T * (AZ[I1] - AZ[I0]);
+		};
+
+		if (!bClosed)
+		{
+			if (SQuery <= AS[0])
 			{
-				const double Den = FMath::Max(AS[1] - AS[0], 1.0e-9);
-				const double T = FMath::Clamp((SQuery - AS[0]) / Den, 0.0, 1.0);
-				return AZ[0] + T * (AZ[1] - AZ[0]);
+				return AZ[0];
 			}
-			const double Fwd = FMath::Max(AS[1] - AS[0], 1.0e-9);
-			if (SQuery + 1.0e-9 >= AS[0] && SQuery <= AS[1] + 1.0e-9)
+			if (SQuery >= AS.Last())
 			{
-				const double T = FMath::Clamp((SQuery - AS[0]) / Fwd, 0.0, 1.0);
-				return AZ[0] + T * (AZ[1] - AZ[0]);
+				return AZ.Last();
 			}
-			const double Back = FMath::Max(RingLen - (AS[1] - AS[0]), 1.0e-9);
-			const double Q = (SQuery + 1.0e-9 < AS[0]) ? (SQuery + RingLen) : SQuery;
-			const double T = FMath::Clamp((Q - AS[1]) / Back, 0.0, 1.0);
-			return AZ[1] + T * (AZ[0] - AZ[1]);
+			for (int32 I = 0; I + 1 < N; ++I)
+			{
+				if (SQuery <= AS[I + 1] + 1.0e-9)
+				{
+					return LerpAB(I, I + 1, AS[I], AS[I + 1], SQuery);
+				}
+			}
+			return AZ.Last();
 		}
 
-		int32 Seg = 0;
-		double T = 0.0;
-		bool bFound = false;
-		for (int32 I = 0; I < N; ++I)
+		double Q = SQuery;
+		if (Q + 1.0e-9 < AS[0])
 		{
-			const double A = AS[I];
-			const double B = (I + 1 < N) ? AS[I + 1] : (bClosed ? (AS[0] + RingLen) : AS[N - 1]);
-			if (!bClosed && I + 1 >= N)
+			Q += RingLen;
+		}
+		for (int32 I = 0; I + 1 < N; ++I)
+		{
+			if (Q + 1.0e-9 >= AS[I] && Q <= AS[I + 1] + 1.0e-9)
 			{
-				break;
-			}
-			double QAdj = SQuery;
-			if (bClosed && I + 1 >= N && SQuery + 1.0e-9 < AS[0])
-			{
-				QAdj = SQuery + RingLen;
-			}
-			if (QAdj + 1.0e-9 >= A && QAdj <= B + 1.0e-9)
-			{
-				Seg = I;
-				T = FMath::Clamp((QAdj - A) / FMath::Max(B - A, 1.0e-9), 0.0, 1.0);
-				bFound = true;
-				break;
+				return LerpAB(I, I + 1, AS[I], AS[I + 1], Q);
 			}
 		}
-		if (!bFound)
+		const double WrapEnd = AS[0] + RingLen;
+		if (Q + 1.0e-9 >= AS.Last() && Q <= WrapEnd + 1.0e-9)
 		{
-			if (!bClosed)
-			{
-				return (SQuery <= AS[0]) ? AZ[0] : AZ[N - 1];
-			}
-			return AZ[0];
+			return LerpAB(N - 1, 0, AS.Last(), WrapEnd, Q);
 		}
-
-		double P0, P1, P2, P3;
-		if (bClosed)
-		{
-			P0 = AZ[(Seg - 1 + N) % N];
-			P1 = AZ[Seg];
-			P2 = AZ[(Seg + 1) % N];
-			P3 = AZ[(Seg + 2) % N];
-		}
-		else
-		{
-			P1 = AZ[Seg];
-			P2 = AZ[FMath::Min(Seg + 1, N - 1)];
-			P0 = (Seg > 0) ? AZ[Seg - 1] : P1;
-			P3 = (Seg + 2 < N) ? AZ[Seg + 2] : P2;
-		}
-		return CatmullRomZ(T, P0, P1, P2, P3);
+		return AZ[0];
 	}
 
 	void LogSampleHeights(const TCHAR* Tag, const TArray<FRoadSample>& Samples)
@@ -633,11 +598,6 @@ namespace
 		const double MidLat = Samples[0].Lat;
 		const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
 		const double MLat = 110540.0;
-		const double CellDeg = 2.0 / FMath::Min(MLon, MLat);
-		auto Pack = [](int32 X, int32 Y) -> uint64
-		{
-			return (static_cast<uint64>(static_cast<uint32>(X)) << 32) | static_cast<uint32>(Y);
-		};
 		auto DistM = [&](int32 A, int32 B) -> double
 		{
 			const double Dx = (Samples[A].Lon - Samples[B].Lon) * MLon;
@@ -645,114 +605,60 @@ namespace
 			return FMath::Sqrt(Dx * Dx + Dy * Dy);
 		};
 
-		TMap<uint64, TArray<int32>> Grid;
-		for (int32 I = 0; I < N; ++I)
+		// Outline PointZ is stored in curb-walk order (~0.3 m). Split on jumps; do not
+		// snap to the mask ring or a 2D nearest-neighbor graph (those flatten a city
+		// to one height, often far below the DTM).
+		TArray<double> StepM;
+		StepM.Reserve(N - 1);
+		for (int32 I = 1; I < N; ++I)
 		{
-			const int32 CX = FMath::FloorToInt(Samples[I].Lon / CellDeg);
-			const int32 CY = FMath::FloorToInt(Samples[I].Lat / CellDeg);
-			Grid.FindOrAdd(Pack(CX, CY)).Add(I);
+			StepM.Add(DistM(I - 1, I));
 		}
+		TArray<double> SortedStep = StepM;
+		SortedStep.Sort();
+		const double MedianStep = SortedStep[SortedStep.Num() / 2];
+		const double BreakM = FMath::Clamp(MedianStep * 8.0, 1.5, 6.0);
 
-		auto Nearby = [&](int32 I, TArray<int32>& Out)
+		TArray<TArray<int32>> Chains;
+		TArray<int32> Current;
+		Current.Add(0);
+		int32 Isolated = 0;
+		for (int32 I = 1; I < N; ++I)
 		{
-			Out.Reset();
-			const int32 CX = FMath::FloorToInt(Samples[I].Lon / CellDeg);
-			const int32 CY = FMath::FloorToInt(Samples[I].Lat / CellDeg);
-			for (int32 DY = -4; DY <= 4; ++DY)
+			if (StepM[I - 1] <= BreakM)
 			{
-				for (int32 DX = -4; DX <= 4; ++DX)
+				Current.Add(I);
+			}
+			else
+			{
+				if (Current.Num() >= 2)
 				{
-					if (const TArray<int32>* Cell = Grid.Find(Pack(CX + DX, CY + DY)))
-					{
-						for (const int32 K : *Cell)
-						{
-							if (K != I)
-							{
-								Out.Add(K);
-							}
-						}
-					}
+					Chains.Add(MoveTemp(Current));
 				}
-			}
-		};
-
-		TArray<double> NNs;
-		NNs.Reserve(N);
-		TArray<int32> Cand;
-		for (int32 I = 0; I < N; ++I)
-		{
-			Nearby(I, Cand);
-			double Best = TNumericLimits<double>::Max();
-			for (const int32 K : Cand)
-			{
-				Best = FMath::Min(Best, DistM(I, K));
-			}
-			if (Best < 1.0e20)
-			{
-				NNs.Add(Best);
+				else
+				{
+					++Isolated;
+				}
+				Current.Reset();
+				Current.Add(I);
 			}
 		}
-		if (NNs.Num() == 0)
+		if (Current.Num() >= 2)
 		{
-			return;
+			Chains.Add(MoveTemp(Current));
 		}
-		NNs.Sort();
-		const double MedianNN = NNs[NNs.Num() / 2];
-		const double LinkM = FMath::Clamp(MedianNN * 1.75, 2.0, 7.0);
-
-		TArray<TArray<int32>> Adj;
-		Adj.SetNum(N);
-		for (int32 I = 0; I < N; ++I)
+		else if (Current.Num() == 1)
 		{
-			Nearby(I, Cand);
-			for (const int32 K : Cand)
-			{
-				if (K <= I)
-				{
-					continue;
-				}
-				const double D = DistM(I, K);
-				if (D > 0.15 && D <= LinkM)
-				{
-					Adj[I].Add(K);
-					Adj[K].Add(I);
-				}
-			}
+			++Isolated;
 		}
-
-		TArray<uint8> Used;
-		Used.Init(0, N);
-		auto ClosestUnused = [&](int32 I) -> int32
-		{
-			int32 Best = INDEX_NONE;
-			double BestD = LinkM + 1.0;
-			for (const int32 J : Adj[I])
-			{
-				if (Used[J])
-				{
-					continue;
-				}
-				const double D = DistM(I, J);
-				if (D < BestD)
-				{
-					BestD = D;
-					Best = J;
-				}
-			}
-			return Best;
-		};
 
 		int32 ChainCount = 0;
 		int32 AnchorCount = 0;
-		int32 Isolated = 0;
+		int32 SkippedShort = 0;
 		constexpr double MaxDeltaM = 20.0;
 
-		auto ApplyChain = [&](const TArray<int32>& Chain, bool bClosed)
+		for (const TArray<int32>& Chain : Chains)
 		{
-			if (Chain.Num() < 2)
-			{
-				return;
-			}
 			TArray<double> S;
 			S.SetNum(Chain.Num());
 			S[0] = 0.0;
@@ -760,6 +666,10 @@ namespace
 			{
 				S[I] = S[I - 1] + DistM(Chain[I - 1], Chain[I]);
 			}
+			const bool bClosed =
+				Chain.Num() > 3
+				&& DistM(Chain[0], Chain.Last()) <= BreakM
+				&& S.Last() >= SpacingM * 2.0;
 			const double RingLen = bClosed
 				? (S.Last() + DistM(Chain.Last(), Chain[0]))
 				: S.Last();
@@ -779,6 +689,11 @@ namespace
 			{
 				Anchors.Add(Chain.Num() - 1);
 			}
+			if (Anchors.Num() < 2)
+			{
+				++SkippedShort;
+				continue;
+			}
 
 			TArray<double> AS;
 			TArray<double> AZ;
@@ -795,86 +710,26 @@ namespace
 			for (int32 I = 0; I < Chain.Num(); ++I)
 			{
 				const double OldZ = Samples[Chain[I]].HeightM;
-				const double NewZ = EvalChainZ(S[I], AS, AZ, bClosed, RingLen);
+				const double NewZ = EvalLinearZ(S[I], AS, AZ, bClosed, RingLen);
+				if (NewZ <= -1.0e20)
+				{
+					continue;
+				}
 				Samples[Chain[I]].HeightM = FMath::Clamp(NewZ, OldZ - MaxDeltaM, OldZ + MaxDeltaM);
 			}
-		};
-
-		TArray<int32> Seeds;
-		Seeds.Reserve(N);
-		for (int32 I = 0; I < N; ++I)
-		{
-			if (Adj[I].Num() == 1)
-			{
-				Seeds.Add(I);
-			}
-		}
-		for (int32 I = 0; I < N; ++I)
-		{
-			if (Adj[I].Num() != 1)
-			{
-				Seeds.Add(I);
-			}
-		}
-
-		for (const int32 Seed : Seeds)
-		{
-			if (Used[Seed])
-			{
-				continue;
-			}
-			if (Adj[Seed].Num() == 0)
-			{
-				Used[Seed] = 1;
-				++Isolated;
-				continue;
-			}
-
-			TArray<int32> Chain;
-			int32 Cur = Seed;
-			while (Cur != INDEX_NONE && !Used[Cur])
-			{
-				Chain.Add(Cur);
-				Used[Cur] = 1;
-				Cur = ClosestUnused(Cur);
-			}
-
-			int32 Head = Chain[0];
-			int32 Prev = ClosestUnused(Head);
-			TArray<int32> Back;
-			while (Prev != INDEX_NONE)
-			{
-				Back.Add(Prev);
-				Used[Prev] = 1;
-				const int32 Next = ClosestUnused(Prev);
-				Prev = Next;
-			}
-			if (Back.Num() > 0)
-			{
-				TArray<int32> Full;
-				Full.Reserve(Back.Num() + Chain.Num());
-				for (int32 I = Back.Num() - 1; I >= 0; --I)
-				{
-					Full.Add(Back[I]);
-				}
-				Full.Append(Chain);
-				Chain = MoveTemp(Full);
-			}
-
-			const bool bClosed = Chain.Num() > 3 && DistM(Chain[0], Chain.Last()) <= LinkM;
-			ApplyChain(Chain, bClosed);
 		}
 
 		UE_LOG(
 			LogRoadPlacer,
 			Display,
-			TEXT("Altitude resample: spacing=%.1fm link=%.2fm (median NN=%.2fm) chains=%d anchors=%d isolated=%d."),
+			TEXT("Altitude resample: spacing=%.1fm break=%.2fm (median step=%.3fm) chains=%d anchors=%d isolated=%d skippedShort=%d."),
 			SpacingM,
-			LinkM,
-			MedianNN,
+			BreakM,
+			MedianStep,
 			ChainCount,
 			AnchorCount,
-			Isolated);
+			Isolated,
+			SkippedShort);
 	}
 
 	uint64 UndirectedEdge(int32 A, int32 B)

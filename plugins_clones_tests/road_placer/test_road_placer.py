@@ -187,3 +187,22 @@ def test_altitude_resample_does_not_blend_opposite_curbs():
     assert np.mean(out[south]) < 115.0
     assert np.mean(out[north]) > 185.0
     assert abs(np.mean(out[south]) - np.mean(out[north])) > 70.0
+
+
+def test_altitude_resample_keeps_along_curb_slope():
+    """10 m Z controls on a 0.3 m walk must not collapse a 40 m grade to one height."""
+    lon0, lat0 = -96.77, 39.075
+    length, step = 400.0, 0.3
+    pts = []
+    zs = []
+    n = int(round(length / step))
+    for i in range(n + 1):
+        e = i * step
+        lon, lat = _lonlat_offset(lon0, lat0, e, 0.0)
+        pts.append((lon, lat))
+        zs.append(320.0 + 0.1 * e)  # 40 m rise over 400 m
+    out = resample_altitude_along_neighbor_chains(np.asarray(pts), np.asarray(zs), 10.0)
+    assert out.max() - out.min() > 35.0
+    assert abs(out[0] - 320.0) < 0.2
+    assert abs(out[-1] - 360.0) < 0.2
+    assert abs(float(np.mean(out)) - 340.0) < 2.0
