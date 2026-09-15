@@ -1086,10 +1086,30 @@ namespace
 				}
 			}
 		}
-		Out.Reserve(Outer.Num() + Hole.Num() + 3);
+		Out.Reserve(Outer.Num() + Hole.Num() + 6);
+		const FVector2D A = Outer[BestO];
+		const FVector2D B = Hole[BestH];
+		const double MidLat = 0.5 * (A.Y + B.Y);
+		const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
+		const double MLat = 110540.0;
+		FVector2D DirM((B.X - A.X) * MLon, (B.Y - A.Y) * MLat);
+		const double LenM = DirM.Size();
+		FVector2D Off(0.0, 0.0);
+		if (LenM > 1.0e-3)
+		{
+			const FVector2D PerpM(-DirM.Y / LenM, DirM.X / LenM);
+			Off = FVector2D(
+				(PerpM.X * ClipInflateMeters) / MLon,
+				(PerpM.Y * ClipInflateMeters) / MLat);
+		}
 		for (int32 I = 0; I <= BestO; ++I)
 		{
 			Out.Add(Outer[I]);
+		}
+		if (Off.SizeSquared() > 0.0)
+		{
+			Out.Add(A + Off);
+			Out.Add(B + Off);
 		}
 		const int32 HN = Hole.Num();
 		for (int32 K = 0; K < HN; ++K)
