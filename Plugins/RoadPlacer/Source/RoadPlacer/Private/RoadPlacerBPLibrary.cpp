@@ -33,8 +33,9 @@ namespace
 	const FName RoadPlacerOverlayName(TEXT("RoadPlacerClip"));
 	constexpr double DuplicateEpsDeg = 1.0e-10;
 	constexpr int32 ClipOutlineMaxVertices = 8192;
-	constexpr double ClipSimplifyMeters = 0.35;
-	constexpr double ClipInflateMeters = 1.0;
+	constexpr double ClipSimplifyMeters = 0.05;
+	constexpr double ClipInflateMeters = 0.05;
+	constexpr double ClipBridgeWidthMeters = 0.15;
 
 	FString SanitizeFilePath(const FString& InPath)
 	{
@@ -1099,8 +1100,8 @@ namespace
 		{
 			const FVector2D PerpM(-DirM.Y / LenM, DirM.X / LenM);
 			Off = FVector2D(
-				(PerpM.X * ClipInflateMeters) / MLon,
-				(PerpM.Y * ClipInflateMeters) / MLat);
+				(PerpM.X * ClipBridgeWidthMeters) / MLon,
+				(PerpM.Y * ClipBridgeWidthMeters) / MLat);
 		}
 		for (int32 I = 0; I <= BestO; ++I)
 		{

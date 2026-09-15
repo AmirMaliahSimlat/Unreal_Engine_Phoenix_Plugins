@@ -144,18 +144,37 @@ namespace
 		MeshDescription.TriangulateMesh();
 		MeshDescription.ReverseAllPolygonFacing();
 
-		TEdgeAttributesRef<bool> Hard = Attributes.GetEdgeHardnesses();
-		for (const FEdgeID E : MeshDescription.Edges().GetElementIDs())
+		TArray<FVector3f> FaceN;
+		TArray<uint8> bTopFace;
+		TMap<FVertexID, FVector3f> TopAccum;
+		TMap<FVertexID, TArray<FVertexID>> TopNeighbors;
+		TSet<uint64> WallEdgeKeys;
+		auto PackVids = [](FVertexID A, FVertexID B) -> uint64
 		{
-			Hard[E] = !bSoftenEdges;
-		}
+			uint32 Lo = static_cast<uint32>(A.GetValue());
+			uint32 Hi = static_cast<uint32>(B.GetValue());
+			if (Lo > Hi)
+			{
+				Swap(Lo, Hi);
+			}
+			return (static_cast<uint64>(Lo) << 32) | static_cast<uint64>(Hi);
+		};
+		auto AddTopNeighbor = [&TopNeighbors](FVertexID A, FVertexID B)
+		{
+			if (A != B)
+			{
+				TopNeighbors.FindOrAdd(A).AddUnique(B);
+				TopNeighbors.FindOrAdd(B).AddUnique(A);
+			}
+		};
 
-		TMap<FVertexID, FVector3f> Accum;
 		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
 		{
 			const TArrayView<const FVertexInstanceID> Corners = MeshDescription.GetTriangleVertexInstances(TriId);
 			if (Corners.Num() < 3)
 			{
+				FaceN.Add(FVector3f::UpVector);
+				bTopFace.Add(0);
 				continue;
 			}
 			const FVertexID V0 = MeshDescription.GetVertexInstanceVertex(Corners[0]);
@@ -170,41 +189,102 @@ namespace
 			{
 				N = FVector3f::UpVector;
 			}
+			const bool bTop = N.Z >= 0.45f;
+			FaceN.Add(N);
+			bTopFace.Add(bTop ? 1 : 0);
+			if (!bTop)
+			{
+				WallEdgeKeys.Add(PackVids(V0, V1));
+				WallEdgeKeys.Add(PackVids(V1, V2));
+				WallEdgeKeys.Add(PackVids(V2, V0));
+			}
+			else if (bSoftenEdges)
+			{
+				const float Area = FVector3f::CrossProduct(
+					Positions[V1] - Positions[V0], Positions[V2] - Positions[V0]).Size();
+				TopAccum.FindOrAdd(V0) += N * Area;
+				TopAccum.FindOrAdd(V1) += N * Area;
+				TopAccum.FindOrAdd(V2) += N * Area;
+				AddTopNeighbor(V0, V1);
+				AddTopNeighbor(V1, V2);
+				AddTopNeighbor(V2, V0);
+			}
+		}
+
+		TEdgeAttributesRef<bool> Hard = Attributes.GetEdgeHardnesses();
+		for (const FEdgeID E : MeshDescription.Edges().GetElementIDs())
+		{
 			if (!bSoftenEdges)
 			{
-				Normals[Corners[0]] = N;
-				Normals[Corners[1]] = N;
-				Normals[Corners[2]] = N;
+				Hard[E] = true;
 				continue;
 			}
-			Accum.FindOrAdd(V0) += N;
-			Accum.FindOrAdd(V1) += N;
-			Accum.FindOrAdd(V2) += N;
-		}
-
-		if (!bSoftenEdges)
-		{
-			return;
-		}
-
-		for (TPair<FVertexID, FVector3f>& Pair : Accum)
-		{
-			Pair.Value = Pair.Value.GetSafeNormal();
-			if (Pair.Value.IsNearlyZero())
+			const TArrayView<const FVertexID> EdgeVerts = MeshDescription.GetEdgeVertices(E);
+			bool bTouchesWall = false;
+			if (EdgeVerts.Num() >= 2)
 			{
-				Pair.Value = FVector3f::UpVector;
+				bTouchesWall = WallEdgeKeys.Contains(PackVids(EdgeVerts[0], EdgeVerts[1]));
+			}
+			Hard[E] = bTouchesWall;
+		}
+
+		if (bSoftenEdges)
+		{
+			for (TPair<FVertexID, FVector3f>& Pair : TopAccum)
+			{
+				Pair.Value = Pair.Value.GetSafeNormal();
+				if (Pair.Value.IsNearlyZero())
+				{
+					Pair.Value = FVector3f::UpVector;
+				}
+			}
+			for (int32 Pass = 0; Pass < 2; ++Pass)
+			{
+				TMap<FVertexID, FVector3f> Next = TopAccum;
+				for (const TPair<FVertexID, FVector3f>& Pair : TopAccum)
+				{
+					FVector3f Sum = Pair.Value;
+					int32 Count = 1;
+					if (const TArray<FVertexID>* Adj = TopNeighbors.Find(Pair.Key))
+					{
+						for (const FVertexID Neighbor : *Adj)
+						{
+							if (const FVector3f* NeighborN = TopAccum.Find(Neighbor))
+							{
+								Sum += *NeighborN;
+								++Count;
+							}
+						}
+					}
+					FVector3f Blurred = (Sum / static_cast<float>(Count)).GetSafeNormal();
+					if (Blurred.IsNearlyZero())
+					{
+						Blurred = FVector3f::UpVector;
+					}
+					Next[Pair.Key] = Blurred;
+				}
+				TopAccum = MoveTemp(Next);
 			}
 		}
 
+		int32 FaceI = 0;
 		for (const FTriangleID TriId : MeshDescription.Triangles().GetElementIDs())
 		{
 			const TArrayView<const FVertexInstanceID> Corners = MeshDescription.GetTriangleVertexInstances(TriId);
+			const FVector3f FaceNormal = FaceN.IsValidIndex(FaceI) ? FaceN[FaceI] : FVector3f::UpVector;
+			const bool bTop = bTopFace.IsValidIndex(FaceI) && bTopFace[FaceI] != 0;
+			++FaceI;
 			for (const FVertexInstanceID Corner : Corners)
 			{
-				if (const FVector3f* N = Accum.Find(MeshDescription.GetVertexInstanceVertex(Corner)))
+				if (bSoftenEdges && bTop)
 				{
-					Normals[Corner] = *N;
+					if (const FVector3f* N = TopAccum.Find(MeshDescription.GetVertexInstanceVertex(Corner)))
+					{
+						Normals[Corner] = *N;
+						continue;
+					}
 				}
+				Normals[Corner] = FaceNormal;
 			}
 		}
 	}

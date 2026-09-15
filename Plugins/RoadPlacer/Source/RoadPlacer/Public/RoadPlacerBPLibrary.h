@@ -69,7 +69,8 @@ public:
 	 * @param AltitudeSampleMeters Along-curb spacing of Z control samples. 0 = use every PointZ
 	 *        height (same drape as 1.8). E.g. 10 keeps XY at 0.3–3 m but takes altitude every
 	 *        ~10 m along each shapefile curb walk (not the mask ring) and linearly fills the rest.
-	 * @param bSoftenEdges If true, shared vertices get averaged normals (soft edges). If false, faceted.
+	 * @param bSoftenEdges If true, the pavement top uses averaged/smoothed normals (soft).
+	 *        Walls stay sharp so curb shading is not pulled sideways.
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
 	 * @param bClipGroundUnderRoads If true, hide Cesium imagery and DTM under placed road meshes.
