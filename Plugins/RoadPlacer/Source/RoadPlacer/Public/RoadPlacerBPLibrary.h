@@ -74,6 +74,7 @@ public:
 	 * @param MetersPerUv Texture scale.
 	 * @param bEnableCollision If true, road meshes have query+physics collision.
 	 * @param bClipGroundUnderRoads If true, hide Cesium imagery and DTM under placed road meshes.
+	 *        Only the spawned tile(s) are clipped — Only Tile Index does not overlay the whole map.
 	 *        Courtyards enclosed by a loop of roads are left in place. Same cartographic
 	 *        raster overlay as Water Placer. Increase Thickness so slab walls fill the curb gap.
 	 * @param OnlyTileIndex 1-based tile to generate (same numbering as the Output Log).

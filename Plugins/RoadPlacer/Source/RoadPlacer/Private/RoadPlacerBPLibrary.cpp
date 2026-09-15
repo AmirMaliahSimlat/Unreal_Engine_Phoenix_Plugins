@@ -139,6 +139,17 @@ namespace
 			return !bValid
 				|| (Lon >= MinLon && Lon <= MaxLon && Lat >= MinLat && Lat <= MaxLat);
 		}
+
+		bool Overlaps(
+			double OtherMinLon,
+			double OtherMaxLon,
+			double OtherMinLat,
+			double OtherMaxLat) const
+		{
+			return !bValid
+				|| !(OtherMaxLon < MinLon || OtherMinLon > MaxLon
+					|| OtherMaxLat < MinLat || OtherMinLat > MaxLat);
+		}
 	};
 
 	bool MaskLonLatBounds(
@@ -1126,6 +1137,169 @@ namespace
 		return Out;
 	}
 
+	void ClipRingBBox(
+		const TArray<FVector2D>& Ring,
+		double& MinLon,
+		double& MaxLon,
+		double& MinLat,
+		double& MaxLat)
+	{
+		if (Ring.Num() == 0)
+		{
+			MinLon = MaxLon = MinLat = MaxLat = 0.0;
+			return;
+		}
+		MinLon = MaxLon = Ring[0].X;
+		MinLat = MaxLat = Ring[0].Y;
+		for (int32 I = 1; I < Ring.Num(); ++I)
+		{
+			MinLon = FMath::Min(MinLon, Ring[I].X);
+			MaxLon = FMath::Max(MaxLon, Ring[I].X);
+			MinLat = FMath::Min(MinLat, Ring[I].Y);
+			MaxLat = FMath::Max(MaxLat, Ring[I].Y);
+		}
+	}
+
+	bool ClipRingOverlapsKeep(const TArray<FVector2D>& Ring, const FRoadLonLatRect& KeepBounds)
+	{
+		if (!KeepBounds.bValid)
+		{
+			return true;
+		}
+		if (Ring.Num() == 0)
+		{
+			return false;
+		}
+		double RMinLon, RMaxLon, RMinLat, RMaxLat;
+		ClipRingBBox(Ring, RMinLon, RMaxLon, RMinLat, RMaxLat);
+		return KeepBounds.Overlaps(RMinLon, RMaxLon, RMinLat, RMaxLat);
+	}
+
+	void ClipRingAgainstLonLatEdge(
+		const TArray<FVector2D>& In,
+		TArray<FVector2D>& Out,
+		int32 Edge,
+		double MinLon,
+		double MaxLon,
+		double MinLat,
+		double MaxLat)
+	{
+		Out.Reset();
+		if (In.Num() == 0)
+		{
+			return;
+		}
+		auto bInside = [&](const FVector2D& P) -> bool
+		{
+			switch (Edge)
+			{
+			case 0: return P.X >= MinLon;
+			case 1: return P.X <= MaxLon;
+			case 2: return P.Y >= MinLat;
+			default: return P.Y <= MaxLat;
+			}
+		};
+		auto Intersect = [&](const FVector2D& S, const FVector2D& E) -> FVector2D
+		{
+			if (Edge <= 1)
+			{
+				const double X = (Edge == 0) ? MinLon : MaxLon;
+				const double Den = E.X - S.X;
+				const double T = FMath::Abs(Den) < 1.0e-30 ? 0.0 : (X - S.X) / Den;
+				return FVector2D(X, S.Y + T * (E.Y - S.Y));
+			}
+			const double Y = (Edge == 2) ? MinLat : MaxLat;
+			const double Den = E.Y - S.Y;
+			const double T = FMath::Abs(Den) < 1.0e-30 ? 0.0 : (Y - S.Y) / Den;
+			return FVector2D(S.X + T * (E.X - S.X), Y);
+		};
+
+		FVector2D S = In.Last();
+		for (const FVector2D& E : In)
+		{
+			const bool bE = bInside(E);
+			const bool bS = bInside(S);
+			if (bE)
+			{
+				if (!bS)
+				{
+					Out.Add(Intersect(S, E));
+				}
+				Out.Add(E);
+			}
+			else if (bS)
+			{
+				Out.Add(Intersect(S, E));
+			}
+			S = E;
+		}
+	}
+
+	void ClipLonLatRingToRect(TArray<FVector2D>& Ring, const FRoadLonLatRect& KeepBounds)
+	{
+		if (!KeepBounds.bValid || Ring.Num() < 3)
+		{
+			return;
+		}
+		TArray<FVector2D> A = Ring;
+		TArray<FVector2D> B;
+		for (int32 Edge = 0; Edge < 4; ++Edge)
+		{
+			ClipRingAgainstLonLatEdge(
+				A, B, Edge, KeepBounds.MinLon, KeepBounds.MaxLon, KeepBounds.MinLat, KeepBounds.MaxLat);
+			A = MoveTemp(B);
+			if (A.Num() < 3)
+			{
+				Ring.Reset();
+				return;
+			}
+		}
+		StripClosedDuplicate(A);
+		Ring = MoveTemp(A);
+	}
+
+	int32 KeepClipRingsInTile(
+		TArray<TArray<FVector2D>>& Rings,
+		const FRoadLonLatRect& KeepBounds,
+		double ExtraLon,
+		double ExtraLat)
+	{
+		if (!KeepBounds.bValid)
+		{
+			return 0;
+		}
+		const double MaxLonSpan = (KeepBounds.MaxLon - KeepBounds.MinLon) + ExtraLon;
+		const double MaxLatSpan = (KeepBounds.MaxLat - KeepBounds.MinLat) + ExtraLat;
+		int32 Dropped = 0;
+		TArray<TArray<FVector2D>> Kept;
+		Kept.Reserve(Rings.Num());
+		for (TArray<FVector2D>& Ring : Rings)
+		{
+			if (Ring.Num() < 3 || !ClipRingOverlapsKeep(Ring, KeepBounds))
+			{
+				++Dropped;
+				continue;
+			}
+			double RMinLon, RMaxLon, RMinLat, RMaxLat;
+			ClipRingBBox(Ring, RMinLon, RMaxLon, RMinLat, RMaxLat);
+			if ((RMaxLon - RMinLon) > MaxLonSpan || (RMaxLat - RMinLat) > MaxLatSpan)
+			{
+				++Dropped;
+				continue;
+			}
+			ClipLonLatRingToRect(Ring, KeepBounds);
+			StripClosedDuplicate(Ring);
+			if (Ring.Num() < 3)
+			{
+				++Dropped;
+				continue;
+			}
+			Kept.Add(MoveTemp(Ring));
+		}
+		Rings = MoveTemp(Kept);
+		return Dropped;
+	}
+
 	bool ClipPointInRing(const FVector2D& P, const TArray<FVector2D>& Ring)
 	{
 		const int32 N = Ring.Num();
@@ -2003,15 +2177,6 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			TArray<int32> UsedTris;
 			CompactUsedSamples(Tin.Vertices, Kept, UsedVerts, UsedTris);
 
-			if (bClipGroundUnderRoads)
-			{
-				TArray<TArray<FVector2D>> TileRings;
-				ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
-				TArray<TArray<FVector2D>> ClipRings;
-				ConvertBoundaryRingsToClipRings(TileRings, ClipRings);
-				PendingClipRings.Append(MoveTemp(ClipRings));
-			}
-
 			TileTask.EnterProgressFrame(
 				6.0f,
 				FText::FromString(FString::Printf(TEXT("Tile %d / %d - building slab mesh"), TileIndex, NumTiles)));
@@ -2056,6 +2221,36 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			{
 				++Result.TilesSpawned;
 				Result.TrianglesBuilt += SlabTris.Num() / 3;
+				if (bClipGroundUnderRoads)
+				{
+					FRoadLonLatRect TileKeep;
+					const double KeepPadLon = 2.0
+						/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
+					const double KeepPadLat = 2.0 / 110540.0;
+					TileKeep.MinLon = TMinLon - KeepPadLon;
+					TileKeep.MaxLon = TMaxLon + KeepPadLon;
+					TileKeep.MinLat = TMinLat - KeepPadLat;
+					TileKeep.MaxLat = TMaxLat + KeepPadLat;
+					TileKeep.bValid = true;
+					const double ExtraLon = 100.0
+						/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
+					const double ExtraLat = 100.0 / 110540.0;
+
+					TArray<TArray<FVector2D>> TileRings;
+					ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
+					TArray<TArray<FVector2D>> ClipRings;
+					ConvertBoundaryRingsToClipRings(TileRings, ClipRings);
+					const int32 Dropped = KeepClipRingsInTile(ClipRings, TileKeep, ExtraLon, ExtraLat);
+					UE_LOG(
+						LogRoadPlacer,
+						Display,
+						TEXT("Tile %d / %d: %d clip polygon(s) inside this tile (dropped %d outside/oversized)."),
+						TileIndex,
+						NumTiles,
+						ClipRings.Num(),
+						Dropped);
+					PendingClipRings.Append(MoveTemp(ClipRings));
+				}
 			}
 			else
 			{
@@ -2078,8 +2273,11 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		UE_LOG(
 			LogRoadPlacer,
 			Display,
-			TEXT("Clip rings from road mesh: %d polygon(s)."),
-			PendingClipRings.Num());
+			TEXT("Clip rings from placed road mesh: %d polygon(s)%s."),
+			PendingClipRings.Num(),
+			bOneTile
+				? *FString::Printf(TEXT(" (Only Tile Index %d, not the whole mask)"), WantedTile)
+				: TEXT(""));
 
 		TArray<ACesium3DTileset*> Tilesets;
 		for (TActorIterator<ACesium3DTileset> It(World); It; ++It)
