@@ -85,8 +85,9 @@ public:
 	 * @param bSkipRoadMeshes Temporary test: triangulate without saving road StaticMeshes.
 	 *        Use with Clip Ground (FPS) and/or Export Shapefile Path (QGIS).
 	 * @param ExportShapefilePath Optional EPSG:4326 PolygonZ path (.shp). Empty = do not write.
-	 *        Outlines match the Cesium clips from this run (before overlay merge). Z is TIN
-	 *        ellipsoid height. Clip Ground can stay off. Recreate this node after adding the pin.
+	 *        One feature per TIN triangle of the road top (no side walls). Z is ellipsoid
+	 *        height of the mesh top (sampled Z + Height Offset). Burn in QGIS with
+	 *        Rasterize using Z / gdal_rasterize -3d. Clip Ground can stay off.
 	 */
 	UFUNCTION(
 		BlueprintCallable,

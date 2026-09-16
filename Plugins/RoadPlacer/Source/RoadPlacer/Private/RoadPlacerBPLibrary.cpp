@@ -1,4 +1,4 @@
-#include "RoadPlacerPrivatePCH.h"
+﻿#include "RoadPlacerPrivatePCH.h"
 #include "RoadPlacerBPLibrary.h"
 
 #include "RoadCesiumPlacement.h"
@@ -897,32 +897,6 @@ namespace
 				}
 				OutTris.Add(Remap[Old]);
 			}
-		}
-	}
-
-	void AssignNearestHeights(const TArray<FRoadSample>& Verts, FRoadShapefileRing& Ring)
-	{
-		Ring.HeightM.SetNum(Ring.LonLat.Num());
-		if (Verts.Num() == 0)
-		{
-			return;
-		}
-		for (int32 I = 0; I < Ring.LonLat.Num(); ++I)
-		{
-			double Best = TNumericLimits<double>::Max();
-			double Z = Verts[0].HeightM;
-			for (const FRoadSample& S : Verts)
-			{
-				const double Dx = Ring.LonLat[I].X - S.Lon;
-				const double Dy = Ring.LonLat[I].Y - S.Lat;
-				const double D = Dx * Dx + Dy * Dy;
-				if (D < Best)
-				{
-					Best = D;
-					Z = S.HeightM;
-				}
-			}
-			Ring.HeightM[I] = Z;
 		}
 	}
 
@@ -2277,7 +2251,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		UE_LOG(
 			LogRoadPlacer,
 			Warning,
-			TEXT("Skip Road Meshes is on: no StaticMesh save/spawn. TIN still runs for clip/export outlines."));
+			TEXT("Skip Road Meshes is on: no StaticMesh save/spawn. TIN still runs for clip/export."));
 	}
 
 	FScopedSlowTask SlowTask(
@@ -2289,7 +2263,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	int32 TilesProcessed = 0;
 	bool bStopTiles = false;
 	TArray<TArray<FVector2D>> PendingClipRings;
-	TArray<FRoadShapefileRing> PendingExportRings;
+	TArray<FRoadShapefileVertex> PendingExportVerts;
+	TArray<int32> PendingExportTris;
 	for (int32 TY = 0; TY < TilesY && !bStopTiles; ++TY)
 	{
 		for (int32 TX = 0; TX < TilesX; ++TX)
@@ -2467,19 +2442,28 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 					NumTiles,
 					ClipRings.Num(),
 					Dropped);
-				if (bWantExport)
-				{
-					for (const TArray<FVector2D>& Ring : ClipRings)
-					{
-						FRoadShapefileRing ExportRing;
-						ExportRing.LonLat = Ring;
-						AssignNearestHeights(UsedVerts, ExportRing);
-						PendingExportRings.Add(MoveTemp(ExportRing));
-					}
-				}
 				if (bWantClip)
 				{
 					PendingClipRings.Append(MoveTemp(ClipRings));
+				}
+			};
+
+			auto AppendExportTin = [&]()
+			{
+				const int32 Base = PendingExportVerts.Num();
+				PendingExportVerts.Reserve(Base + UsedVerts.Num());
+				for (const FRoadSample& S : UsedVerts)
+				{
+					FRoadShapefileVertex V;
+					V.Lon = S.Lon;
+					V.Lat = S.Lat;
+					V.HeightM = S.HeightM + HeightOff;
+					PendingExportVerts.Add(V);
+				}
+				PendingExportTris.Reserve(PendingExportTris.Num() + UsedTris.Num());
+				for (const int32 Idx : UsedTris)
+				{
+					PendingExportTris.Add(Base + Idx);
 				}
 			};
 
@@ -2490,7 +2474,11 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 					FText::FromString(FString::Printf(TEXT("Tile %d / %d - outlines"), TileIndex, NumTiles)));
 				++TilesProcessed;
 				Result.TrianglesBuilt += UsedTris.Num() / 3;
-				if (bNeedOutlines)
+				if (bWantExport)
+				{
+					AppendExportTin();
+				}
+				if (bWantClip)
 				{
 					CollectTileClip();
 				}
@@ -2541,7 +2529,11 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				{
 					++Result.TilesSpawned;
 					Result.TrianglesBuilt += SlabTris.Num() / 3;
-					if (bNeedOutlines)
+					if (bWantExport)
+					{
+						AppendExportTin();
+					}
+					if (bWantClip)
 					{
 						CollectTileClip();
 					}
@@ -2651,7 +2643,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	{
 		FString ExportError;
 		int32 Written = 0;
-		if (!RoadShapefileWriter::WritePolygonZRings(ExportPath, PendingExportRings, ExportError, Written))
+		if (!RoadShapefileWriter::WritePolygonZTriangles(
+				ExportPath, PendingExportVerts, PendingExportTris, ExportError, Written))
 		{
 			UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *ExportError);
 			if (Result.TilesSpawned == 0 && Result.ClipPolygonsSpawned == 0)
@@ -2669,7 +2662,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			UE_LOG(
 				LogRoadPlacer,
 				Display,
-				TEXT("Wrote %d PolygonZ ring(s) (EPSG:4326) to '%s'."),
+				TEXT("Wrote %d PolygonZ triangle(s) of the road top (EPSG:4326, no walls) to '%s'."),
 				Written,
 				*ExportPath);
 		}
