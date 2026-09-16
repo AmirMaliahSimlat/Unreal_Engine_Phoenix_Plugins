@@ -138,10 +138,13 @@ namespace
 		}
 		if (!Ring.LonLat[0].Equals(Ring.LonLat.Last(), 1.0e-12))
 		{
-			Ring.LonLat.Add(Ring.LonLat[0]);
-			if (Ring.HeightM.Num() + 1 == Ring.LonLat.Num())
+			const FVector2D FirstLonLat = Ring.LonLat[0];
+			const double FirstZ = Ring.HeightM.Num() > 0 ? Ring.HeightM[0] : 0.0;
+			const bool bCopyZ = Ring.HeightM.Num() == Ring.LonLat.Num();
+			Ring.LonLat.Add(FirstLonLat);
+			if (bCopyZ)
 			{
-				Ring.HeightM.Add(Ring.HeightM[0]);
+				Ring.HeightM.Add(FirstZ);
 			}
 			else if (Ring.HeightM.Num() != Ring.LonLat.Num())
 			{
