@@ -4,6 +4,7 @@
 #include "RoadCesiumPlacement.h"
 #include "RoadPlacerLog.h"
 #include "RoadShapefileReader.h"
+#include "RoadShapefileWriter.h"
 #include "RoadStaticMesh.h"
 #include "RoadTriangulate.h"
 
@@ -896,6 +897,32 @@ namespace
 				}
 				OutTris.Add(Remap[Old]);
 			}
+		}
+	}
+
+	void AssignNearestHeights(const TArray<FRoadSample>& Verts, FRoadShapefileRing& Ring)
+	{
+		Ring.HeightM.SetNum(Ring.LonLat.Num());
+		if (Verts.Num() == 0)
+		{
+			return;
+		}
+		for (int32 I = 0; I < Ring.LonLat.Num(); ++I)
+		{
+			double Best = TNumericLimits<double>::Max();
+			double Z = Verts[0].HeightM;
+			for (const FRoadSample& S : Verts)
+			{
+				const double Dx = Ring.LonLat[I].X - S.Lon;
+				const double Dy = Ring.LonLat[I].Y - S.Lat;
+				const double D = Dx * Dx + Dy * Dy;
+				if (D < Best)
+				{
+					Best = D;
+					Z = S.HeightM;
+				}
+			}
+			Ring.HeightM[I] = Z;
 		}
 	}
 
@@ -1838,7 +1865,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	const FString& EditorFolderPath,
 	bool bClipGroundUnderRoads,
 	int32 OnlyTileIndex,
-	bool bSkipRoadMeshes)
+	bool bSkipRoadMeshes,
+	const FString& ExportShapefilePath)
 {
 	FRoadPlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -1846,6 +1874,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	const FString PointsPath = SanitizeFilePath(ElevationPointsPath);
 	const FString MeshFolder = MeshContentFolder.IsEmpty() ? TEXT("/Game/RoadPlacer/Meshes") : MeshContentFolder;
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("Road") : ActorLabelPrefix;
+	const FString ExportPath = SanitizeFilePath(ExportShapefilePath);
 	double MaxEdge = static_cast<double>(MaxEdgeMeters);
 	if (MaxEdge > 0.0 && MaxEdge < 100.0)
 	{
@@ -1864,13 +1893,15 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	const double Thickness = FMath::Max(static_cast<double>(ThicknessMeters), 0.0);
 	const double AltSample = FMath::Max(static_cast<double>(AltitudeSampleMeters), 0.0);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.1);
-	const bool bWantClip = bClipGroundUnderRoads || bSkipRoadMeshes;
+	const bool bWantExport = !ExportPath.IsEmpty();
+	const bool bWantClip = bClipGroundUnderRoads;
+	const bool bNeedOutlines = bWantClip || bWantExport;
 
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place START =========="));
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d onlyTile=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s clipGround=%s skipMeshes=%s"),
+		TEXT("mask='%s' points='%s' tiles=%d onlyTile=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s clipGround=%s skipMeshes=%s export='%s'"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
@@ -1881,7 +1912,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		AltSample,
 		bSoftenEdges ? TEXT("on") : TEXT("off"),
 		bWantClip ? TEXT("on") : TEXT("off"),
-		bSkipRoadMeshes ? TEXT("on") : TEXT("off"));
+		bSkipRoadMeshes ? TEXT("on") : TEXT("off"),
+		*ExportPath);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -1891,12 +1923,24 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		return Result;
 	}
 
-	ACesiumGeoreference* Georeference = RoadCesiumPlacement::FindGeoreference(World);
-	if (!Georeference)
+	if (bSkipRoadMeshes && !bNeedOutlines)
 	{
-		Result.Message = TEXT("No ACesiumGeoreference found in the level.");
+		Result.Message = TEXT("Skip Road Meshes is on but neither Clip Ground nor Export Shapefile Path is set.");
 		UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
+	}
+
+	ACesiumGeoreference* Georeference = nullptr;
+	const bool bNeedGeo = !bSkipRoadMeshes || bWantClip;
+	if (bNeedGeo)
+	{
+		Georeference = RoadCesiumPlacement::FindGeoreference(World);
+		if (!Georeference)
+		{
+			Result.Message = TEXT("No ACesiumGeoreference found in the level.");
+			UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *Result.Message);
+			return Result;
+		}
 	}
 
 	if (MaskPath.IsEmpty() || PointsPath.IsEmpty())
@@ -2215,7 +2259,10 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			TEXT("Every PointZ height is 0. Drape the points in QGIS from the DTM before placing roads."));
 	}
 
-	RemovePrevious(*World);
+	if (!bSkipRoadMeshes || bWantClip)
+	{
+		RemovePrevious(*World);
+	}
 	UMaterialInterface* Material = nullptr;
 	if (!bSkipRoadMeshes)
 	{
@@ -2230,7 +2277,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		UE_LOG(
 			LogRoadPlacer,
 			Warning,
-			TEXT("Skip Road Meshes is on (FPS test): Cesium clips only. TIN still runs so clip outlines match Place Roads; StaticMesh save/spawn is skipped."));
+			TEXT("Skip Road Meshes is on: no StaticMesh save/spawn. TIN still runs for clip/export outlines."));
 	}
 
 	FScopedSlowTask SlowTask(
@@ -2242,6 +2289,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	int32 TilesProcessed = 0;
 	bool bStopTiles = false;
 	TArray<TArray<FVector2D>> PendingClipRings;
+	TArray<FRoadShapefileRing> PendingExportRings;
 	for (int32 TY = 0; TY < TilesY && !bStopTiles; ++TY)
 	{
 		for (int32 TX = 0; TX < TilesX; ++TX)
@@ -2414,22 +2462,35 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				UE_LOG(
 					LogRoadPlacer,
 					Display,
-					TEXT("Tile %d / %d: %d clip polygon(s) inside this tile (dropped %d outside/oversized)."),
+					TEXT("Tile %d / %d: %d outline polygon(s) inside this tile (dropped %d outside/oversized)."),
 					TileIndex,
 					NumTiles,
 					ClipRings.Num(),
 					Dropped);
-				PendingClipRings.Append(MoveTemp(ClipRings));
+				if (bWantExport)
+				{
+					for (const TArray<FVector2D>& Ring : ClipRings)
+					{
+						FRoadShapefileRing ExportRing;
+						ExportRing.LonLat = Ring;
+						AssignNearestHeights(UsedVerts, ExportRing);
+						PendingExportRings.Add(MoveTemp(ExportRing));
+					}
+				}
+				if (bWantClip)
+				{
+					PendingClipRings.Append(MoveTemp(ClipRings));
+				}
 			};
 
 			if (bSkipRoadMeshes)
 			{
 				TileTask.EnterProgressFrame(
 					12.0f,
-					FText::FromString(FString::Printf(TEXT("Tile %d / %d - clip only"), TileIndex, NumTiles)));
+					FText::FromString(FString::Printf(TEXT("Tile %d / %d - outlines"), TileIndex, NumTiles)));
 				++TilesProcessed;
 				Result.TrianglesBuilt += UsedTris.Num() / 3;
-				if (bWantClip)
+				if (bNeedOutlines)
 				{
 					CollectTileClip();
 				}
@@ -2480,7 +2541,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				{
 					++Result.TilesSpawned;
 					Result.TrianglesBuilt += SlabTris.Num() / 3;
-					if (bWantClip)
+					if (bNeedOutlines)
 					{
 						CollectTileClip();
 					}
@@ -2502,7 +2563,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		}
 	}
 
-	if (bWantClip && !Result.bCancelled && PendingClipRings.Num() > 0)
+	if (bWantClip && Georeference && !Result.bCancelled && PendingClipRings.Num() > 0)
 	{
 		UE_LOG(
 			LogRoadPlacer,
@@ -2580,25 +2641,62 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			Result.ClipPolygonsSpawned);
 	}
 
-	World->MarkPackageDirty();
+	FString ExportNote;
+	if (bWantExport && Result.bCancelled)
+	{
+		ExportNote = TEXT(" Export skipped (cancelled).");
+		UE_LOG(LogRoadPlacer, Warning, TEXT("Export shapefile skipped because the run was cancelled."));
+	}
+	else if (bWantExport)
+	{
+		FString ExportError;
+		int32 Written = 0;
+		if (!RoadShapefileWriter::WritePolygonZRings(ExportPath, PendingExportRings, ExportError, Written))
+		{
+			UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *ExportError);
+			if (Result.TilesSpawned == 0 && Result.ClipPolygonsSpawned == 0)
+			{
+				Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+				Result.Message = ExportError;
+				return Result;
+			}
+			ExportNote = FString::Printf(TEXT(" Export failed: %s"), *ExportError);
+		}
+		else
+		{
+			Result.ExportFeaturesWritten = Written;
+			ExportNote = FString::Printf(TEXT(" Export features=%d (%s)."), Written, *ExportPath);
+			UE_LOG(
+				LogRoadPlacer,
+				Display,
+				TEXT("Wrote %d PolygonZ ring(s) (EPSG:4326) to '%s'."),
+				Written,
+				*ExportPath);
+		}
+	}
+
+	if (Result.TilesSpawned > 0 || Result.ClipPolygonsSpawned > 0)
+	{
+		World->MarkPackageDirty();
+	}
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-	Result.bSuccess = bSkipRoadMeshes
-		? (Result.ClipPolygonsSpawned > 0)
-		: (Result.TilesSpawned > 0);
+	Result.bSuccess = Result.TilesSpawned > 0
+		|| Result.ClipPolygonsSpawned > 0
+		|| Result.ExportFeaturesWritten > 0;
 	if (!Result.bSuccess)
 	{
 		Result.Message = Result.bCancelled
 			? TEXT("Cancelled before any road tiles were spawned.")
 			: (bSkipRoadMeshes
-				? TEXT("Skip Road Meshes: no Cesium clip polygons were spawned.")
+				? TEXT("Skip Road Meshes: no clip polygons or shapefile features were produced.")
 				: TEXT("No road StaticMeshActors were spawned. Outline points must sit on the mask."));
 		UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}
 
 	Result.Message = FString::Printf(
-		TEXT("%s%d tile(s) (%d triangles) from %d mask polygon(s) and %d points. OnlyTile=%s. Clip polygons=%d tilesets=%d. Elapsed: %.2fs."),
-		bSkipRoadMeshes ? TEXT("Clip-only (no meshes). TIN ") : TEXT("Spawned "),
+		TEXT("%s%d tile(s) (%d triangles) from %d mask polygon(s) and %d points. OnlyTile=%s. Clip polygons=%d tilesets=%d.%s Elapsed: %.2fs."),
+		bSkipRoadMeshes ? TEXT("Skip meshes. TIN ") : TEXT("Spawned "),
 		bSkipRoadMeshes ? TilesProcessed : Result.TilesSpawned,
 		Result.TrianglesBuilt,
 		Result.MaskPolygonsRead,
@@ -2606,6 +2704,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		bOneTile ? *FString::Printf(TEXT("%d/%d"), WantedTile, NumTiles) : TEXT("all"),
 		Result.ClipPolygonsSpawned,
 		Result.TilesetsClipped,
+		*ExportNote,
 		Result.ElapsedSeconds);
 	UE_LOG(LogRoadPlacer, Display, TEXT("%s"), *Result.Message);
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place END =========="));

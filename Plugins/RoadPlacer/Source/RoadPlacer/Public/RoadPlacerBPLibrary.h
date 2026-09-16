@@ -33,6 +33,9 @@ struct FRoadPlaceResult
 	int32 TilesetsClipped = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
+	int32 ExportFeaturesWritten = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
 	double ElapsedSeconds = 0.0;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Road Placer")
@@ -79,8 +82,11 @@ public:
 	 *        a thousand raster overlays. Courtyards enclosed by a loop of roads are left in place.
 	 * @param OnlyTileIndex 1-based tile to generate (same numbering as the Output Log).
 	 *        0 = all tiles. With Target Tile Count 64, use 1..64 for a single test tile.
-	 * @param bSkipRoadMeshes Temporary FPS test: triangulate and spawn Cesium clips only.
-	 *        No road StaticMesh assets or actors. Recreate this node after adding the pin.
+	 * @param bSkipRoadMeshes Temporary test: triangulate without saving road StaticMeshes.
+	 *        Use with Clip Ground (FPS) and/or Export Shapefile Path (QGIS).
+	 * @param ExportShapefilePath Optional EPSG:4326 PolygonZ path (.shp). Empty = do not write.
+	 *        Outlines match the Cesium clips from this run (before overlay merge). Z is TIN
+	 *        ellipsoid height. Clip Ground can stay off. Recreate this node after adding the pin.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -102,7 +108,8 @@ public:
 			CPP_Default_EditorFolderPath = "PlacedRoads",
 			CPP_Default_bClipGroundUnderRoads = "false",
 			CPP_Default_OnlyTileIndex = "0",
-			CPP_Default_bSkipRoadMeshes = "false"))
+			CPP_Default_bSkipRoadMeshes = "false",
+			CPP_Default_ExportShapefilePath = ""))
 	static FRoadPlaceResult PlaceRoadsFromShapefiles(
 		UObject* WorldContextObject,
 		const FString& MaskShapefilePath,
@@ -122,5 +129,6 @@ public:
 		const FString& EditorFolderPath,
 		bool bClipGroundUnderRoads,
 		int32 OnlyTileIndex,
-		bool bSkipRoadMeshes);
+		bool bSkipRoadMeshes,
+		const FString& ExportShapefilePath);
 };
