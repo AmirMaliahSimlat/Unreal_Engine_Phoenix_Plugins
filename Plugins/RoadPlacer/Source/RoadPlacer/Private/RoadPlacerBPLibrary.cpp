@@ -1837,7 +1837,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath,
 	bool bClipGroundUnderRoads,
-	int32 OnlyTileIndex)
+	int32 OnlyTileIndex,
+	bool bSkipRoadMeshes)
 {
 	FRoadPlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
@@ -1863,12 +1864,13 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	const double Thickness = FMath::Max(static_cast<double>(ThicknessMeters), 0.0);
 	const double AltSample = FMath::Max(static_cast<double>(AltitudeSampleMeters), 0.0);
 	const double UvMeters = FMath::Max(static_cast<double>(MetersPerUv), 0.1);
+	const bool bWantClip = bClipGroundUnderRoads || bSkipRoadMeshes;
 
 	UE_LOG(LogRoadPlacer, Display, TEXT("========== Road Place START =========="));
 	UE_LOG(
 		LogRoadPlacer,
 		Display,
-		TEXT("mask='%s' points='%s' tiles=%d onlyTile=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s clipGround=%s"),
+		TEXT("mask='%s' points='%s' tiles=%d onlyTile=%d maxEdgeM=%.2f heightOffM=%.3f thicknessM=%.3f altSampleM=%.2f soften=%s clipGround=%s skipMeshes=%s"),
 		*MaskPath,
 		*PointsPath,
 		TargetTileCount,
@@ -1878,7 +1880,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		Thickness,
 		AltSample,
 		bSoftenEdges ? TEXT("on") : TEXT("off"),
-		bClipGroundUnderRoads ? TEXT("on") : TEXT("off"));
+		bWantClip ? TEXT("on") : TEXT("off"),
+		bSkipRoadMeshes ? TEXT("on") : TEXT("off"));
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
 	if (!World)
@@ -2213,10 +2216,21 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	}
 
 	RemovePrevious(*World);
-	UMaterialInterface* Material = LoadMaterial(RoadMaterialPath);
-	if (!Material)
+	UMaterialInterface* Material = nullptr;
+	if (!bSkipRoadMeshes)
 	{
-		UE_LOG(LogRoadPlacer, Warning, TEXT("Road material did not load; meshes will use an empty slot."));
+		Material = LoadMaterial(RoadMaterialPath);
+		if (!Material)
+		{
+			UE_LOG(LogRoadPlacer, Warning, TEXT("Road material did not load; meshes will use an empty slot."));
+		}
+	}
+	else
+	{
+		UE_LOG(
+			LogRoadPlacer,
+			Warning,
+			TEXT("Skip Road Meshes is on (FPS test): Cesium clips only. TIN still runs so clip outlines match Place Roads; StaticMesh save/spawn is skipped."));
 	}
 
 	FScopedSlowTask SlowTask(
@@ -2225,6 +2239,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 	SlowTask.MakeDialog(true);
 
 	int32 TileIndex = 0;
+	int32 TilesProcessed = 0;
 	bool bStopTiles = false;
 	TArray<TArray<FVector2D>> PendingClipRings;
 	for (int32 TY = 0; TY < TilesY && !bStopTiles; ++TY)
@@ -2376,84 +2391,104 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			TArray<int32> UsedTris;
 			CompactUsedSamples(Tin.Vertices, Kept, UsedVerts, UsedTris);
 
-			TileTask.EnterProgressFrame(
-				6.0f,
-				FText::FromString(FString::Printf(TEXT("Tile %d / %d - building slab mesh"), TileIndex, NumTiles)));
-			TArray<FVector> WorldPts;
-			TArray<int32> SlabTris;
-			BuildSlabWorld(*Georeference, UsedVerts, UsedTris, HeightOff, Thickness, WorldPts, SlabTris);
-			if (WorldPts.Num() < 3 || SlabTris.Num() < 3)
+			auto CollectTileClip = [&]()
 			{
-				++Result.TilesSkipped;
-				continue;
-			}
+				FRoadLonLatRect TileKeep;
+				const double KeepPadLon = 2.0
+					/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
+				const double KeepPadLat = 2.0 / 110540.0;
+				TileKeep.MinLon = TMinLon - KeepPadLon;
+				TileKeep.MaxLon = TMaxLon + KeepPadLon;
+				TileKeep.MinLat = TMinLat - KeepPadLat;
+				TileKeep.MaxLat = TMaxLat + KeepPadLat;
+				TileKeep.bValid = true;
+				const double ExtraLon = 100.0
+					/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
+				const double ExtraLat = 100.0 / 110540.0;
 
-			FVector Origin = FVector::ZeroVector;
-			for (const FVector& P : WorldPts)
-			{
-				Origin += P;
-			}
-			Origin /= static_cast<double>(WorldPts.Num());
-			TArray<FVector> LocalPts;
-			LocalPts.Reserve(WorldPts.Num());
-			for (const FVector& P : WorldPts)
-			{
-				LocalPts.Add(P - Origin);
-			}
+				TArray<TArray<FVector2D>> TileRings;
+				ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
+				TArray<TArray<FVector2D>> ClipRings;
+				ConvertBoundaryRingsToClipRings(TileRings, ClipRings);
+				const int32 Dropped = KeepClipRingsInTile(ClipRings, TileKeep, ExtraLon, ExtraLat);
+				UE_LOG(
+					LogRoadPlacer,
+					Display,
+					TEXT("Tile %d / %d: %d clip polygon(s) inside this tile (dropped %d outside/oversized)."),
+					TileIndex,
+					NumTiles,
+					ClipRings.Num(),
+					Dropped);
+				PendingClipRings.Append(MoveTemp(ClipRings));
+			};
 
-			const FString MeshLabel = FString::Printf(TEXT("%s_Tile_%d_%d"), *LabelPrefix, TX, TY);
-			FString MeshError;
-			TileTask.EnterProgressFrame(
-				6.0f,
-				FText::FromString(FString::Printf(TEXT("Tile %d / %d - saving mesh"), TileIndex, NumTiles)));
-			UStaticMesh* Mesh = RoadStaticMesh::CreatePersistentStaticMesh(
-				MeshFolder, MeshLabel, LocalPts, SlabTris, Material, UvMeters, bSoftenEdges, MeshError);
-			if (!Mesh)
+			if (bSkipRoadMeshes)
 			{
-				++Result.TilesSkipped;
-				UE_LOG(LogRoadPlacer, Warning, TEXT("Tile %d,%d mesh failed: %s"), TX, TY, *MeshError);
-				continue;
-			}
-
-			if (RoadStaticMesh::SpawnMeshActor(
-					*World, Origin, Mesh, Material, MeshLabel, EditorFolderPath, RoadPlacerTag, bEnableCollision))
-			{
-				++Result.TilesSpawned;
-				Result.TrianglesBuilt += SlabTris.Num() / 3;
-				if (bClipGroundUnderRoads)
+				TileTask.EnterProgressFrame(
+					12.0f,
+					FText::FromString(FString::Printf(TEXT("Tile %d / %d - clip only"), TileIndex, NumTiles)));
+				++TilesProcessed;
+				Result.TrianglesBuilt += UsedTris.Num() / 3;
+				if (bWantClip)
 				{
-					FRoadLonLatRect TileKeep;
-					const double KeepPadLon = 2.0
-						/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
-					const double KeepPadLat = 2.0 / 110540.0;
-					TileKeep.MinLon = TMinLon - KeepPadLon;
-					TileKeep.MaxLon = TMaxLon + KeepPadLon;
-					TileKeep.MinLat = TMinLat - KeepPadLat;
-					TileKeep.MaxLat = TMaxLat + KeepPadLat;
-					TileKeep.bValid = true;
-					const double ExtraLon = 100.0
-						/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
-					const double ExtraLat = 100.0 / 110540.0;
-
-					TArray<TArray<FVector2D>> TileRings;
-					ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
-					TArray<TArray<FVector2D>> ClipRings;
-					ConvertBoundaryRingsToClipRings(TileRings, ClipRings);
-					const int32 Dropped = KeepClipRingsInTile(ClipRings, TileKeep, ExtraLon, ExtraLat);
-					UE_LOG(
-						LogRoadPlacer,
-						Display,
-						TEXT("Tile %d / %d: %d clip polygon(s) inside this tile (dropped %d outside/oversized)."),
-						TileIndex,
-						NumTiles,
-						ClipRings.Num(),
-						Dropped);
-					PendingClipRings.Append(MoveTemp(ClipRings));
+					CollectTileClip();
 				}
 			}
 			else
 			{
-				++Result.TilesSkipped;
+				TileTask.EnterProgressFrame(
+					6.0f,
+					FText::FromString(FString::Printf(TEXT("Tile %d / %d - building slab mesh"), TileIndex, NumTiles)));
+				TArray<FVector> WorldPts;
+				TArray<int32> SlabTris;
+				BuildSlabWorld(*Georeference, UsedVerts, UsedTris, HeightOff, Thickness, WorldPts, SlabTris);
+				if (WorldPts.Num() < 3 || SlabTris.Num() < 3)
+				{
+					++Result.TilesSkipped;
+					continue;
+				}
+
+				FVector Origin = FVector::ZeroVector;
+				for (const FVector& P : WorldPts)
+				{
+					Origin += P;
+				}
+				Origin /= static_cast<double>(WorldPts.Num());
+				TArray<FVector> LocalPts;
+				LocalPts.Reserve(WorldPts.Num());
+				for (const FVector& P : WorldPts)
+				{
+					LocalPts.Add(P - Origin);
+				}
+
+				const FString MeshLabel = FString::Printf(TEXT("%s_Tile_%d_%d"), *LabelPrefix, TX, TY);
+				FString MeshError;
+				TileTask.EnterProgressFrame(
+					6.0f,
+					FText::FromString(FString::Printf(TEXT("Tile %d / %d - saving mesh"), TileIndex, NumTiles)));
+				UStaticMesh* Mesh = RoadStaticMesh::CreatePersistentStaticMesh(
+					MeshFolder, MeshLabel, LocalPts, SlabTris, Material, UvMeters, bSoftenEdges, MeshError);
+				if (!Mesh)
+				{
+					++Result.TilesSkipped;
+					UE_LOG(LogRoadPlacer, Warning, TEXT("Tile %d,%d mesh failed: %s"), TX, TY, *MeshError);
+					continue;
+				}
+
+				if (RoadStaticMesh::SpawnMeshActor(
+						*World, Origin, Mesh, Material, MeshLabel, EditorFolderPath, RoadPlacerTag, bEnableCollision))
+				{
+					++Result.TilesSpawned;
+					Result.TrianglesBuilt += SlabTris.Num() / 3;
+					if (bWantClip)
+					{
+						CollectTileClip();
+					}
+				}
+				else
+				{
+					++Result.TilesSkipped;
+				}
 			}
 			if (bOneTile)
 			{
@@ -2467,7 +2502,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		}
 	}
 
-	if (bClipGroundUnderRoads && !Result.bCancelled && Result.TilesSpawned > 0)
+	if (bWantClip && !Result.bCancelled && PendingClipRings.Num() > 0)
 	{
 		UE_LOG(
 			LogRoadPlacer,
@@ -2547,19 +2582,24 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 
 	World->MarkPackageDirty();
 	Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-	Result.bSuccess = Result.TilesSpawned > 0;
+	Result.bSuccess = bSkipRoadMeshes
+		? (Result.ClipPolygonsSpawned > 0)
+		: (Result.TilesSpawned > 0);
 	if (!Result.bSuccess)
 	{
 		Result.Message = Result.bCancelled
 			? TEXT("Cancelled before any road tiles were spawned.")
-			: TEXT("No road StaticMeshActors were spawned. Outline points must sit on the mask.");
+			: (bSkipRoadMeshes
+				? TEXT("Skip Road Meshes: no Cesium clip polygons were spawned.")
+				: TEXT("No road StaticMeshActors were spawned. Outline points must sit on the mask."));
 		UE_LOG(LogRoadPlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}
 
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d road tile(s) (%d triangles) from %d mask polygon(s) and %d points. OnlyTile=%s. Clip polygons=%d tilesets=%d. Elapsed: %.2fs."),
-		Result.TilesSpawned,
+		TEXT("%s%d tile(s) (%d triangles) from %d mask polygon(s) and %d points. OnlyTile=%s. Clip polygons=%d tilesets=%d. Elapsed: %.2fs."),
+		bSkipRoadMeshes ? TEXT("Clip-only (no meshes). TIN ") : TEXT("Spawned "),
+		bSkipRoadMeshes ? TilesProcessed : Result.TilesSpawned,
 		Result.TrianglesBuilt,
 		Result.MaskPolygonsRead,
 		Result.ElevationPointsRead,

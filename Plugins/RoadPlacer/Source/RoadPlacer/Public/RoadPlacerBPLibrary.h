@@ -79,6 +79,8 @@ public:
 	 *        a thousand raster overlays. Courtyards enclosed by a loop of roads are left in place.
 	 * @param OnlyTileIndex 1-based tile to generate (same numbering as the Output Log).
 	 *        0 = all tiles. With Target Tile Count 64, use 1..64 for a single test tile.
+	 * @param bSkipRoadMeshes Temporary FPS test: triangulate and spawn Cesium clips only.
+	 *        No road StaticMesh assets or actors. Recreate this node after adding the pin.
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -99,7 +101,8 @@ public:
 			CPP_Default_ActorLabelPrefix = "Road",
 			CPP_Default_EditorFolderPath = "PlacedRoads",
 			CPP_Default_bClipGroundUnderRoads = "false",
-			CPP_Default_OnlyTileIndex = "0"))
+			CPP_Default_OnlyTileIndex = "0",
+			CPP_Default_bSkipRoadMeshes = "false"))
 	static FRoadPlaceResult PlaceRoadsFromShapefiles(
 		UObject* WorldContextObject,
 		const FString& MaskShapefilePath,
@@ -118,5 +121,6 @@ public:
 		const FString& ActorLabelPrefix,
 		const FString& EditorFolderPath,
 		bool bClipGroundUnderRoads,
-		int32 OnlyTileIndex);
+		int32 OnlyTileIndex,
+		bool bSkipRoadMeshes);
 };
