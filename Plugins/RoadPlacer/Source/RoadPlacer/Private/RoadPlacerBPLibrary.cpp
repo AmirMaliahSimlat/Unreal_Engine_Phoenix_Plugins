@@ -33,7 +33,10 @@ namespace
 	const FName RoadPlacerOverlayName(TEXT("RoadPlacerClip"));
 	constexpr double DuplicateEpsDeg = 1.0e-10;
 	constexpr int32 ClipOutlineMaxVertices = 8192;
+	constexpr int32 ClipOverlayMaxVertices = 2048;
 	constexpr double ClipSimplifyMeters = 0.05;
+	constexpr double ClipOverlaySimplifyMeters = 0.5;
+	constexpr double ClipClusterLinkMeters = 4.0;
 	constexpr double ClipInflateMeters = 0.05;
 	constexpr double ClipBridgeWidthMeters = 0.15;
 
@@ -933,7 +936,11 @@ namespace
 		}
 	}
 
-	void DecimateClipRing(const TArray<FVector2D>& In, TArray<FVector2D>& Out)
+	void DecimateClipRing(
+		const TArray<FVector2D>& In,
+		TArray<FVector2D>& Out,
+		double SimplifyM,
+		int32 MaxVerts)
 	{
 		Out.Reset();
 		TArray<FVector2D> Unique;
@@ -955,7 +962,8 @@ namespace
 			return;
 		}
 
-		const double EpsDeg = ClipSimplifyMeters / 111320.0;
+		const double SafeSimplify = FMath::Max(SimplifyM, 0.01);
+		const double EpsDeg = SafeSimplify / 111320.0;
 		TArray<uint8> Keep;
 		Keep.Init(0, Unique.Num());
 		RdpKeepClip(Unique, 0, Unique.Num() - 1, EpsDeg * EpsDeg, Keep);
@@ -973,13 +981,14 @@ namespace
 		{
 			Out = Unique;
 		}
-		if (Out.Num() > ClipOutlineMaxVertices)
+		const int32 VertCap = FMath::Max(MaxVerts, 8);
+		if (Out.Num() > VertCap)
 		{
 			TArray<FVector2D> Sampled;
-			Sampled.Reserve(ClipOutlineMaxVertices);
-			for (int32 I = 0; I < ClipOutlineMaxVertices; ++I)
+			Sampled.Reserve(VertCap);
+			for (int32 I = 0; I < VertCap; ++I)
 			{
-				const int32 Src = (I * (Out.Num() - 1)) / (ClipOutlineMaxVertices - 1);
+				const int32 Src = (I * (Out.Num() - 1)) / (VertCap - 1);
 				Sampled.Add(Out[Src]);
 			}
 			Out = MoveTemp(Sampled);
@@ -1300,6 +1309,184 @@ namespace
 		return Dropped;
 	}
 
+	double ClipBBoxGapMeters(
+		double AMinLon, double AMaxLon, double AMinLat, double AMaxLat,
+		double BMinLon, double BMaxLon, double BMinLat, double BMaxLat,
+		double MLon,
+		double MLat)
+	{
+		double GapLon = 0.0;
+		if (AMaxLon < BMinLon)
+		{
+			GapLon = (BMinLon - AMaxLon) * MLon;
+		}
+		else if (BMaxLon < AMinLon)
+		{
+			GapLon = (AMinLon - BMaxLon) * MLon;
+		}
+		double GapLat = 0.0;
+		if (AMaxLat < BMinLat)
+		{
+			GapLat = (BMinLat - AMaxLat) * MLat;
+		}
+		else if (BMaxLat < AMinLat)
+		{
+			GapLat = (AMinLat - BMaxLat) * MLat;
+		}
+		return FMath::Sqrt(GapLon * GapLon + GapLat * GapLat);
+	}
+
+	double MinRingDistanceMeters(
+		const TArray<FVector2D>& A,
+		const TArray<FVector2D>& B,
+		double MLon,
+		double MLat,
+		double EarlyOutM)
+	{
+		if (A.Num() == 0 || B.Num() == 0)
+		{
+			return TNumericLimits<double>::Max();
+		}
+		double AMinLon, AMaxLon, AMinLat, AMaxLat;
+		double BMinLon, BMaxLon, BMinLat, BMaxLat;
+		ClipRingBBox(A, AMinLon, AMaxLon, AMinLat, AMaxLat);
+		ClipRingBBox(B, BMinLon, BMaxLon, BMinLat, BMaxLat);
+		const double BoxGap = ClipBBoxGapMeters(
+			AMinLon, AMaxLon, AMinLat, AMaxLat,
+			BMinLon, BMaxLon, BMinLat, BMaxLat,
+			MLon, MLat);
+		if (BoxGap > EarlyOutM)
+		{
+			return BoxGap;
+		}
+
+		const int32 StepA = FMath::Max(A.Num() / 128, 1);
+		const int32 StepB = FMath::Max(B.Num() / 128, 1);
+		double Best = TNumericLimits<double>::Max();
+		for (int32 I = 0; I < A.Num(); I += StepA)
+		{
+			for (int32 J = 0; J < B.Num(); J += StepB)
+			{
+				const double Dx = (A[I].X - B[J].X) * MLon;
+				const double Dy = (A[I].Y - B[J].Y) * MLat;
+				const double D = FMath::Sqrt(Dx * Dx + Dy * Dy);
+				if (D < Best)
+				{
+					Best = D;
+					if (Best <= EarlyOutM)
+					{
+						return Best;
+					}
+				}
+			}
+		}
+		return Best;
+	}
+
+	void MergeNearbyClipRings(TArray<TArray<FVector2D>>& Rings, double LinkM)
+	{
+		const int32 N = Rings.Num();
+		if (N <= 1)
+		{
+			return;
+		}
+
+		double SumLat = 0.0;
+		int32 LatCount = 0;
+		for (const TArray<FVector2D>& Ring : Rings)
+		{
+			for (const FVector2D& P : Ring)
+			{
+				SumLat += P.Y;
+				++LatCount;
+			}
+		}
+		const double MidLat = (LatCount > 0) ? (SumLat / static_cast<double>(LatCount)) : 0.0;
+		const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
+		const double MLat = 110540.0;
+
+		TArray<int32> Parent;
+		Parent.SetNum(N);
+		for (int32 I = 0; I < N; ++I)
+		{
+			Parent[I] = I;
+		}
+		TFunction<int32(int32)> Find = [&](int32 I) -> int32
+		{
+			while (Parent[I] != I)
+			{
+				Parent[I] = Parent[Parent[I]];
+				I = Parent[I];
+			}
+			return I;
+		};
+		auto Unite = [&](int32 A, int32 B)
+		{
+			const int32 RA = Find(A);
+			const int32 RB = Find(B);
+			if (RA != RB)
+			{
+				Parent[RA] = RB;
+			}
+		};
+
+		for (int32 I = 0; I < N; ++I)
+		{
+			if (Rings[I].Num() < 3)
+			{
+				continue;
+			}
+			for (int32 J = I + 1; J < N; ++J)
+			{
+				if (Rings[J].Num() < 3)
+				{
+					continue;
+				}
+				if (MinRingDistanceMeters(Rings[I], Rings[J], MLon, MLat, LinkM) <= LinkM)
+				{
+					Unite(I, J);
+				}
+			}
+		}
+
+		TMap<int32, TArray<int32>> Groups;
+		for (int32 I = 0; I < N; ++I)
+		{
+			if (Rings[I].Num() < 3)
+			{
+				continue;
+			}
+			Groups.FindOrAdd(Find(I)).Add(I);
+		}
+
+		TArray<TArray<FVector2D>> Merged;
+		Merged.Reserve(Groups.Num());
+		for (TPair<int32, TArray<int32>>& Pair : Groups)
+		{
+			TArray<int32>& Idx = Pair.Value;
+			Idx.Sort([&](int32 A, int32 B)
+			{
+				return FMath::Abs(ClipRingArea2(Rings[A])) > FMath::Abs(ClipRingArea2(Rings[B]));
+			});
+			TArray<FVector2D> Combined = Rings[Idx[0]];
+			EnsureClipWinding(Combined, true);
+			for (int32 K = 1; K < Idx.Num(); ++K)
+			{
+				TArray<FVector2D> Other = Rings[Idx[K]];
+				EnsureClipWinding(Other, true);
+				Combined = BridgeJoinOuterAndHole(Combined, Other);
+			}
+			TArray<FVector2D> Decimated;
+			DecimateClipRing(Combined, Decimated, ClipOverlaySimplifyMeters, ClipOverlayMaxVertices);
+			StripClosedDuplicate(Decimated);
+			if (Decimated.Num() >= 3)
+			{
+				Merged.Add(MoveTemp(Decimated));
+			}
+		}
+		Rings = MoveTemp(Merged);
+	}
+
 	bool ClipPointInRing(const FVector2D& P, const TArray<FVector2D>& Ring)
 	{
 		const int32 N = Ring.Num();
@@ -1439,7 +1626,7 @@ namespace
 		for (const TArray<FVector2D>& In : InRings)
 		{
 			TArray<FVector2D> Decimated;
-			DecimateClipRing(In, Decimated);
+			DecimateClipRing(In, Decimated, ClipSimplifyMeters, ClipOutlineMaxVertices);
 			StripClosedDuplicate(Decimated);
 			if (Decimated.Num() >= 3)
 			{
@@ -1579,6 +1766,18 @@ namespace
 		ApplyWorldClosedSpline(*Poly->Polygon, WorldPoints);
 		Poly->SetActorLabel(Label);
 		Poly->Tags.AddUnique(RoadPlacerTag);
+		Poly->SetActorHiddenInGame(true);
+		Poly->SetActorEnableCollision(false);
+		Poly->SetActorTickEnabled(false);
+#if WITH_EDITOR
+		Poly->bHiddenEd = true;
+#endif
+		if (Poly->Polygon)
+		{
+			Poly->Polygon->SetVisibility(false, true);
+			Poly->Polygon->SetHiddenInGame(true);
+			Poly->Polygon->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
 		if (!FolderPath.IsEmpty())
 		{
 			Poly->SetFolderPath(FName(*FolderPath));
@@ -2278,6 +2477,16 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			bOneTile
 				? *FString::Printf(TEXT(" (Only Tile Index %d, not the whole mask)"), WantedTile)
 				: TEXT(""));
+		const int32 ClipRingsBeforeMerge = PendingClipRings.Num();
+		MergeNearbyClipRings(PendingClipRings, ClipClusterLinkMeters);
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Merged %d clip rings into %d Cesium polygon(s) (link %.1fm, overlay simplify %.2fm)."),
+			ClipRingsBeforeMerge,
+			PendingClipRings.Num(),
+			ClipClusterLinkMeters,
+			ClipOverlaySimplifyMeters);
 
 		TArray<ACesium3DTileset*> Tilesets;
 		for (TActorIterator<ACesium3DTileset> It(World); It; ++It)
