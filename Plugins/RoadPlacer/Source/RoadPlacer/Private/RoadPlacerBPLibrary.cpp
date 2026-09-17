@@ -36,9 +36,13 @@ namespace
 	constexpr int32 ClipOutlineMaxVertices = 8192;
 	constexpr int32 ClipOverlayMaxVertices = 2048;
 	constexpr double ClipSimplifyMeters = 0.05;
+	// Overlay RDP tolerance. Keep <= ClipInsetMeters so chords stay ~inside the road.
 	constexpr double ClipOverlaySimplifyMeters = 0.5;
+	// Inset before overlay simplify: freedom band so RDP shortcuts do not leave the mask.
+	constexpr double ClipInsetMeters = 0.55;
 	constexpr double ClipClusterLinkMeters = 4.0;
-	constexpr double ClipInflateMeters = 0.05;
+	// No outward pad — clips should stay under the pavement, not spill past the curb.
+	constexpr double ClipInflateMeters = 0.0;
 	constexpr double ClipBridgeWidthMeters = 0.15;
 
 	FString SanitizeFilePath(const FString& InPath)
@@ -1384,11 +1388,71 @@ namespace
 		return Best;
 	}
 
+	/**
+	 * Shrink the ring inward, then RDP-simplify for Cesium overlays.
+	 * Inset >= simplify so chords stay approximately inside the original road mask.
+	 * Thin roads that collapse on inset fall back to the original with a tighter simplify.
+	 */
+	void InsetThenSimplifyClipRing(TArray<FVector2D>& Ring)
+	{
+		StripClosedDuplicate(Ring);
+		if (Ring.Num() < 3)
+		{
+			return;
+		}
+		EnsureClipWinding(Ring, true);
+		const double AreaBefore = FMath::Abs(ClipRingArea2(Ring));
+		if (AreaBefore < 1.0e-18)
+		{
+			return;
+		}
+
+		TArray<FVector2D> Source = Ring;
+		double SimplifyM = ClipOverlaySimplifyMeters;
+		if (ClipInsetMeters > 1.0e-6)
+		{
+			TArray<FVector2D> Inset = Ring;
+			InflateLonLatRing(Inset, -ClipInsetMeters);
+			StripClosedDuplicate(Inset);
+			EnsureClipWinding(Inset, true);
+			const double AreaAfter = FMath::Abs(ClipRingArea2(Inset));
+			const bool bOk = Inset.Num() >= 3
+				&& AreaAfter > AreaBefore * 0.05
+				&& AreaAfter < AreaBefore * 1.0001;
+			if (bOk)
+			{
+				Source = MoveTemp(Inset);
+			}
+			else
+			{
+				// Narrow strip: keep original outline, limit outward RDP spill.
+				SimplifyM = FMath::Min(ClipOverlaySimplifyMeters, 0.1);
+			}
+		}
+
+		TArray<FVector2D> Decimated;
+		DecimateClipRing(Source, Decimated, SimplifyM, ClipOverlayMaxVertices);
+		StripClosedDuplicate(Decimated);
+		if (Decimated.Num() >= 3)
+		{
+			Ring = MoveTemp(Decimated);
+		}
+	}
+
 	void MergeNearbyClipRings(TArray<TArray<FVector2D>>& Rings, double LinkM)
 	{
 		const int32 N = Rings.Num();
-		if (N <= 1)
+		if (N == 0)
 		{
+			return;
+		}
+		if (N == 1)
+		{
+			InsetThenSimplifyClipRing(Rings[0]);
+			if (Rings[0].Num() < 3)
+			{
+				Rings.Reset();
+			}
 			return;
 		}
 
@@ -1477,12 +1541,10 @@ namespace
 				EnsureClipWinding(Other, true);
 				Combined = BridgeJoinOuterAndHole(Combined, Other);
 			}
-			TArray<FVector2D> Decimated;
-			DecimateClipRing(Combined, Decimated, ClipOverlaySimplifyMeters, ClipOverlayMaxVertices);
-			StripClosedDuplicate(Decimated);
-			if (Decimated.Num() >= 3)
+			InsetThenSimplifyClipRing(Combined);
+			if (Combined.Num() >= 3)
 			{
-				Merged.Add(MoveTemp(Decimated));
+				Merged.Add(MoveTemp(Combined));
 			}
 		}
 		Rings = MoveTemp(Merged);
@@ -2570,10 +2632,11 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 		UE_LOG(
 			LogRoadPlacer,
 			Display,
-			TEXT("Merged %d clip rings into %d Cesium polygon(s) (link %.1fm, overlay simplify %.2fm)."),
+			TEXT("Merged %d clip rings into %d Cesium polygon(s) (link %.1fm, inset %.2fm, overlay simplify %.2fm)."),
 			ClipRingsBeforeMerge,
 			PendingClipRings.Num(),
 			ClipClusterLinkMeters,
+			ClipInsetMeters,
 			ClipOverlaySimplifyMeters);
 
 		TArray<ACesium3DTileset*> Tilesets;

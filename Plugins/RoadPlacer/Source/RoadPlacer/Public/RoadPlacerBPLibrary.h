@@ -79,7 +79,9 @@ public:
 	 * @param bClipGroundUnderRoads If true, hide Cesium imagery and DTM under placed road meshes.
 	 *        Only the spawned tile(s) are clipped — Only Tile Index does not overlay the whole map.
 	 *        Touching road islands are merged into a few Cesium polygons so a city does not spawn
-	 *        a thousand raster overlays. Courtyards enclosed by a loop of roads are left in place.
+	 *        a thousand raster overlays. Before overlay simplify, each clip is inset (~0.55 m) so
+	 *        RDP chords stay under the pavement instead of spilling past the curb. Courtyards
+	 *        enclosed by a loop of roads are left in place.
 	 * @param OnlyTileIndex 1-based tile to generate (same numbering as the Output Log).
 	 *        0 = all tiles. With Target Tile Count 64, use 1..64 for a single test tile.
 	 * @param bSkipRoadMeshes Temporary test: triangulate without saving road StaticMeshes.
