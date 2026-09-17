@@ -971,38 +971,123 @@ namespace
 		return bInside;
 	}
 
-	bool ChordStaysInsideRing(
-		const TArray<FVector2D>& Ring,
+	double SignedCrossMeters(
 		const FVector2D& A,
-		const FVector2D& B)
+		const FVector2D& B,
+		const FVector2D& P,
+		double MLon,
+		double MLat)
 	{
-		if (A.Equals(B, DuplicateEpsDeg))
-		{
-			return true;
-		}
-		for (int32 K = 1; K <= 3; ++K)
-		{
-			const FVector2D M = A + (B - A) * (0.25f * static_cast<float>(K));
-			if (!ClipPointInRing(M, Ring))
-			{
-				return false;
-			}
-		}
+		const double ABx = (B.X - A.X) * MLon;
+		const double ABy = (B.Y - A.Y) * MLat;
+		const double APx = (P.X - A.X) * MLon;
+		const double APy = (P.Y - A.Y) * MLat;
+		return ABx * APy - ABy * APx;
+	}
+
+	bool ChordHitsNonIncidentEdges(
+		const TArray<FVector2D>& Ring,
+		int32 Start,
+		int32 End)
+	{
 		const int32 N = Ring.Num();
+		const FVector2D& A = Ring[Start];
+		const FVector2D& B = Ring[End];
 		for (int32 I = 0; I < N; ++I)
 		{
 			const int32 J = (I + 1) % N;
-			if (Ring[I].Equals(A, DuplicateEpsDeg) || Ring[J].Equals(A, DuplicateEpsDeg)
-				|| Ring[I].Equals(B, DuplicateEpsDeg) || Ring[J].Equals(B, DuplicateEpsDeg))
+			if (I == Start || J == Start || I == End || J == End)
 			{
 				continue;
 			}
 			if (ProperSegIntersectLonLat(A, B, Ring[I], Ring[J]))
 			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool SpanIsSafeClipChord(
+		const TArray<FVector2D>& Pts,
+		int32 Start,
+		int32 End,
+		double MLon,
+		double MLat)
+	{
+		const int32 N = Pts.Num();
+		if (!Pts.IsValidIndex(Start) || !Pts.IsValidIndex(End) || Start == End)
+		{
+			return false;
+		}
+		if ((Start + 1) % N == End || (End + 1) % N == Start)
+		{
+			return true;
+		}
+
+		constexpr double ExteriorEpsM = 0.02;
+		auto Visit = [&](int32 I) -> bool
+		{
+			if (SignedCrossMeters(Pts[Start], Pts[End], Pts[I], MLon, MLat) < -ExteriorEpsM)
+			{
+				return false;
+			}
+			return true;
+		};
+		if (Start < End)
+		{
+			for (int32 I = Start + 1; I < End; ++I)
+			{
+				if (!Visit(I))
+				{
+					return false;
+				}
+			}
+		}
+		else
+		{
+			for (int32 I = Start + 1; I < N; ++I)
+			{
+				if (!Visit(I))
+				{
+					return false;
+				}
+			}
+			for (int32 I = 0; I < End; ++I)
+			{
+				if (!Visit(I))
+				{
+					return false;
+				}
+			}
+		}
+
+		const FVector2D& A = Pts[Start];
+		const FVector2D& B = Pts[End];
+		const double LenM = FMath::Sqrt(
+			FMath::Square((B.X - A.X) * MLon) + FMath::Square((B.Y - A.Y) * MLat));
+		const int32 Samples = FMath::Clamp(FMath::CeilToInt(LenM / 0.35), 4, 80);
+		for (int32 S = 1; S < Samples; ++S)
+		{
+			const float T = static_cast<float>(S) / static_cast<float>(Samples);
+			if (!ClipPointInRing(A + (B - A) * T, Pts))
+			{
 				return false;
 			}
 		}
-		return true;
+		return !ChordHitsNonIncidentEdges(Pts, Start, End);
+	}
+
+	int32 FindRingVertexIndex(const TArray<FVector2D>& Ring, const FVector2D& P)
+	{
+		for (int32 I = 0; I < Ring.Num(); ++I)
+		{
+			if (Ring[I].Equals(P, DuplicateEpsDeg))
+			{
+				return I;
+			}
+		}
+		return INDEX_NONE;
 	}
 
 	void RdpKeepClip(const TArray<FVector2D>& Pts, int32 Start, int32 End, double EpsSq, TArray<uint8>& Keep)
@@ -1519,7 +1604,7 @@ namespace
 			}
 
 			const bool bFlat = MaxD <= EpsSqM;
-			const bool bInside = ChordStaysInsideRing(Original, Pts[Start], Pts[End]);
+			const bool bInside = SpanIsSafeClipChord(Original, Start, End, MLon, MLat);
 			if (bFlat && bInside)
 			{
 				Keep[Start] = 1;
@@ -1561,7 +1646,10 @@ namespace
 			{
 				const int32 P = (I + N - 1) % N;
 				const int32 Q = (I + 1) % N;
-				if (!ChordStaysInsideRing(Original, Ring[P], Ring[Q]))
+				const int32 IA = FindRingVertexIndex(Original, Ring[P]);
+				const int32 IB = FindRingVertexIndex(Original, Ring[Q]);
+				if (IA == INDEX_NONE || IB == INDEX_NONE
+					|| !SpanIsSafeClipChord(Original, IA, IB, MLon, MLat))
 				{
 					continue;
 				}
@@ -1642,7 +1730,25 @@ namespace
 		}
 		CapClipRingInside(Decimated, Unique, ClipOverlayMaxVertices, MLon, MLat);
 		StripClosedDuplicate(Decimated);
-		if (Decimated.Num() >= 3)
+		if (Decimated.Num() < 3)
+		{
+			return;
+		}
+
+		// Pull 15 cm inside after simplify so a tangent chord + Cesium raster pixels
+		// cannot paint DTM outside the pavement.
+		constexpr double RasterSafetyInsetM = 0.15;
+		const double AreaBefore = FMath::Abs(ClipRingArea2(Decimated));
+		TArray<FVector2D> Inset = Decimated;
+		InflateLonLatRing(Inset, -RasterSafetyInsetM);
+		StripClosedDuplicate(Inset);
+		EnsureClipWinding(Inset, true);
+		const double AreaAfter = FMath::Abs(ClipRingArea2(Inset));
+		if (Inset.Num() >= 3 && AreaAfter > AreaBefore * 0.2 && AreaAfter <= AreaBefore * 1.0001)
+		{
+			Ring = MoveTemp(Inset);
+		}
+		else
 		{
 			Ring = MoveTemp(Decimated);
 		}
