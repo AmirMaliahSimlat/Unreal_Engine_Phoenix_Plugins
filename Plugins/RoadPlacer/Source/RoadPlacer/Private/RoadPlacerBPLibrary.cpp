@@ -608,6 +608,16 @@ namespace
 
 	void StripClosedDuplicate(TArray<FVector2D>& Ring);
 
+	int32 CountClipVerts(const TArray<TArray<FVector2D>>& Rings)
+	{
+		int32 N = 0;
+		for (const TArray<FVector2D>& Ring : Rings)
+		{
+			N += Ring.Num();
+		}
+		return N;
+	}
+
 	constexpr double MaskOnOutlineM = 0.002;
 	constexpr double MaskPullMaxM = 20.0;
 
@@ -3283,8 +3293,16 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				? *FString::Printf(TEXT(" (Only Tile Index %d, not the whole mask)"), WantedTile)
 				: TEXT(""));
 		const int32 ClipRingsBeforeMerge = PendingClipRings.Num();
+		const int32 VertsRaw = CountClipVerts(PendingClipRings);
 		ConstrainClipRingsToMask(PendingClipRings, Masks, Outline);
+		const int32 VertsAfterMask = CountClipVerts(PendingClipRings);
 		MergeNearbyClipRings(PendingClipRings, ClipClusterLinkMeters, ClipMargin, Masks, Outline);
+		const int32 VertsOverlay = CountClipVerts(PendingClipRings);
+		const int32 SavedVsRaw = FMath::Max(VertsRaw - VertsOverlay, 0);
+		const int32 SavedVsMask = FMath::Max(VertsAfterMask - VertsOverlay, 0);
+		const double SavedPct = (VertsRaw > 0)
+			? (100.0 * static_cast<double>(SavedVsRaw) / static_cast<double>(VertsRaw))
+			: 0.0;
 		UE_LOG(
 			LogRoadPlacer,
 			Display,
@@ -3293,6 +3311,16 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 			PendingClipRings.Num(),
 			ClipClusterLinkMeters,
 			ClipMargin);
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Clip verts: raw=%d after-mask=%d overlay=%d (saved %d vs raw, %.1f%%; saved %d vs after-mask)."),
+			VertsRaw,
+			VertsAfterMask,
+			VertsOverlay,
+			SavedVsRaw,
+			SavedPct,
+			SavedVsMask);
 
 		TArray<ACesium3DTileset*> Tilesets;
 		for (TActorIterator<ACesium3DTileset> It(World); It; ++It)
