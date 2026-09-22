@@ -540,12 +540,12 @@ namespace
 			const double Bx = (B.X - A.X) * MLon;
 			const double By = (B.Y - A.Y) * MLat;
 			const double LenSq = Bx * Bx + By * By;
-			double T = (LenSq > 1.0e-12) ? ((Px * Bx + Py * By) / LenSq) : 0.0;
-			T = FMath::Clamp(T, 0.0, 1.0);
-			const double Dx = Px - T * Bx;
-			const double Dy = Py - T * By;
-			OutQ.X = A.X + (B.X - A.X) * T;
-			OutQ.Y = A.Y + (B.Y - A.Y) * T;
+			double SegT = (LenSq > 1.0e-12) ? ((Px * Bx + Py * By) / LenSq) : 0.0;
+			SegT = FMath::Clamp(SegT, 0.0, 1.0);
+			const double Dx = Px - SegT * Bx;
+			const double Dy = Py - SegT * By;
+			OutQ.X = A.X + (B.X - A.X) * SegT;
+			OutQ.Y = A.Y + (B.Y - A.Y) * SegT;
 			OutDistM = FMath::Sqrt(Dx * Dx + Dy * Dy);
 			OutCrossM = Bx * Py - By * Px;
 		}
@@ -653,21 +653,14 @@ namespace
 				}
 				const bool bOnLine = DistM <= 0.05;
 				const bool bOnRoadSide = bRoadOnLeft ? (CrossM >= 0.0) : (CrossM <= 0.0);
-				const float DupEps = static_cast<float>(DuplicateEpsDeg);
 				if (bOnLine || !bOnRoadSide)
 				{
-					if (Fixed.Num() == 0 || !Fixed.Last().Equals(Q, DupEps))
-					{
-						Fixed.Add(Q);
-					}
+					Fixed.Add(Q);
 					++Snapped;
 				}
 				else
 				{
-					if (Fixed.Num() == 0 || !Fixed.Last().Equals(P, DupEps))
-					{
-						Fixed.Add(P);
-					}
+					Fixed.Add(P);
 					++KeptInside;
 				}
 			}
