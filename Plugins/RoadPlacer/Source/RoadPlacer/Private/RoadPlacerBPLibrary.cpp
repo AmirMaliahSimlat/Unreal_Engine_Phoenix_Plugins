@@ -33,8 +33,6 @@ namespace
 	const FName RoadPlacerTag(TEXT("RoadPlacer"));
 	const FName RoadPlacerOverlayName(TEXT("RoadPlacerClip"));
 	constexpr double DuplicateEpsDeg = 1.0e-10;
-	constexpr int32 ClipOutlineMaxVertices = 8192;
-	constexpr int32 ClipOverlayMaxVertices = 2048;
 	constexpr double ClipSimplifyMeters = 0.05;
 	constexpr double ClipClusterLinkMeters = 4.0;
 	// No outward pad — clips stay under the pavement. Overlay simplify is driven by Clip Margin.
@@ -630,7 +628,7 @@ namespace
 		const TArray<FRoadShapefileMask>& Masks,
 		const FOutlineIndex& Outline)
 	{
-		for (int32 Iter = 0; Iter < 4 && Ring.Num() >= 2 && Ring.Num() < ClipOutlineMaxVertices; ++Iter)
+		for (int32 Iter = 0; Iter < 4 && Ring.Num() >= 2; ++Iter)
 		{
 			const int32 N = Ring.Num();
 			TArray<FVector2D> Next;
@@ -1266,18 +1264,6 @@ namespace
 		return !ChordHitsNonIncidentEdges(Pts, Start, End);
 	}
 
-	int32 FindRingVertexIndex(const TArray<FVector2D>& Ring, const FVector2D& P)
-	{
-		for (int32 I = 0; I < Ring.Num(); ++I)
-		{
-			if (Ring[I].Equals(P, DuplicateEpsDeg))
-			{
-				return I;
-			}
-		}
-		return INDEX_NONE;
-	}
-
 	void RdpKeepClipInside(
 		const TArray<FVector2D>& Pts,
 		double EpsSqM,
@@ -1287,15 +1273,6 @@ namespace
 		const TArray<FRoadShapefileMask>& Masks,
 		const FOutlineIndex& Outline,
 		TArray<uint8>& Keep);
-
-	void CapClipRingInside(
-		TArray<FVector2D>& Ring,
-		const TArray<FVector2D>& Original,
-		int32 MaxVerts,
-		double MLon,
-		double MLat,
-		const TArray<FRoadShapefileMask>& Masks,
-		const FOutlineIndex& Outline);
 
 	void InflateLonLatRing(TArray<FVector2D>& Ring, double MetersOut)
 	{
@@ -1760,7 +1737,6 @@ namespace
 		const TArray<FVector2D>& In,
 		TArray<FVector2D>& Out,
 		double SimplifyM,
-		int32 MaxVerts,
 		const TArray<FRoadShapefileMask>& Masks,
 		const FOutlineIndex& Outline)
 	{
@@ -1811,48 +1787,6 @@ namespace
 		if (Out.Num() < 3)
 		{
 			Out = Unique;
-		}
-		CapClipRingInside(Out, Unique, MaxVerts, MLon, MLat, Masks, Outline);
-	}
-
-	void CapClipRingInside(
-		TArray<FVector2D>& Ring,
-		const TArray<FVector2D>& Original,
-		int32 MaxVerts,
-		double MLon,
-		double MLat,
-		const TArray<FRoadShapefileMask>& Masks,
-		const FOutlineIndex& Outline)
-	{
-		const int32 VertCap = FMath::Max(MaxVerts, 8);
-		while (Ring.Num() > VertCap && Ring.Num() > 3)
-		{
-			const int32 N = Ring.Num();
-			int32 Best = INDEX_NONE;
-			double BestScore = TNumericLimits<double>::Max();
-			for (int32 I = 0; I < N; ++I)
-			{
-				const int32 P = (I + N - 1) % N;
-				const int32 Q = (I + 1) % N;
-				const int32 IA = FindRingVertexIndex(Original, Ring[P]);
-				const int32 IB = FindRingVertexIndex(Original, Ring[Q]);
-				if (IA == INDEX_NONE || IB == INDEX_NONE
-					|| !SpanIsSafeClipChord(Original, IA, IB, MLon, MLat, Masks, Outline))
-				{
-					continue;
-				}
-				const double Score = PerpDistSqMeters(Ring[I], Ring[P], Ring[Q], MLon, MLat);
-				if (Score < BestScore)
-				{
-					BestScore = Score;
-					Best = I;
-				}
-			}
-			if (Best == INDEX_NONE)
-			{
-				break;
-			}
-			Ring.RemoveAt(Best);
 		}
 	}
 
@@ -1920,7 +1854,6 @@ namespace
 		{
 			return;
 		}
-		CapClipRingInside(Decimated, Unique, ClipOverlayMaxVertices, MLon, MLat, Masks, Outline);
 		StripClosedDuplicate(Decimated);
 		if (Decimated.Num() >= 3)
 		{
@@ -2174,7 +2107,7 @@ namespace
 		for (const TArray<FVector2D>& In : InRings)
 		{
 			TArray<FVector2D> Decimated;
-			DecimateClipRing(In, Decimated, ClipSimplifyMeters, ClipOutlineMaxVertices, Masks, Outline);
+			DecimateClipRing(In, Decimated, ClipSimplifyMeters, Masks, Outline);
 			StripClosedDuplicate(Decimated);
 			if (Decimated.Num() >= 3)
 			{
