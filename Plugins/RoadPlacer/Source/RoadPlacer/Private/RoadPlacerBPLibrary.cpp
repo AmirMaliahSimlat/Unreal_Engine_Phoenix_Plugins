@@ -434,6 +434,7 @@ namespace
 		{
 			FVector2D A;
 			FVector2D B;
+			bool bRoadOnLeft = true;
 		};
 
 		TArray<FEdge> Edges;
@@ -445,19 +446,27 @@ namespace
 			return (static_cast<uint64>(static_cast<uint32>(X)) << 32) | static_cast<uint32>(Y);
 		}
 
-		void AddRing(const TArray<FVector2D>& Ring)
+		void AddRing(const TArray<FVector2D>& Ring, bool bHole)
 		{
 			const int32 N = Ring.Num();
 			if (N < 2)
 			{
 				return;
 			}
+			double Area2 = 0.0;
+			for (int32 I = 0; I < N; ++I)
+			{
+				const FVector2D& A = Ring[I];
+				const FVector2D& B = Ring[(I + 1) % N];
+				Area2 += A.X * B.Y - B.X * A.Y;
+			}
+			const bool bRoadOnLeft = bHole ? (Area2 < 0.0) : (Area2 >= 0.0);
 			for (int32 I = 0; I < N; ++I)
 			{
 				const FVector2D& A = Ring[I];
 				const FVector2D& B = Ring[(I + 1) % N];
 				const int32 EdgeIndex = Edges.Num();
-				Edges.Add({ A, B });
+				Edges.Add({ A, B, bRoadOnLeft });
 				const int32 MinX = FMath::FloorToInt(FMath::Min(A.X, B.X) / CellDeg);
 				const int32 MaxX = FMath::FloorToInt(FMath::Max(A.X, B.X) / CellDeg);
 				const int32 MinY = FMath::FloorToInt(FMath::Min(A.Y, B.Y) / CellDeg);
@@ -492,10 +501,10 @@ namespace
 
 			for (const FRoadShapefileMask& Mask : Masks)
 			{
-				AddRing(Mask.Outer.LonLat);
+				AddRing(Mask.Outer.LonLat, false);
 				for (const FRoadShapefileRing& Hole : Mask.Holes)
 				{
-					AddRing(Hole.LonLat);
+					AddRing(Hole.LonLat, true);
 				}
 			}
 		}
@@ -514,6 +523,74 @@ namespace
 			const double Dx = Px - T * Bx;
 			const double Dy = Py - T * By;
 			return FMath::Sqrt(Dx * Dx + Dy * Dy);
+		}
+
+		void ProjectOnSeg(
+			const FVector2D& P,
+			const FVector2D& A,
+			const FVector2D& B,
+			FVector2D& OutQ,
+			double& OutDistM,
+			double& OutCrossM) const
+		{
+			const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(P.Y)), 0.05);
+			const double MLat = 110540.0;
+			const double Px = (P.X - A.X) * MLon;
+			const double Py = (P.Y - A.Y) * MLat;
+			const double Bx = (B.X - A.X) * MLon;
+			const double By = (B.Y - A.Y) * MLat;
+			const double LenSq = Bx * Bx + By * By;
+			double T = (LenSq > 1.0e-12) ? ((Px * Bx + Py * By) / LenSq) : 0.0;
+			T = FMath::Clamp(T, 0.0, 1.0);
+			const double Dx = Px - T * Bx;
+			const double Dy = Py - T * By;
+			OutQ = FVector2D(A.X + (B.X - A.X) * T, A.Y + (B.Y - A.Y) * T);
+			OutDistM = FMath::Sqrt(Dx * Dx + Dy * Dy);
+			OutCrossM = Bx * Py - By * Px;
+		}
+
+		bool ClosestOnOutline(
+			const FVector2D& P,
+			double MaxM,
+			FVector2D& OutQ,
+			double& OutDistM,
+			bool& bOutRoadOnLeft,
+			double& OutCrossM) const
+		{
+			OutDistM = TNumericLimits<double>::Max();
+			bOutRoadOnLeft = true;
+			OutCrossM = 0.0;
+			if (Edges.Num() == 0)
+			{
+				return false;
+			}
+			const int32 CX = FMath::FloorToInt(P.X / CellDeg);
+			const int32 CY = FMath::FloorToInt(P.Y / CellDeg);
+			const int32 CellR = FMath::Clamp(FMath::CeilToInt(MaxM / 2.0) + 1, 2, 16);
+			for (int32 DY = -CellR; DY <= CellR; ++DY)
+			{
+				for (int32 DX = -CellR; DX <= CellR; ++DX)
+				{
+					if (const TArray<int32>* Hits = Cells.Find(Pack(CX + DX, CY + DY)))
+					{
+						for (const int32 EdgeIndex : *Hits)
+						{
+							FVector2D Q;
+							double DistM = 0.0;
+							double CrossM = 0.0;
+							ProjectOnSeg(P, Edges[EdgeIndex].A, Edges[EdgeIndex].B, Q, DistM, CrossM);
+							if (DistM < OutDistM)
+							{
+								OutDistM = DistM;
+								OutQ = Q;
+								bOutRoadOnLeft = Edges[EdgeIndex].bRoadOnLeft;
+								OutCrossM = CrossM;
+							}
+						}
+					}
+				}
+			}
+			return OutDistM <= MaxM;
 		}
 
 		bool IsNear(const FVector2D& P, double TolM) const
@@ -545,6 +622,74 @@ namespace
 			return false;
 		}
 	};
+
+	void SnapClipRingsToMask(
+		TArray<TArray<FVector2D>>& Rings,
+		const FOutlineIndex& Outline,
+		double MaxSnapM)
+	{
+		const double Start = FPlatformTime::Seconds();
+		int32 KeptInside = 0;
+		int32 Snapped = 0;
+		int32 DroppedVerts = 0;
+		int32 DroppedRings = 0;
+		TArray<TArray<FVector2D>> OutRings;
+		OutRings.Reserve(Rings.Num());
+		for (const TArray<FVector2D>& Ring : Rings)
+		{
+			TArray<FVector2D> Fixed;
+			Fixed.Reserve(Ring.Num());
+			for (const FVector2D& P : Ring)
+			{
+				FVector2D Q;
+				double DistM = 0.0;
+				bool bRoadOnLeft = true;
+				double CrossM = 0.0;
+				if (!Outline.ClosestOnOutline(P, MaxSnapM, Q, DistM, bRoadOnLeft, CrossM))
+				{
+					++DroppedVerts;
+					continue;
+				}
+				const bool bOnLine = DistM <= 0.05;
+				const bool bOnRoadSide = bRoadOnLeft ? (CrossM >= 0.0) : (CrossM <= 0.0);
+				if (bOnLine || !bOnRoadSide)
+				{
+					if (Fixed.Num() == 0 || !Fixed.Last().Equals(Q, DuplicateEpsDeg))
+					{
+						Fixed.Add(Q);
+					}
+					++Snapped;
+				}
+				else
+				{
+					if (Fixed.Num() == 0 || !Fixed.Last().Equals(P, DuplicateEpsDeg))
+					{
+						Fixed.Add(P);
+					}
+					++KeptInside;
+				}
+			}
+			StripClosedDuplicate(Fixed);
+			if (Fixed.Num() >= 3)
+			{
+				OutRings.Add(MoveTemp(Fixed));
+			}
+			else
+			{
+				++DroppedRings;
+			}
+		}
+		Rings = MoveTemp(OutRings);
+		UE_LOG(
+			LogRoadPlacer,
+			Display,
+			TEXT("Clip verts vs mask outline: kept-inside=%d snapped-to-curb=%d dropped-verts=%d dropped-rings=%d in %.2fs."),
+			KeptInside,
+			Snapped,
+			DroppedVerts,
+			DroppedRings,
+			FPlatformTime::Seconds() - Start);
+	}
 
 	double EvalLinearZ(
 		double SQuery,
@@ -1197,6 +1342,8 @@ namespace
 			const FVector2D& B = Ring[(I + 1) % N];
 			Area2 += A.X * B.Y - B.X * A.Y;
 		}
+		// Left of each edge * Sign: for CCW (Area2>0) this is the interior.
+		// Positive MetersOut insets a CCW ring; negative expands it.
 		const double Sign = (Area2 >= 0.0) ? 1.0 : -1.0;
 
 		TArray<FVector2D> Out;
@@ -1730,25 +1877,7 @@ namespace
 		}
 		CapClipRingInside(Decimated, Unique, ClipOverlayMaxVertices, MLon, MLat);
 		StripClosedDuplicate(Decimated);
-		if (Decimated.Num() < 3)
-		{
-			return;
-		}
-
-		// Pull 15 cm inside after simplify so a tangent chord + Cesium raster pixels
-		// cannot paint DTM outside the pavement.
-		constexpr double RasterSafetyInsetM = 0.15;
-		const double AreaBefore = FMath::Abs(ClipRingArea2(Decimated));
-		TArray<FVector2D> Inset = Decimated;
-		InflateLonLatRing(Inset, -RasterSafetyInsetM);
-		StripClosedDuplicate(Inset);
-		EnsureClipWinding(Inset, true);
-		const double AreaAfter = FMath::Abs(ClipRingArea2(Inset));
-		if (Inset.Num() >= 3 && AreaAfter > AreaBefore * 0.2 && AreaAfter <= AreaBefore * 1.0001)
-		{
-			Ring = MoveTemp(Inset);
-		}
-		else
+		if (Decimated.Num() >= 3)
 		{
 			Ring = MoveTemp(Decimated);
 		}
@@ -2924,6 +3053,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				? *FString::Printf(TEXT(" (Only Tile Index %d, not the whole mask)"), WantedTile)
 				: TEXT(""));
 		const int32 ClipRingsBeforeMerge = PendingClipRings.Num();
+		SnapClipRingsToMask(PendingClipRings, Outline, OutlineSnapM + 5.0);
 		MergeNearbyClipRings(PendingClipRings, ClipClusterLinkMeters, ClipMargin);
 		UE_LOG(
 			LogRoadPlacer,
