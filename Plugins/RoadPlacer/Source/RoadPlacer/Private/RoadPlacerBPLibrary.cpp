@@ -544,7 +544,8 @@ namespace
 			T = FMath::Clamp(T, 0.0, 1.0);
 			const double Dx = Px - T * Bx;
 			const double Dy = Py - T * By;
-			OutQ = FVector2D(A.X + (B.X - A.X) * T, A.Y + (B.Y - A.Y) * T);
+			OutQ.X = A.X + (B.X - A.X) * T;
+			OutQ.Y = A.Y + (B.Y - A.Y) * T;
 			OutDistM = FMath::Sqrt(Dx * Dx + Dy * Dy);
 			OutCrossM = Bx * Py - By * Px;
 		}
@@ -652,9 +653,10 @@ namespace
 				}
 				const bool bOnLine = DistM <= 0.05;
 				const bool bOnRoadSide = bRoadOnLeft ? (CrossM >= 0.0) : (CrossM <= 0.0);
+				const float DupEps = static_cast<float>(DuplicateEpsDeg);
 				if (bOnLine || !bOnRoadSide)
 				{
-					if (Fixed.Num() == 0 || !Fixed.Last().Equals(Q, DuplicateEpsDeg))
+					if (Fixed.Num() == 0 || !Fixed.Last().Equals(Q, DupEps))
 					{
 						Fixed.Add(Q);
 					}
@@ -662,7 +664,7 @@ namespace
 				}
 				else
 				{
-					if (Fixed.Num() == 0 || !Fixed.Last().Equals(P, DuplicateEpsDeg))
+					if (Fixed.Num() == 0 || !Fixed.Last().Equals(P, DupEps))
 					{
 						Fixed.Add(P);
 					}
