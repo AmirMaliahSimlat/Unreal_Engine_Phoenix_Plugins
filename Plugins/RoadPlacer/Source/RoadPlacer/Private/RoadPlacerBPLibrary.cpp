@@ -434,7 +434,6 @@ namespace
 		{
 			FVector2D A;
 			FVector2D B;
-			bool bRoadOnLeft = true;
 		};
 
 		TArray<FEdge> Edges;
@@ -446,27 +445,19 @@ namespace
 			return (static_cast<uint64>(static_cast<uint32>(X)) << 32) | static_cast<uint32>(Y);
 		}
 
-		void AddRing(const TArray<FVector2D>& Ring, bool bHole)
+		void AddRing(const TArray<FVector2D>& Ring)
 		{
 			const int32 N = Ring.Num();
 			if (N < 2)
 			{
 				return;
 			}
-			double Area2 = 0.0;
-			for (int32 I = 0; I < N; ++I)
-			{
-				const FVector2D& A = Ring[I];
-				const FVector2D& B = Ring[(I + 1) % N];
-				Area2 += A.X * B.Y - B.X * A.Y;
-			}
-			const bool bRoadOnLeft = bHole ? (Area2 < 0.0) : (Area2 >= 0.0);
 			for (int32 I = 0; I < N; ++I)
 			{
 				const FVector2D& A = Ring[I];
 				const FVector2D& B = Ring[(I + 1) % N];
 				const int32 EdgeIndex = Edges.Num();
-				Edges.Add({ A, B, bRoadOnLeft });
+				Edges.Add({ A, B });
 				const int32 MinX = FMath::FloorToInt(FMath::Min(A.X, B.X) / CellDeg);
 				const int32 MaxX = FMath::FloorToInt(FMath::Max(A.X, B.X) / CellDeg);
 				const int32 MinY = FMath::FloorToInt(FMath::Min(A.Y, B.Y) / CellDeg);
@@ -501,10 +492,10 @@ namespace
 
 			for (const FRoadShapefileMask& Mask : Masks)
 			{
-				AddRing(Mask.Outer.LonLat, false);
+				AddRing(Mask.Outer.LonLat);
 				for (const FRoadShapefileRing& Hole : Mask.Holes)
 				{
-					AddRing(Hole.LonLat, true);
+					AddRing(Hole.LonLat);
 				}
 			}
 		}
@@ -530,8 +521,7 @@ namespace
 			const FVector2D& A,
 			const FVector2D& B,
 			FVector2D& OutQ,
-			double& OutDistM,
-			double& OutCrossM) const
+			double& OutDistM) const
 		{
 			const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(P.Y)), 0.05);
 			const double MLat = 110540.0;
@@ -547,20 +537,15 @@ namespace
 			OutQ.X = A.X + (B.X - A.X) * SegT;
 			OutQ.Y = A.Y + (B.Y - A.Y) * SegT;
 			OutDistM = FMath::Sqrt(Dx * Dx + Dy * Dy);
-			OutCrossM = Bx * Py - By * Px;
 		}
 
 		bool ClosestOnOutline(
 			const FVector2D& P,
 			double MaxM,
 			FVector2D& OutQ,
-			double& OutDistM,
-			bool& bOutRoadOnLeft,
-			double& OutCrossM) const
+			double& OutDistM) const
 		{
 			OutDistM = TNumericLimits<double>::Max();
-			bOutRoadOnLeft = true;
-			OutCrossM = 0.0;
 			if (Edges.Num() == 0)
 			{
 				return false;
@@ -578,14 +563,11 @@ namespace
 						{
 							FVector2D Q;
 							double DistM = 0.0;
-							double CrossM = 0.0;
-							ProjectOnSeg(P, Edges[EdgeIndex].A, Edges[EdgeIndex].B, Q, DistM, CrossM);
+							ProjectOnSeg(P, Edges[EdgeIndex].A, Edges[EdgeIndex].B, Q, DistM);
 							if (DistM < OutDistM)
 							{
 								OutDistM = DistM;
 								OutQ = Q;
-								bOutRoadOnLeft = Edges[EdgeIndex].bRoadOnLeft;
-								OutCrossM = CrossM;
 							}
 						}
 					}
@@ -626,14 +608,80 @@ namespace
 
 	void StripClosedDuplicate(TArray<FVector2D>& Ring);
 
-	void SnapClipRingsToMask(
+	constexpr double MaskOnOutlineM = 0.002;
+	constexpr double MaskPullMaxM = 20.0;
+
+	bool SameLonLat(const FVector2D& A, const FVector2D& B)
+	{
+		return FMath::Abs(static_cast<double>(A.X) - static_cast<double>(B.X)) <= DuplicateEpsDeg
+			&& FMath::Abs(static_cast<double>(A.Y) - static_cast<double>(B.Y)) <= DuplicateEpsDeg;
+	}
+
+	bool PointOnRoadMask(
+		const FVector2D& P,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
+	{
+		return RoadTriangulate::PointInMask(P, Masks) || Outline.IsNear(P, MaskOnOutlineM);
+	}
+
+	void SplitClipChordsOutsideMask(
+		TArray<FVector2D>& Ring,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
+	{
+		for (int32 Iter = 0; Iter < 4 && Ring.Num() >= 2 && Ring.Num() < ClipOutlineMaxVertices; ++Iter)
+		{
+			const int32 N = Ring.Num();
+			TArray<FVector2D> Next;
+			Next.Reserve(N * 2);
+			bool bSplit = false;
+			for (int32 I = 0; I < N; ++I)
+			{
+				const FVector2D& A = Ring[I];
+				const FVector2D& B = Ring[(I + 1) % N];
+				Next.Add(A);
+				FVector2D Mid;
+				Mid.X = 0.5 * (A.X + B.X);
+				Mid.Y = 0.5 * (A.Y + B.Y);
+				if (PointOnRoadMask(Mid, Masks, Outline))
+				{
+					continue;
+				}
+				FVector2D Q;
+				double DistM = 0.0;
+				if (!Outline.ClosestOnOutline(Mid, MaskPullMaxM, Q, DistM))
+				{
+					continue;
+				}
+				if (SameLonLat(Q, A) || SameLonLat(Q, B))
+				{
+					continue;
+				}
+				Next.Add(Q);
+				bSplit = true;
+			}
+			if (!bSplit)
+			{
+				return;
+			}
+			StripClosedDuplicate(Next);
+			if (Next.Num() < 3)
+			{
+				return;
+			}
+			Ring = MoveTemp(Next);
+		}
+	}
+
+	void ConstrainClipRingsToMask(
 		TArray<TArray<FVector2D>>& Rings,
-		const FOutlineIndex& Outline,
-		double MaxSnapM)
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
 	{
 		const double Start = FPlatformTime::Seconds();
 		int32 KeptInside = 0;
-		int32 Snapped = 0;
+		int32 PulledIn = 0;
 		int32 DroppedVerts = 0;
 		int32 DroppedRings = 0;
 		TArray<TArray<FVector2D>> OutRings;
@@ -644,29 +692,29 @@ namespace
 			Fixed.Reserve(Ring.Num());
 			for (const FVector2D& P : Ring)
 			{
-				FVector2D Q;
-				double DistM = 0.0;
-				bool bRoadOnLeft = true;
-				double CrossM = 0.0;
-				if (!Outline.ClosestOnOutline(P, MaxSnapM, Q, DistM, bRoadOnLeft, CrossM))
-				{
-					++DroppedVerts;
-					continue;
-				}
-				const bool bOnLine = DistM <= 0.05;
-				const bool bOnRoadSide = bRoadOnLeft ? (CrossM >= 0.0) : (CrossM <= 0.0);
-				if (bOnLine || !bOnRoadSide)
-				{
-					Fixed.Add(Q);
-					++Snapped;
-				}
-				else
+				if (PointOnRoadMask(P, Masks, Outline))
 				{
 					Fixed.Add(P);
 					++KeptInside;
+					continue;
+				}
+				FVector2D Q;
+				double DistM = 0.0;
+				if (Outline.ClosestOnOutline(P, MaskPullMaxM, Q, DistM))
+				{
+					Fixed.Add(Q);
+					++PulledIn;
+				}
+				else
+				{
+					++DroppedVerts;
 				}
 			}
 			StripClosedDuplicate(Fixed);
+			if (Fixed.Num() >= 3)
+			{
+				SplitClipChordsOutsideMask(Fixed, Masks, Outline);
+			}
 			if (Fixed.Num() >= 3)
 			{
 				OutRings.Add(MoveTemp(Fixed));
@@ -680,9 +728,9 @@ namespace
 		UE_LOG(
 			LogRoadPlacer,
 			Display,
-			TEXT("Clip verts vs mask outline: kept-inside=%d snapped-to-curb=%d dropped-verts=%d dropped-rings=%d in %.2fs."),
+			TEXT("Clip vs 2D mask: kept-inside=%d pulled-in=%d dropped-verts=%d dropped-rings=%d in %.2fs."),
 			KeptInside,
-			Snapped,
+			PulledIn,
 			DroppedVerts,
 			DroppedRings,
 			FPlatformTime::Seconds() - Start);
@@ -1042,18 +1090,6 @@ namespace
 		}
 	}
 
-	double PerpDistSqLonLat(const FVector2D& Point, const FVector2D& A, const FVector2D& B)
-	{
-		const FVector2D AB = B - A;
-		const double LenSq = AB.SizeSquared();
-		if (LenSq < 1.0e-30)
-		{
-			return FVector2D::DistSquared(Point, A);
-		}
-		const double T = FMath::Clamp(FVector2D::DotProduct(Point - A, AB) / LenSq, 0.0, 1.0);
-		return FVector2D::DistSquared(Point, A + AB * T);
-	}
-
 	double PerpDistSqMeters(
 		const FVector2D& Point,
 		const FVector2D& A,
@@ -1155,7 +1191,9 @@ namespace
 		int32 Start,
 		int32 End,
 		double MLon,
-		double MLat)
+		double MLat,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
 	{
 		const int32 N = Pts.Num();
 		if (!Pts.IsValidIndex(Start) || !Pts.IsValidIndex(End) || Start == End)
@@ -1164,7 +1202,12 @@ namespace
 		}
 		if ((Start + 1) % N == End || (End + 1) % N == Start)
 		{
-			return true;
+			const FVector2D& A0 = Pts[Start];
+			const FVector2D& B0 = Pts[End];
+			FVector2D Mid;
+			Mid.X = 0.5 * (A0.X + B0.X);
+			Mid.Y = 0.5 * (A0.Y + B0.Y);
+			return PointOnRoadMask(Mid, Masks, Outline);
 		}
 
 		constexpr double ExteriorEpsM = 0.02;
@@ -1212,7 +1255,10 @@ namespace
 		for (int32 S = 1; S < Samples; ++S)
 		{
 			const float T = static_cast<float>(S) / static_cast<float>(Samples);
-			if (!ClipPointInRing(A + (B - A) * T, Pts))
+			FVector2D Sample;
+			Sample.X = A.X + (B.X - A.X) * T;
+			Sample.Y = A.Y + (B.Y - A.Y) * T;
+			if (!ClipPointInRing(Sample, Pts) || !PointOnRoadMask(Sample, Masks, Outline))
 			{
 				return false;
 			}
@@ -1232,89 +1278,24 @@ namespace
 		return INDEX_NONE;
 	}
 
-	void RdpKeepClip(const TArray<FVector2D>& Pts, int32 Start, int32 End, double EpsSq, TArray<uint8>& Keep)
-	{
-		double MaxD = -1.0;
-		int32 MaxI = Start;
-		for (int32 I = Start + 1; I < End; ++I)
-		{
-			const double D = PerpDistSqLonLat(Pts[I], Pts[Start], Pts[End]);
-			if (D > MaxD)
-			{
-				MaxD = D;
-				MaxI = I;
-			}
-		}
-		if (MaxD > EpsSq && MaxI > Start && MaxI < End)
-		{
-			RdpKeepClip(Pts, Start, MaxI, EpsSq, Keep);
-			RdpKeepClip(Pts, MaxI, End, EpsSq, Keep);
-		}
-		else
-		{
-			Keep[Start] = 1;
-			Keep[End] = 1;
-		}
-	}
+	void RdpKeepClipInside(
+		const TArray<FVector2D>& Pts,
+		double EpsSqM,
+		double MLon,
+		double MLat,
+		const TArray<FVector2D>& Original,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline,
+		TArray<uint8>& Keep);
 
-	void DecimateClipRing(
-		const TArray<FVector2D>& In,
-		TArray<FVector2D>& Out,
-		double SimplifyM,
-		int32 MaxVerts)
-	{
-		Out.Reset();
-		TArray<FVector2D> Unique;
-		Unique.Reserve(In.Num());
-		for (const FVector2D& P : In)
-		{
-			if (Unique.Num() == 0 || !Unique.Last().Equals(P, DuplicateEpsDeg))
-			{
-				Unique.Add(P);
-			}
-		}
-		if (Unique.Num() >= 2 && Unique[0].Equals(Unique.Last(), DuplicateEpsDeg))
-		{
-			Unique.Pop();
-		}
-		if (Unique.Num() < 3)
-		{
-			Out = Unique;
-			return;
-		}
-
-		const double SafeSimplify = FMath::Max(SimplifyM, 0.01);
-		const double EpsDeg = SafeSimplify / 111320.0;
-		TArray<uint8> Keep;
-		Keep.Init(0, Unique.Num());
-		RdpKeepClip(Unique, 0, Unique.Num() - 1, EpsDeg * EpsDeg, Keep);
-		Keep[0] = 1;
-		Keep.Last() = 1;
-		Out.Reserve(Unique.Num());
-		for (int32 I = 0; I < Unique.Num(); ++I)
-		{
-			if (Keep[I])
-			{
-				Out.Add(Unique[I]);
-			}
-		}
-		if (Out.Num() < 3)
-		{
-			Out = Unique;
-		}
-		const int32 VertCap = FMath::Max(MaxVerts, 8);
-		if (Out.Num() > VertCap)
-		{
-			TArray<FVector2D> Sampled;
-			Sampled.Reserve(VertCap);
-			for (int32 I = 0; I < VertCap; ++I)
-			{
-				const int32 Src = (I * (Out.Num() - 1)) / (VertCap - 1);
-				Sampled.Add(Out[Src]);
-			}
-			Out = MoveTemp(Sampled);
-		}
-	}
+	void CapClipRingInside(
+		TArray<FVector2D>& Ring,
+		const TArray<FVector2D>& Original,
+		int32 MaxVerts,
+		double MLon,
+		double MLat,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline);
 
 	void InflateLonLatRing(TArray<FVector2D>& Ring, double MetersOut)
 	{
@@ -1712,6 +1693,8 @@ namespace
 		double MLon,
 		double MLat,
 		const TArray<FVector2D>& Original,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline,
 		TArray<uint8>& Keep)
 	{
 		const int32 Last = Pts.Num() - 1;
@@ -1748,7 +1731,7 @@ namespace
 			}
 
 			const bool bFlat = MaxD <= EpsSqM;
-			const bool bInside = SpanIsSafeClipChord(Original, Start, End, MLon, MLat);
+			const bool bInside = SpanIsSafeClipChord(Original, Start, End, MLon, MLat, Masks, Outline);
 			if (bFlat && bInside)
 			{
 				Keep[Start] = 1;
@@ -1773,12 +1756,73 @@ namespace
 		}
 	}
 
+	void DecimateClipRing(
+		const TArray<FVector2D>& In,
+		TArray<FVector2D>& Out,
+		double SimplifyM,
+		int32 MaxVerts,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
+	{
+		Out.Reset();
+		TArray<FVector2D> Unique;
+		Unique.Reserve(In.Num());
+		for (const FVector2D& P : In)
+		{
+			if (Unique.Num() == 0 || !SameLonLat(Unique.Last(), P))
+			{
+				Unique.Add(P);
+			}
+		}
+		if (Unique.Num() >= 2 && SameLonLat(Unique[0], Unique.Last()))
+		{
+			Unique.Pop();
+		}
+		if (Unique.Num() < 3)
+		{
+			Out = Unique;
+			return;
+		}
+
+		EnsureClipWinding(Unique, true);
+		double SumLat = 0.0;
+		for (const FVector2D& P : Unique)
+		{
+			SumLat += P.Y;
+		}
+		const double MidLat = SumLat / static_cast<double>(Unique.Num());
+		const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
+		const double MLat = 110540.0;
+		const double SafeSimplify = FMath::Max(SimplifyM, 0.01);
+		const double EpsSqM = SafeSimplify * SafeSimplify;
+		TArray<uint8> Keep;
+		Keep.Init(0, Unique.Num());
+		RdpKeepClipInside(Unique, EpsSqM, MLon, MLat, Unique, Masks, Outline, Keep);
+		Keep[0] = 1;
+		Keep.Last() = 1;
+		Out.Reserve(Unique.Num());
+		for (int32 I = 0; I < Unique.Num(); ++I)
+		{
+			if (Keep[I])
+			{
+				Out.Add(Unique[I]);
+			}
+		}
+		if (Out.Num() < 3)
+		{
+			Out = Unique;
+		}
+		CapClipRingInside(Out, Unique, MaxVerts, MLon, MLat, Masks, Outline);
+	}
+
 	void CapClipRingInside(
 		TArray<FVector2D>& Ring,
 		const TArray<FVector2D>& Original,
 		int32 MaxVerts,
 		double MLon,
-		double MLat)
+		double MLat,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
 	{
 		const int32 VertCap = FMath::Max(MaxVerts, 8);
 		while (Ring.Num() > VertCap && Ring.Num() > 3)
@@ -1793,7 +1837,7 @@ namespace
 				const int32 IA = FindRingVertexIndex(Original, Ring[P]);
 				const int32 IB = FindRingVertexIndex(Original, Ring[Q]);
 				if (IA == INDEX_NONE || IB == INDEX_NONE
-					|| !SpanIsSafeClipChord(Original, IA, IB, MLon, MLat))
+					|| !SpanIsSafeClipChord(Original, IA, IB, MLon, MLat, Masks, Outline))
 				{
 					continue;
 				}
@@ -1813,10 +1857,14 @@ namespace
 	}
 
 	/**
-	 * Overlay simplify: drop vertices while new chords stay inside the original road ring.
+	 * Overlay simplify: drop vertices while new chords stay inside the clip ring and the 2D mask.
 	 * Margin is max inward sagitta (metres), not an even inset on both curbs. 0 = collinear only.
 	 */
-	void SimplifyClipRingForOverlay(TArray<FVector2D>& Ring, double MarginM)
+	void SimplifyClipRingForOverlay(
+		TArray<FVector2D>& Ring,
+		double MarginM,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
 	{
 		StripClosedDuplicate(Ring);
 		if (Ring.Num() < 3)
@@ -1855,7 +1903,7 @@ namespace
 
 		TArray<uint8> Keep;
 		Keep.Init(0, Unique.Num());
-		RdpKeepClipInside(Unique, EpsSqM, MLon, MLat, Unique, Keep);
+		RdpKeepClipInside(Unique, EpsSqM, MLon, MLat, Unique, Masks, Outline, Keep);
 		Keep[0] = 1;
 		Keep.Last() = 1;
 
@@ -1872,7 +1920,7 @@ namespace
 		{
 			return;
 		}
-		CapClipRingInside(Decimated, Unique, ClipOverlayMaxVertices, MLon, MLat);
+		CapClipRingInside(Decimated, Unique, ClipOverlayMaxVertices, MLon, MLat, Masks, Outline);
 		StripClosedDuplicate(Decimated);
 		if (Decimated.Num() >= 3)
 		{
@@ -1880,7 +1928,12 @@ namespace
 		}
 	}
 
-	void MergeNearbyClipRings(TArray<TArray<FVector2D>>& Rings, double LinkM, double MarginM)
+	void MergeNearbyClipRings(
+		TArray<TArray<FVector2D>>& Rings,
+		double LinkM,
+		double MarginM,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
 	{
 		const int32 N = Rings.Num();
 		if (N == 0)
@@ -1889,7 +1942,7 @@ namespace
 		}
 		if (N == 1)
 		{
-			SimplifyClipRingForOverlay(Rings[0], MarginM);
+			SimplifyClipRingForOverlay(Rings[0], MarginM, Masks, Outline);
 			if (Rings[0].Num() < 3)
 			{
 				Rings.Reset();
@@ -1982,7 +2035,18 @@ namespace
 				EnsureClipWinding(Other, true);
 				Combined = BridgeJoinOuterAndHole(Combined, Other);
 			}
-			SimplifyClipRingForOverlay(Combined, MarginM);
+			TArray<TArray<FVector2D>> One;
+			One.Add(MoveTemp(Combined));
+			ConstrainClipRingsToMask(One, Masks, Outline);
+			if (One.Num() == 1)
+			{
+				SimplifyClipRingForOverlay(One[0], MarginM, Masks, Outline);
+				Combined = MoveTemp(One[0]);
+			}
+			else
+			{
+				Combined.Reset();
+			}
 			if (Combined.Num() >= 3)
 			{
 				Merged.Add(MoveTemp(Combined));
@@ -2100,7 +2164,9 @@ namespace
 
 	void ConvertBoundaryRingsToClipRings(
 		const TArray<TArray<FVector2D>>& InRings,
-		TArray<TArray<FVector2D>>& OutRings)
+		TArray<TArray<FVector2D>>& OutRings,
+		const TArray<FRoadShapefileMask>& Masks,
+		const FOutlineIndex& Outline)
 	{
 		OutRings.Reset();
 		TArray<TArray<FVector2D>> Rings;
@@ -2108,7 +2174,7 @@ namespace
 		for (const TArray<FVector2D>& In : InRings)
 		{
 			TArray<FVector2D> Decimated;
-			DecimateClipRing(In, Decimated, ClipSimplifyMeters, ClipOutlineMaxVertices);
+			DecimateClipRing(In, Decimated, ClipSimplifyMeters, ClipOutlineMaxVertices, Masks, Outline);
 			StripClosedDuplicate(Decimated);
 			if (Decimated.Num() >= 3)
 			{
@@ -2916,7 +2982,7 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				TArray<TArray<FVector2D>> TileRings;
 				ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
 				TArray<TArray<FVector2D>> ClipRings;
-				ConvertBoundaryRingsToClipRings(TileRings, ClipRings);
+				ConvertBoundaryRingsToClipRings(TileRings, ClipRings, Masks, Outline);
 				const int32 Dropped = KeepClipRingsInTile(ClipRings, TileKeep, ExtraLon, ExtraLat);
 				UE_LOG(
 					LogRoadPlacer,
@@ -3050,8 +3116,8 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				? *FString::Printf(TEXT(" (Only Tile Index %d, not the whole mask)"), WantedTile)
 				: TEXT(""));
 		const int32 ClipRingsBeforeMerge = PendingClipRings.Num();
-		SnapClipRingsToMask(PendingClipRings, Outline, OutlineSnapM + 5.0);
-		MergeNearbyClipRings(PendingClipRings, ClipClusterLinkMeters, ClipMargin);
+		ConstrainClipRingsToMask(PendingClipRings, Masks, Outline);
+		MergeNearbyClipRings(PendingClipRings, ClipClusterLinkMeters, ClipMargin, Masks, Outline);
 		UE_LOG(
 			LogRoadPlacer,
 			Display,
