@@ -624,6 +624,8 @@ namespace
 		}
 	};
 
+	void StripClosedDuplicate(TArray<FVector2D>& Ring);
+
 	void SnapClipRingsToMask(
 		TArray<TArray<FVector2D>>& Rings,
 		const FOutlineIndex& Outline,
