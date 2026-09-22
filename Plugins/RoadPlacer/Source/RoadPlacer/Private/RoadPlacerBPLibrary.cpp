@@ -38,6 +38,8 @@ namespace
 	// No outward pad — clips stay under the pavement. Overlay simplify is driven by Clip Margin.
 	constexpr double ClipInflateMeters = 0.0;
 	constexpr double ClipBridgeWidthMeters = 0.15;
+	constexpr double TileMeshOverlapM = 0.02;
+	constexpr double TileClipOverlapM = 0.08;
 
 	FString SanitizeFilePath(const FString& InPath)
 	{
@@ -1084,6 +1086,254 @@ namespace
 					OutVerts.Add(InVerts[Old]);
 				}
 				OutTris.Add(Remap[Old]);
+			}
+		}
+	}
+
+	FRoadLonLatRect MakeOverlapTileRect(
+		double TMinLon,
+		double TMaxLon,
+		double TMinLat,
+		double TMaxLat,
+		double OverlapM,
+		double MidLat)
+	{
+		const double OverlapLon = OverlapM
+			/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
+		const double OverlapLat = OverlapM / 110540.0;
+		FRoadLonLatRect R;
+		R.MinLon = TMinLon - OverlapLon;
+		R.MaxLon = TMaxLon + OverlapLon;
+		R.MinLat = TMinLat - OverlapLat;
+		R.MaxLat = TMaxLat + OverlapLat;
+		R.bValid = true;
+		return R;
+	}
+
+	struct FTileClipVert
+	{
+		double Lon = 0.0;
+		double Lat = 0.0;
+		double HeightM = 0.0;
+	};
+
+	bool TileClipVertInside(const FTileClipVert& P, int32 Edge, const FRoadLonLatRect& R)
+	{
+		switch (Edge)
+		{
+		case 0: return P.Lon >= R.MinLon;
+		case 1: return P.Lon <= R.MaxLon;
+		case 2: return P.Lat >= R.MinLat;
+		default: return P.Lat <= R.MaxLat;
+		}
+	}
+
+	FTileClipVert IntersectTileClipEdge(
+		const FTileClipVert& S,
+		const FTileClipVert& E,
+		int32 Edge,
+		const FRoadLonLatRect& R)
+	{
+		FTileClipVert Q;
+		double SegT = 0.0;
+		if (Edge <= 1)
+		{
+			const double X = (Edge == 0) ? R.MinLon : R.MaxLon;
+			const double Den = E.Lon - S.Lon;
+			SegT = FMath::Abs(Den) < 1.0e-30 ? 0.0 : (X - S.Lon) / Den;
+			SegT = FMath::Clamp(SegT, 0.0, 1.0);
+			Q.Lon = X;
+			Q.Lat = S.Lat + SegT * (E.Lat - S.Lat);
+		}
+		else
+		{
+			const double Y = (Edge == 2) ? R.MinLat : R.MaxLat;
+			const double Den = E.Lat - S.Lat;
+			SegT = FMath::Abs(Den) < 1.0e-30 ? 0.0 : (Y - S.Lat) / Den;
+			SegT = FMath::Clamp(SegT, 0.0, 1.0);
+			Q.Lat = Y;
+			Q.Lon = S.Lon + SegT * (E.Lon - S.Lon);
+		}
+		Q.HeightM = S.HeightM + SegT * (E.HeightM - S.HeightM);
+		return Q;
+	}
+
+	void ClipTilePolyAgainstEdge(
+		const TArray<FTileClipVert>& In,
+		TArray<FTileClipVert>& Out,
+		int32 Edge,
+		const FRoadLonLatRect& R)
+	{
+		Out.Reset();
+		if (In.Num() == 0)
+		{
+			return;
+		}
+		FTileClipVert S = In.Last();
+		for (const FTileClipVert& E : In)
+		{
+			const bool bE = TileClipVertInside(E, Edge, R);
+			const bool bS = TileClipVertInside(S, Edge, R);
+			if (bE)
+			{
+				if (!bS)
+				{
+					Out.Add(IntersectTileClipEdge(S, E, Edge, R));
+				}
+				Out.Add(E);
+			}
+			else if (bS)
+			{
+				Out.Add(IntersectTileClipEdge(S, E, Edge, R));
+			}
+			S = E;
+		}
+	}
+
+	int32 AddWeldedTileSample(
+		TArray<FRoadSample>& Verts,
+		TMap<uint64, int32>& Weld,
+		const FTileClipVert& P)
+	{
+		constexpr double QuantDeg = 1.0e-8;
+		const int32 XL = FMath::FloorToInt(P.Lon / QuantDeg);
+		const int32 YL = FMath::FloorToInt(P.Lat / QuantDeg);
+		const uint64 Key = (static_cast<uint64>(static_cast<uint32>(XL)) << 32)
+			| static_cast<uint32>(YL);
+		if (const int32* Found = Weld.Find(Key))
+		{
+			return *Found;
+		}
+		FRoadSample S;
+		S.Lon = P.Lon;
+		S.Lat = P.Lat;
+		S.HeightM = P.HeightM;
+		const int32 Idx = Verts.Add(S);
+		Weld.Add(Key, Idx);
+		return Idx;
+	}
+
+	double SignedTriAreaM2(
+		const FTileClipVert& A,
+		const FTileClipVert& B,
+		const FTileClipVert& C,
+		double MLon,
+		double MLat)
+	{
+		const double Ax = A.Lon * MLon;
+		const double Ay = A.Lat * MLat;
+		const double Bx = B.Lon * MLon;
+		const double By = B.Lat * MLat;
+		const double Cx = C.Lon * MLon;
+		const double Cy = C.Lat * MLat;
+		return (Bx - Ax) * (Cy - Ay) - (By - Ay) * (Cx - Ax);
+	}
+
+	void ClipTinToLonLatRect(
+		const FRoadTin& Tin,
+		const FRoadLonLatRect& Rect,
+		TArray<FRoadSample>& OutVerts,
+		TArray<int32>& OutTris)
+	{
+		OutVerts.Reset();
+		OutTris.Reset();
+		if (!Rect.bValid || Tin.Triangles.Num() < 3)
+		{
+			return;
+		}
+		const double MidLat = 0.5 * (Rect.MinLat + Rect.MaxLat);
+		const double MLon = 111320.0 * FMath::Max(FMath::Cos(FMath::DegreesToRadians(MidLat)), 0.05);
+		const double MLat = 110540.0;
+		constexpr double MinAreaM2 = 1.0e-4;
+		TMap<uint64, int32> Weld;
+		OutTris.Reserve(Tin.Triangles.Num());
+		TArray<FTileClipVert> Poly;
+		TArray<FTileClipVert> Next;
+		Poly.Reserve(8);
+		Next.Reserve(8);
+		for (int32 T = 0; T + 2 < Tin.Triangles.Num(); T += 3)
+		{
+			const int32 IA = Tin.Triangles[T];
+			const int32 IB = Tin.Triangles[T + 1];
+			const int32 IC = Tin.Triangles[T + 2];
+			if (!Tin.Vertices.IsValidIndex(IA)
+				|| !Tin.Vertices.IsValidIndex(IB)
+				|| !Tin.Vertices.IsValidIndex(IC))
+			{
+				continue;
+			}
+			const FRoadSample& A = Tin.Vertices[IA];
+			const FRoadSample& B = Tin.Vertices[IB];
+			const FRoadSample& C = Tin.Vertices[IC];
+			const double TMinLon = FMath::Min(A.Lon, FMath::Min(B.Lon, C.Lon));
+			const double TMaxLon = FMath::Max(A.Lon, FMath::Max(B.Lon, C.Lon));
+			const double TMinLat = FMath::Min(A.Lat, FMath::Min(B.Lat, C.Lat));
+			const double TMaxLat = FMath::Max(A.Lat, FMath::Max(B.Lat, C.Lat));
+			if (!Rect.Overlaps(TMinLon, TMaxLon, TMinLat, TMaxLat))
+			{
+				continue;
+			}
+			Poly.Reset();
+			{
+				FTileClipVert VA;
+				VA.Lon = A.Lon;
+				VA.Lat = A.Lat;
+				VA.HeightM = A.HeightM;
+				FTileClipVert VB;
+				VB.Lon = B.Lon;
+				VB.Lat = B.Lat;
+				VB.HeightM = B.HeightM;
+				FTileClipVert VC;
+				VC.Lon = C.Lon;
+				VC.Lat = C.Lat;
+				VC.HeightM = C.HeightM;
+				Poly.Add(VA);
+				Poly.Add(VB);
+				Poly.Add(VC);
+			}
+			const double SrcArea = SignedTriAreaM2(Poly[0], Poly[1], Poly[2], MLon, MLat);
+			for (int32 Edge = 0; Edge < 4; ++Edge)
+			{
+				ClipTilePolyAgainstEdge(Poly, Next, Edge, Rect);
+				Poly = MoveTemp(Next);
+				if (Poly.Num() < 3)
+				{
+					break;
+				}
+			}
+			if (Poly.Num() < 3)
+			{
+				continue;
+			}
+			const int32 I0 = AddWeldedTileSample(OutVerts, Weld, Poly[0]);
+			int32 Prev = AddWeldedTileSample(OutVerts, Weld, Poly[1]);
+			for (int32 K = 2; K < Poly.Num(); ++K)
+			{
+				const int32 Cur = AddWeldedTileSample(OutVerts, Weld, Poly[K]);
+				if (I0 == Prev || Prev == Cur || Cur == I0)
+				{
+					Prev = Cur;
+					continue;
+				}
+				const double FanArea = SignedTriAreaM2(Poly[0], Poly[K - 1], Poly[K], MLon, MLat);
+				if (FMath::Abs(FanArea) < MinAreaM2)
+				{
+					Prev = Cur;
+					continue;
+				}
+				if (SrcArea * FanArea < 0.0)
+				{
+					OutTris.Add(I0);
+					OutTris.Add(Cur);
+					OutTris.Add(Prev);
+				}
+				else
+				{
+					OutTris.Add(I0);
+					OutTris.Add(Prev);
+					OutTris.Add(Cur);
+				}
+				Prev = Cur;
 			}
 		}
 	}
@@ -2866,57 +3116,41 @@ FRoadPlaceResult URoadPlacerBPLibrary::PlaceRoadsFromShapefiles(
 				Tin.Triangles.Num() / 3,
 				FPlatformTime::Seconds() - TileStart);
 
-			// Keep triangles whose centroid is in this tile (not only the pad).
-			TArray<int32> Kept;
-			Kept.Reserve(Tin.Triangles.Num());
-			for (int32 T = 0; T + 2 < Tin.Triangles.Num(); T += 3)
-			{
-				const FRoadSample& A = Tin.Vertices[Tin.Triangles[T]];
-				const FRoadSample& B = Tin.Vertices[Tin.Triangles[T + 1]];
-				const FRoadSample& C = Tin.Vertices[Tin.Triangles[T + 2]];
-				const double CLon = (A.Lon + B.Lon + C.Lon) / 3.0;
-				const double CLat = (A.Lat + B.Lat + C.Lat) / 3.0;
-				const bool bLastX = (TX == TilesX - 1);
-				const bool bLastY = (TY == TilesY - 1);
-				const bool bInX = CLon >= TMinLon && (bLastX ? CLon <= TMaxLon : CLon < TMaxLon);
-				const bool bInY = CLat >= TMinLat && (bLastY ? CLat <= TMaxLat : CLat < TMaxLat);
-				if (bInX && bInY)
-				{
-					Kept.Add(Tin.Triangles[T]);
-					Kept.Add(Tin.Triangles[T + 1]);
-					Kept.Add(Tin.Triangles[T + 2]);
-				}
-			}
-			if (Kept.Num() < 3)
+			const FRoadLonLatRect MeshRect = MakeOverlapTileRect(
+				TMinLon, TMaxLon, TMinLat, TMaxLat, TileMeshOverlapM, MidLat);
+			const FRoadLonLatRect ClipRect = MakeOverlapTileRect(
+				TMinLon, TMaxLon, TMinLat, TMaxLat, TileClipOverlapM, MidLat);
+			TArray<FRoadSample> UsedVerts;
+			TArray<int32> UsedTris;
+			ClipTinToLonLatRect(Tin, MeshRect, UsedVerts, UsedTris);
+			if (UsedTris.Num() < 3)
 			{
 				++Result.TilesSkipped;
 				continue;
 			}
-
-			TArray<FRoadSample> UsedVerts;
-			TArray<int32> UsedTris;
-			CompactUsedSamples(Tin.Vertices, Kept, UsedVerts, UsedTris);
+			UE_LOG(
+				LogRoadPlacer,
+				Display,
+				TEXT("Tile %d / %d: clipped mesh to tile + %.0fcm (%d tri(s))."),
+				TileIndex,
+				NumTiles,
+				TileMeshOverlapM * 100.0,
+				UsedTris.Num() / 3);
 
 			auto CollectTileClip = [&]()
 			{
-				FRoadLonLatRect TileKeep;
-				const double KeepPadLon = 2.0
-					/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
-				const double KeepPadLat = 2.0 / 110540.0;
-				TileKeep.MinLon = TMinLon - KeepPadLon;
-				TileKeep.MaxLon = TMaxLon + KeepPadLon;
-				TileKeep.MinLat = TMinLat - KeepPadLat;
-				TileKeep.MaxLat = TMaxLat + KeepPadLat;
-				TileKeep.bValid = true;
+				TArray<FRoadSample> ClipVerts;
+				TArray<int32> ClipTris;
+				ClipTinToLonLatRect(Tin, ClipRect, ClipVerts, ClipTris);
 				const double ExtraLon = 100.0
 					/ FMath::Max(111320.0 * FMath::Cos(FMath::DegreesToRadians(MidLat)), 1.0);
 				const double ExtraLat = 100.0 / 110540.0;
 
 				TArray<TArray<FVector2D>> TileRings;
-				ExtractBoundaryRings(UsedVerts, UsedTris, TileRings);
+				ExtractBoundaryRings(ClipVerts, ClipTris, TileRings);
 				TArray<TArray<FVector2D>> ClipRings;
 				ConvertBoundaryRingsToClipRings(TileRings, ClipRings, Masks, Outline);
-				const int32 Dropped = KeepClipRingsInTile(ClipRings, TileKeep, ExtraLon, ExtraLat);
+				const int32 Dropped = KeepClipRingsInTile(ClipRings, ClipRect, ExtraLon, ExtraLat);
 				UE_LOG(
 					LogRoadPlacer,
 					Display,
