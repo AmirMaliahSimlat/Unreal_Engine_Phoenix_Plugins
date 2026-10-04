@@ -351,9 +351,11 @@ bool WaterShapefileReader::ReadWaterPolygons(
 		Feature.RecordIndex = RecordIndex;
 		Feature.HoleRingCount = FMath::Max(0, NumParts - 1);
 		Feature.OuterRingLonLat.Reserve(End - Start);
+		Feature.Bounds = FBox2D(ForceInit);
 		for (int32 P = Start; P < End; ++P)
 		{
 			Feature.OuterRingLonLat.Add(AllPoints[P]);
+			Feature.Bounds += AllPoints[P];
 		}
 		if (Feature.OuterRingLonLat.Num() >= 2
 			&& Feature.OuterRingLonLat[0].Equals(Feature.OuterRingLonLat.Last(), 1.0e-12))
@@ -386,5 +388,185 @@ bool WaterShapefileReader::ReadWaterPolygons(
 	}
 
 	UE_LOG(LogWaterPlacer, Display, TEXT("Read %d water polygons from %s (EPSG:4326 lon/lat)"), OutPolygons.Num(), *ShpPath);
+	return true;
+}
+
+bool WaterShapefileReader::ReadElevationPoints(
+	const FString& ShapefilePath,
+	const FString& OptionalAltitudeFieldName,
+	TArray<FWaterShapefilePoint>& OutPoints,
+	FString& OutError)
+{
+	OutPoints.Reset();
+	const FString Base = NormalizeShpPath(ShapefilePath);
+	const FString ShpPath = Base + TEXT(".shp");
+	const FString DbfPath = Base + TEXT(".dbf");
+	const FString PrjPath = Base + TEXT(".prj");
+	if (!FPaths::FileExists(ShpPath))
+	{
+		OutError = FString::Printf(TEXT("SHP not found: %s"), *ShpPath);
+		return false;
+	}
+	if (!ValidateEpsg4326Prj(PrjPath, OutError))
+	{
+		return false;
+	}
+
+	TArray<uint8> ShpData;
+	if (!FFileHelper::LoadFileToArray(ShpData, *ShpPath) || ShpData.Num() < 100)
+	{
+		OutError = FString::Printf(TEXT("Failed to read SHP: %s"), *ShpPath);
+		return false;
+	}
+	if (ReadInt32BE(ShpData, 0) != 9994)
+	{
+		OutError = TEXT("Not a valid ESRI shapefile (bad file code).");
+		return false;
+	}
+
+	const int32 ShapeType = ReadInt32LE(ShpData, 32);
+	if (ShapeType != 1 && ShapeType != 8 && ShapeType != 11 && ShapeType != 18 && ShapeType != 21)
+	{
+		OutError = FString::Printf(
+			TEXT("Elevation shapefile must be Point / PointZ (type %d)."),
+			ShapeType);
+		return false;
+	}
+
+	TArray<FDbfField> DbfFields;
+	TArray<TArray<uint8>> DbfRecords;
+	const FDbfField* ElevField = nullptr;
+	if (FPaths::FileExists(DbfPath))
+	{
+		if (!LoadDbf(DbfPath, DbfFields, DbfRecords, OutError))
+		{
+			return false;
+		}
+		if (!OptionalAltitudeFieldName.IsEmpty())
+		{
+			ElevField = FindField(DbfFields, OptionalAltitudeFieldName);
+			if (!ElevField)
+			{
+				OutError = FString::Printf(TEXT("DBF altitude field '%s' not found."), *OptionalAltitudeFieldName);
+				return false;
+			}
+		}
+	}
+	else if (!OptionalAltitudeFieldName.IsEmpty())
+	{
+		OutError = FString::Printf(
+			TEXT("DBF not found (needed for altitude field '%s'): %s"),
+			*OptionalAltitudeFieldName,
+			*DbfPath);
+		return false;
+	}
+
+	auto AddPoint = [&](double X, double Y, double Z, int32 RecordIndex)
+	{
+		FWaterShapefilePoint Pt;
+		Pt.LonDeg = X;
+		Pt.LatDeg = Y;
+		Pt.HeightM = Z;
+		Pt.RecordIndex = RecordIndex;
+		if (ElevField && RecordIndex < DbfRecords.Num())
+		{
+			double DbfZ = 0.0;
+			if (ParseNumericField(DbfRecords[RecordIndex], *ElevField, DbfZ))
+			{
+				Pt.HeightM = DbfZ;
+			}
+		}
+		OutPoints.Add(Pt);
+	};
+
+	int32 Offset = 100;
+	int32 RecordIndex = 0;
+	while (Offset + 8 <= ShpData.Num())
+	{
+		const int32 ContentBytes = ReadInt32BE(ShpData, Offset + 4) * 2;
+		Offset += 8;
+		if (ContentBytes <= 0 || Offset + ContentBytes > ShpData.Num())
+		{
+			break;
+		}
+
+		const int32 RecType = ReadInt32LE(ShpData, Offset);
+		if (RecType == 0)
+		{
+			Offset += ContentBytes;
+			++RecordIndex;
+			continue;
+		}
+
+		if (RecType == 1 || RecType == 11 || RecType == 21)
+		{
+			if (ContentBytes < 20)
+			{
+				Offset += ContentBytes;
+				++RecordIndex;
+				continue;
+			}
+			const double X = ReadDoubleLE(ShpData, Offset + 4);
+			const double Y = ReadDoubleLE(ShpData, Offset + 12);
+			double Z = 0.0;
+			if (RecType == 11 && ContentBytes >= 28)
+			{
+				Z = ReadDoubleLE(ShpData, Offset + 20);
+			}
+			AddPoint(X, Y, Z, RecordIndex);
+		}
+		else if (RecType == 8 || RecType == 18)
+		{
+			int32 Cursor = Offset + 4 + 32;
+			if (Cursor + 4 > Offset + ContentBytes)
+			{
+				Offset += ContentBytes;
+				++RecordIndex;
+				continue;
+			}
+			const int32 NumPoints = ReadInt32LE(ShpData, Cursor);
+			Cursor += 4;
+			if (NumPoints <= 0 || Cursor + NumPoints * 16 > Offset + ContentBytes)
+			{
+				Offset += ContentBytes;
+				++RecordIndex;
+				continue;
+			}
+			TArray<FVector2D> XYs;
+			XYs.SetNum(NumPoints);
+			for (int32 P = 0; P < NumPoints; ++P)
+			{
+				XYs[P] = FVector2D(
+					ReadDoubleLE(ShpData, Cursor + P * 16),
+					ReadDoubleLE(ShpData, Cursor + P * 16 + 8));
+			}
+			Cursor += NumPoints * 16;
+			TArray<double> Zs;
+			Zs.Init(0.0, NumPoints);
+			if (RecType == 18 && Cursor + 16 + NumPoints * 8 <= Offset + ContentBytes)
+			{
+				Cursor += 16;
+				for (int32 P = 0; P < NumPoints; ++P)
+				{
+					Zs[P] = ReadDoubleLE(ShpData, Cursor + P * 8);
+				}
+			}
+			for (int32 P = 0; P < NumPoints; ++P)
+			{
+				AddPoint(XYs[P].X, XYs[P].Y, Zs[P], RecordIndex);
+			}
+		}
+
+		Offset += ContentBytes;
+		++RecordIndex;
+	}
+
+	if (OutPoints.Num() == 0)
+	{
+		OutError = TEXT("No point records found in the elevation shapefile.");
+		return false;
+	}
+
+	UE_LOG(LogWaterPlacer, Display, TEXT("Read %d elevation point(s) from '%s'."), OutPoints.Num(), *ShpPath);
 	return true;
 }

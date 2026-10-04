@@ -1,17 +1,28 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Math/Box2D.h"
 
 struct FWaterShapefilePolygon
 {
 	/** Outer ring in EPSG:4326: X = longitude degrees, Y = latitude degrees. Not necessarily closed. */
 	TArray<FVector2D> OuterRingLonLat;
 
-	/** Water surface altitude in meters (AltitudeFieldName from DBF). 0 if the field is unused. */
+	FBox2D Bounds = FBox2D(ForceInit);
+
+	/** Optional DBF altitude (unused when PointZ outlines drive the surface). */
 	double AltitudeM = 0.0;
 
 	int32 RecordIndex = 0;
 	int32 HoleRingCount = 0;
+};
+
+struct FWaterShapefilePoint
+{
+	double LonDeg = 0.0;
+	double LatDeg = 0.0;
+	double HeightM = 0.0;
+	int32 RecordIndex = 0;
 };
 
 namespace WaterShapefileReader
@@ -26,5 +37,15 @@ namespace WaterShapefileReader
 		const FString& ShapefilePath,
 		const FString& AltitudeFieldName,
 		TArray<FWaterShapefilePolygon>& OutPolygons,
+		FString& OutError);
+
+	/**
+	 * Reads Point / PointZ / PointM / MultiPoint.
+	 * Geometry Z is used when present (PointZ). Optional DBF field overrides Z when set.
+	 */
+	bool ReadElevationPoints(
+		const FString& ShapefilePath,
+		const FString& OptionalAltitudeFieldName,
+		TArray<FWaterShapefilePoint>& OutPoints,
 		FString& OutError);
 }

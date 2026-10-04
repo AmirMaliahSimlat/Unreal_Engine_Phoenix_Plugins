@@ -2,10 +2,10 @@
 #include "WaterPlacerBPLibrary.h"
 
 #include "WaterCesiumPlacement.h"
-#include "WaterElevationSampler.h"
 #include "WaterPlacerLog.h"
 #include "WaterShapefileReader.h"
 #include "WaterStaticMesh.h"
+#include "WaterSurface.h"
 
 #include "Cesium3DTileset.h"
 #include "CesiumCartographicPolygon.h"
@@ -29,9 +29,6 @@ namespace
 {
 	const FName WaterPlacerTag(TEXT("WaterPlacer"));
 	const FName WaterPlacerOverlayName(TEXT("WaterPlacerClip"));
-	constexpr double DuplicateEpsDeg = 1.0e-10;
-	constexpr int32 MinOutlineVertices = 32;
-	constexpr int32 HardMaxOutlineVertices = 16384;
 	constexpr double MetersPerUv = 50.0;
 
 	FString SanitizeFilePath(const FString& InPath)
@@ -57,207 +54,6 @@ namespace
 			World = GEditor->GetEditorWorldContext().World();
 		}
 		return World;
-	}
-
-	double PerpDistSq(const FVector2D& Point, const FVector2D& A, const FVector2D& B)
-	{
-		const FVector2D AB = B - A;
-		const double LenSq = AB.SizeSquared();
-		if (LenSq < 1.0e-30)
-		{
-			return FVector2D::DistSquared(Point, A);
-		}
-		const double T = FMath::Clamp(FVector2D::DotProduct(Point - A, AB) / LenSq, 0.0, 1.0);
-		return FVector2D::DistSquared(Point, A + AB * T);
-	}
-
-	void RdpKeep(const TArray<FVector2D>& Pts, int32 Start, int32 End, double EpsSq, TArray<uint8>& Keep)
-	{
-		double MaxD = -1.0;
-		int32 MaxI = Start;
-		for (int32 I = Start + 1; I < End; ++I)
-		{
-			const double D = PerpDistSq(Pts[I], Pts[Start], Pts[End]);
-			if (D > MaxD)
-			{
-				MaxD = D;
-				MaxI = I;
-			}
-		}
-		if (MaxD > EpsSq && MaxI > Start && MaxI < End)
-		{
-			RdpKeep(Pts, Start, MaxI, EpsSq, Keep);
-			RdpKeep(Pts, MaxI, End, EpsSq, Keep);
-		}
-		else
-		{
-			Keep[Start] = 1;
-			Keep[End] = 1;
-		}
-	}
-
-	void UniformSample(const TArray<FVector2D>& In, int32 MaxPoints, TArray<FVector2D>& Out)
-	{
-		Out.Reset();
-		if (In.Num() == 0 || MaxPoints < 3)
-		{
-			return;
-		}
-		if (In.Num() <= MaxPoints)
-		{
-			Out = In;
-			return;
-		}
-		Out.Reserve(MaxPoints);
-		for (int32 I = 0; I < MaxPoints; ++I)
-		{
-			const int32 Src = (I * (In.Num() - 1)) / (MaxPoints - 1);
-			Out.Add(In[Src]);
-		}
-		if (Out.Num() >= 2 && Out[0].Equals(Out.Last(), DuplicateEpsDeg))
-		{
-			Out.Pop();
-		}
-	}
-
-	void ApplyRdp(const TArray<FVector2D>& Unique, double EpsDeg, TArray<FVector2D>& Out)
-	{
-		Out.Reset();
-		if (Unique.Num() < 3)
-		{
-			Out = Unique;
-			return;
-		}
-		if (EpsDeg <= DuplicateEpsDeg)
-		{
-			Out = Unique;
-			return;
-		}
-
-		TArray<uint8> Keep;
-		Keep.Init(0, Unique.Num());
-		RdpKeep(Unique, 0, Unique.Num() - 1, EpsDeg * EpsDeg, Keep);
-		Keep[0] = 1;
-		Keep.Last() = 1;
-		Out.Reserve(Unique.Num());
-		for (int32 I = 0; I < Unique.Num(); ++I)
-		{
-			if (Keep[I])
-			{
-				Out.Add(Unique[I]);
-			}
-		}
-		if (Out.Num() < 3)
-		{
-			Out = Unique;
-		}
-	}
-
-	void ChaikinClosed(const TArray<FVector2D>& In, TArray<FVector2D>& Out)
-	{
-		Out.Reset();
-		const int32 N = In.Num();
-		if (N < 3)
-		{
-			Out = In;
-			return;
-		}
-		Out.Reserve(N * 2);
-		for (int32 I = 0; I < N; ++I)
-		{
-			const FVector2D& A = In[I];
-			const FVector2D& B = In[(I + 1) % N];
-			Out.Add(A * 0.75 + B * 0.25);
-			Out.Add(A * 0.25 + B * 0.75);
-		}
-	}
-
-	void DecimateRing(const TArray<FVector2D>& In, int32 MaxPoints, double SmoothMeters, TArray<FVector2D>& Out)
-	{
-		Out.Reset();
-		if (In.Num() == 0)
-		{
-			return;
-		}
-
-		TArray<FVector2D> Unique;
-		Unique.Reserve(In.Num());
-		for (const FVector2D& P : In)
-		{
-			if (Unique.Num() == 0 || !Unique.Last().Equals(P, DuplicateEpsDeg))
-			{
-				Unique.Add(P);
-			}
-		}
-		if (Unique.Num() >= 2 && Unique[0].Equals(Unique.Last(), DuplicateEpsDeg))
-		{
-			Unique.Pop();
-		}
-
-		TArray<FVector2D> Working;
-		if (SmoothMeters > 0.0)
-		{
-			const double EpsDeg = SmoothMeters / 111320.0;
-			ApplyRdp(Unique, EpsDeg, Working);
-			TArray<FVector2D> Rounded;
-			ChaikinClosed(Working, Rounded);
-			ChaikinClosed(Rounded, Working);
-		}
-		else
-		{
-			Working = MoveTemp(Unique);
-		}
-
-		if (Working.Num() <= MaxPoints)
-		{
-			Out = MoveTemp(Working);
-			return;
-		}
-
-		ApplyRdp(Working, FMath::Max(SmoothMeters, 1.0) / 111320.0, Out);
-		if (Out.Num() > MaxPoints)
-		{
-			UniformSample(Out, MaxPoints, Working);
-			Out = MoveTemp(Working);
-		}
-	}
-
-	void DensifyClosedRing(const TArray<FVector2D>& In, double MaxEdgeMeters, int32 MaxPoints, TArray<FVector2D>& Out)
-	{
-		Out.Reset();
-		if (In.Num() < 3)
-		{
-			Out = In;
-			return;
-		}
-
-		double SpacingM = FMath::Max(MaxEdgeMeters, 5.0);
-		for (int32 Attempt = 0; Attempt < 8; ++Attempt)
-		{
-			Out.Reset();
-			const double MaxDeg = SpacingM / 111320.0;
-			const int32 N = In.Num();
-			Out.Reserve(N * 2);
-			for (int32 I = 0; I < N; ++I)
-			{
-				const FVector2D A = In[I];
-				const FVector2D B = In[(I + 1) % N];
-				Out.Add(A);
-				const double DistDeg = FVector2D::Distance(A, B);
-				const int32 Segments = FMath::Max(
-					1,
-					FMath::CeilToInt(static_cast<float>(DistDeg / FMath::Max(MaxDeg, 1.0e-12))));
-				for (int32 S = 1; S < Segments; ++S)
-				{
-					Out.Add(A + (B - A) * (static_cast<double>(S) / Segments));
-				}
-			}
-			if (Out.Num() <= MaxPoints)
-			{
-				return;
-			}
-			SpacingM *= 1.6;
-		}
 	}
 
 	FString NormalizeUnrealAssetPath(const FString& InPath)
@@ -445,42 +241,48 @@ namespace
 		return Poly;
 	}
 
-	AStaticMeshActor* SpawnWaterMesh(
+	AStaticMeshActor* SpawnWaterSurfaceMesh(
 		UWorld& World,
-		const TArray<FVector>& WorldPoints,
+		const FWaterTin& Tin,
+		ACesiumGeoreference& Georeference,
+		double HeightOffsetM,
 		UMaterialInterface* WaterMaterial,
 		const FString& MeshFolder,
 		const FString& Label,
 		const FString& FolderPath,
 		int32 SmoothShadingPasses)
 	{
-		if (WorldPoints.Num() < 3)
+		if (Tin.Vertices.Num() < 3 || Tin.Triangles.Num() < 3)
 		{
 			return nullptr;
 		}
 
+		TArray<FVector> WorldVerts;
+		WorldVerts.Reserve(Tin.Vertices.Num());
 		FVector Origin = FVector::ZeroVector;
-		for (const FVector& P : WorldPoints)
+		for (const FWaterSample& S : Tin.Vertices)
 		{
+			const FVector P = WaterCesiumPlacement::LonLatHeightToUnreal(
+				Georeference, S.Lon, S.Lat, S.HeightM + HeightOffsetM);
+			WorldVerts.Add(P);
 			Origin += P;
 		}
-		Origin /= static_cast<double>(WorldPoints.Num());
-
-		TArray<FVector> LocalPoints;
-		LocalPoints.Reserve(WorldPoints.Num());
-		for (const FVector& P : WorldPoints)
-		{
-			LocalPoints.Add(P - Origin);
-		}
+		Origin /= static_cast<double>(WorldVerts.Num());
 
 		FWaterFlatMesh Mesh;
-		FString MeshError;
-		if (!WaterStaticMesh::BuildFlatPolygonMesh(LocalPoints, MetersPerUv, Mesh, MeshError))
+		Mesh.Vertices.Reserve(WorldVerts.Num());
+		Mesh.UVs.Reserve(WorldVerts.Num());
+		Mesh.Normals.Init(FVector::UpVector, WorldVerts.Num());
+		const double UvScale = FMath::Max(MetersPerUv * 100.0, 1.0);
+		for (const FVector& P : WorldVerts)
 		{
-			UE_LOG(LogWaterPlacer, Warning, TEXT("Failed to triangulate '%s': %s"), *Label, *MeshError);
-			return nullptr;
+			const FVector Local = P - Origin;
+			Mesh.Vertices.Add(Local);
+			Mesh.UVs.Add(FVector2D(Local.X / UvScale, Local.Y / UvScale));
 		}
+		Mesh.Triangles = Tin.Triangles;
 
+		FString MeshError;
 		UStaticMesh* StaticMesh = WaterStaticMesh::CreatePersistentStaticMesh(
 			MeshFolder, Label, Mesh, WaterMaterial, SmoothShadingPasses, MeshError);
 		if (!StaticMesh)
@@ -496,52 +298,52 @@ namespace
 
 FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	UObject* WorldContextObject,
-	const FString& ShapefilePath,
-	const FString& AltitudeFieldName,
+	const FString& MaskShapefilePath,
+	const FString& ElevationPointsPath,
+	const FString& OptionalAltitudeFieldName,
 	const FString& WaterMaterialPath,
 	const FString& MeshContentFolder,
 	bool bClipGroundUnderWater,
 	int32 MaxOutlineVertices,
 	float OutlineSmoothMeters,
-	bool bDrapeOnCesiumTerrain,
-	float DrapeHeightOffsetMeters,
-	const FString& ElevationFolderPath,
+	float HeightOffsetMeters,
+	float InteriorSpacingMeters,
+	float ControlSpacingMeters,
 	int32 SmoothShadingPasses,
 	const FString& ActorLabelPrefix,
 	const FString& EditorFolderPath)
 {
 	FWaterPlaceResult Result;
 	const double StartTime = FPlatformTime::Seconds();
-	const FString CleanInputPath = SanitizeFilePath(ShapefilePath);
-	const FString AltitudeField = AltitudeFieldName;
+	const FString CleanMaskPath = SanitizeFilePath(MaskShapefilePath);
+	const FString CleanElevPath = SanitizeFilePath(ElevationPointsPath);
+	const FString AltitudeField = OptionalAltitudeFieldName;
 	const FString CleanMaterialPath = SanitizeFilePath(WaterMaterialPath);
 	const FString LabelPrefix = ActorLabelPrefix.IsEmpty() ? TEXT("Water") : ActorLabelPrefix;
 	const FString FolderPath = EditorFolderPath;
 	const FString MeshFolder = MeshContentFolder.IsEmpty() ? TEXT("/Game/WaterPlacer/Meshes") : MeshContentFolder;
-	const int32 OutlineVertexCap = FMath::Clamp(MaxOutlineVertices, MinOutlineVertices, HardMaxOutlineVertices);
-	const double SmoothMeters = FMath::Max(static_cast<double>(OutlineSmoothMeters), 0.0);
-	const bool bDrapeStream = bDrapeOnCesiumTerrain;
-	const double DrapeOffsetM = FMath::Max(static_cast<double>(DrapeHeightOffsetMeters), 0.0);
+	const double HeightOff = static_cast<double>(HeightOffsetMeters);
+	const double InteriorSpacing = static_cast<double>(InteriorSpacingMeters);
+	const double ControlSpacing = static_cast<double>(ControlSpacingMeters);
 	constexpr int32 MaxSmoothShadingPasses = 8;
 	const int32 ShadingPasses = FMath::Clamp(SmoothShadingPasses, 0, MaxSmoothShadingPasses);
-	constexpr double DrapeSampleSpacingM = 25.0;
-	const FString ElevationFolder = SanitizeFilePath(ElevationFolderPath);
 
 	UE_LOG(LogWaterPlacer, Display, TEXT("========== Water Place START =========="));
 	UE_LOG(
 		LogWaterPlacer,
 		Display,
-		TEXT("shp='%s' altitudeField='%s' waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d smoothMeters=%.1f drapeStream=%s drapeOffsetM=%.2f elevationFolder='%s' smoothShadingPasses=%d"),
-		*CleanInputPath,
-		AltitudeField.IsEmpty() ? TEXT("(0 ellipsoid)") : *AltitudeField,
+		TEXT("mask='%s' elev='%s' altitudeField='%s' waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d smoothMeters=%.1f heightOff=%.2f interiorM=%.1f controlM=%.1f smoothShadingPasses=%d"),
+		*CleanMaskPath,
+		*CleanElevPath,
+		AltitudeField.IsEmpty() ? TEXT("(PointZ)") : *AltitudeField,
 		CleanMaterialPath.IsEmpty() ? TEXT("(empty, wavy default)") : *CleanMaterialPath,
 		*MeshFolder,
 		bClipGroundUnderWater ? TEXT("on") : TEXT("off"),
-		OutlineVertexCap,
-		SmoothMeters,
-		bDrapeStream ? TEXT("on") : TEXT("off"),
-		DrapeOffsetM,
-		ElevationFolder.IsEmpty() ? TEXT("(none)") : *ElevationFolder,
+		MaxOutlineVertices,
+		OutlineSmoothMeters,
+		HeightOff,
+		InteriorSpacing,
+		ControlSpacing,
 		ShadingPasses);
 
 	UWorld* World = ResolveEditorWorld(WorldContextObject);
@@ -560,16 +362,22 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		return Result;
 	}
 
-	if (CleanInputPath.IsEmpty())
+	if (CleanMaskPath.IsEmpty())
 	{
-		Result.Message = TEXT("ShapefilePath is empty (provide a .shp path).");
+		Result.Message = TEXT("MaskShapefilePath is empty (provide a polygon .shp path).");
+		UE_LOG(LogWaterPlacer, Error, TEXT("%s"), *Result.Message);
+		return Result;
+	}
+	if (CleanElevPath.IsEmpty())
+	{
+		Result.Message = TEXT("ElevationPointsPath is empty (provide a PointZ .shp path).");
 		UE_LOG(LogWaterPlacer, Error, TEXT("%s"), *Result.Message);
 		return Result;
 	}
 
 	TArray<FWaterShapefilePolygon> Polygons;
 	FString ReadError;
-	if (!WaterShapefileReader::ReadWaterPolygons(CleanInputPath, AltitudeField, Polygons, ReadError))
+	if (!WaterShapefileReader::ReadWaterPolygons(CleanMaskPath, FString(), Polygons, ReadError))
 	{
 		Result.Message = ReadError;
 		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
@@ -577,7 +385,17 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		return Result;
 	}
 
-	Result.PolygonsRead = Polygons.Num();
+	TArray<FWaterShapefilePoint> ElevationPoints;
+	if (!WaterShapefileReader::ReadElevationPoints(CleanElevPath, AltitudeField, ElevationPoints, ReadError))
+	{
+		Result.Message = ReadError;
+		Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogWaterPlacer, Error, TEXT("%s"), *Result.Message);
+		return Result;
+	}
+
+	Result.MaskPolygonsRead = Polygons.Num();
+	Result.ElevationPointsRead = ElevationPoints.Num();
 	for (const FWaterShapefilePolygon& Poly : Polygons)
 	{
 		Result.HoleRingsIgnored += Poly.HoleRingCount;
@@ -604,44 +422,6 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 
 	RemovePreviousWaterPlacer(*World);
 
-	WaterElevation::FSampler Elevation;
-	const bool bLocalElevation = !ElevationFolder.IsEmpty();
-	if (bLocalElevation)
-	{
-		FString ElevError;
-		if (!Elevation.Load(ElevationFolder, ElevError))
-		{
-			Result.Message = ElevError;
-			Result.ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogWaterPlacer, Error, TEXT("%s"), *Result.Message);
-			return Result;
-		}
-	}
-
-	const bool bDrapeSurface = Elevation.IsLoaded() || bDrapeStream;
-
-	ACesium3DTileset* TerrainTileset = nullptr;
-	if (bDrapeStream && !Elevation.IsLoaded())
-	{
-		TerrainTileset = WaterCesiumPlacement::FindTerrainTileset(World);
-		if (TerrainTileset)
-		{
-			WaterCesiumPlacement::EnsureTilesetQueryCollision(*TerrainTileset);
-			UE_LOG(
-				LogWaterPlacer,
-				Display,
-				TEXT("Draping water onto tileset '%s' (view-dependent LOD). Prefer Elevation Folder Path for best DTM."),
-				*TerrainTileset->GetActorLabel());
-		}
-		else
-		{
-			UE_LOG(
-				LogWaterPlacer,
-				Warning,
-				TEXT("Drape On Cesium Terrain is on but no terrain tileset was found. Shore vertices will use the shapefile altitude field."));
-		}
-	}
-
 	UMaterialInterface* WaterMaterial = nullptr;
 	if (!CleanMaterialPath.IsEmpty())
 	{
@@ -660,86 +440,105 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		}
 	}
 
-	TArray<TArray<FVector>> LakeWorldPoints;
-	LakeWorldPoints.Reserve(Polygons.Num());
-	TArray<int32> LakeRecordIds;
-
 	FScopedSlowTask SlowTask(
 		static_cast<float>(Polygons.Num() + 1),
 		NSLOCTEXT("WaterPlacer", "PlaceProgress", "Placing water meshes..."));
 	SlowTask.MakeDialog(true);
 
+	TArray<ACesiumCartographicPolygon*> ClipActors;
+	if (bClipGroundUnderWater)
+	{
+		ClipActors.Reserve(Polygons.Num());
+	}
+
 	for (int32 Index = 0; Index < Polygons.Num(); ++Index)
 	{
 		const FWaterShapefilePolygon& Feature = Polygons[Index];
-		SlowTask.EnterProgressFrame(1.0f, FText::FromString(FString::Printf(TEXT("Polygon %d / %d"), Index + 1, Polygons.Num())));
+		SlowTask.EnterProgressFrame(
+			1.0f,
+			FText::FromString(FString::Printf(TEXT("Lake %d / %d"), Index + 1, Polygons.Num())));
 		if (SlowTask.ShouldCancel())
 		{
 			Result.bCancelled = true;
 			break;
 		}
 
-		TArray<FVector2D> Ring;
-		DecimateRing(Feature.OuterRingLonLat, OutlineVertexCap, SmoothMeters, Ring);
-		if (bDrapeSurface)
-		{
-			TArray<FVector2D> Densified;
-			DensifyClosedRing(Ring, DrapeSampleSpacingM, OutlineVertexCap, Densified);
-			Ring = MoveTemp(Densified);
-		}
-		if (Ring.Num() < 3)
+		FWaterSurfaceResult Surface;
+		FString SurfaceError;
+		const bool bBuilt = WaterSurface::BuildInterpolatedLake(
+			Feature,
+			ElevationPoints,
+			MaxOutlineVertices,
+			static_cast<double>(OutlineSmoothMeters),
+			InteriorSpacing,
+			ControlSpacing,
+			Surface,
+			SurfaceError,
+			[&SlowTask](float, const TCHAR* Stage) -> bool
+			{
+				if (Stage && *Stage)
+				{
+					SlowTask.EnterProgressFrame(0.0f, FText::FromString(FString(Stage)));
+				}
+				return !SlowTask.ShouldCancel();
+			});
+		if (!bBuilt)
 		{
 			++Result.PolygonsSkipped;
+			UE_LOG(
+				LogWaterPlacer,
+				Warning,
+				TEXT("Skipped water mask record %d: %s"),
+				Feature.RecordIndex,
+				*SurfaceError);
+			if (SurfaceError == TEXT("Cancelled."))
+			{
+				Result.bCancelled = true;
+				break;
+			}
 			continue;
 		}
 
-		TArray<FVector> WorldPoints;
-		WorldPoints.Reserve(Ring.Num());
-		for (const FVector2D& LonLat : Ring)
+		Result.SurfaceVertices += Surface.Tin.Vertices.Num();
+		Result.SurfaceTriangles += Surface.Tin.Triangles.Num() / 3;
+
+		const FString MeshLabel = FString::Printf(TEXT("%s_Mesh_%d"), *LabelPrefix, Feature.RecordIndex);
+		if (SpawnWaterSurfaceMesh(
+				*World,
+				Surface.Tin,
+				*Georeference,
+				HeightOff,
+				WaterMaterial,
+				MeshFolder,
+				MeshLabel,
+				FolderPath,
+				ShadingPasses))
 		{
-			if (Elevation.IsLoaded())
+			++Result.WaterMeshesSpawned;
+		}
+		else
+		{
+			++Result.PolygonsSkipped;
+			UE_LOG(LogWaterPlacer, Warning, TEXT("Failed to spawn water mesh for record %d."), Feature.RecordIndex);
+		}
+
+		if (bClipGroundUnderWater && Surface.Outline.Num() >= 3)
+		{
+			TArray<FVector> ClipWorld;
+			ClipWorld.Reserve(Surface.Outline.Num());
+			for (const FWaterSample& S : Surface.Outline)
 			{
-				double HeightM = Feature.AltitudeM;
-				if (Elevation.SampleHeightM(LonLat.X, LonLat.Y, HeightM))
-				{
-					++Result.TerrainSamplesHit;
-				}
-				else
-				{
-					++Result.TerrainSamplesMissed;
-				}
-				WorldPoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
-					*Georeference, LonLat.X, LonLat.Y, HeightM + DrapeOffsetM));
+				ClipWorld.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
+					*Georeference, S.Lon, S.Lat, S.HeightM + HeightOff));
 			}
-			else if (bDrapeStream)
+			const FString ClipLabel = FString::Printf(TEXT("%s_Clip_%d"), *LabelPrefix, Feature.RecordIndex);
+			if (ACesiumCartographicPolygon* ClipActor = SpawnClipPolygon(
+					*World, ClipWorld, ClipLabel, FolderPath))
 			{
-				bool bHit = false;
-				WorldPoints.Add(WaterCesiumPlacement::DrapeLonLatToUnreal(
-					*World,
-					*Georeference,
-					TerrainTileset,
-					LonLat.X,
-					LonLat.Y,
-					Feature.AltitudeM,
-					DrapeOffsetM,
-					bHit));
-				if (bHit)
-				{
-					++Result.TerrainSamplesHit;
-				}
-				else
-				{
-					++Result.TerrainSamplesMissed;
-				}
-			}
-			else
-			{
-				WorldPoints.Add(WaterCesiumPlacement::LonLatHeightToUnreal(
-					*Georeference, LonLat.X, LonLat.Y, Feature.AltitudeM));
+				ClipActors.Add(ClipActor);
+				++Result.ClipPolygonsSpawned;
 			}
 		}
-		LakeWorldPoints.Add(MoveTemp(WorldPoints));
-		LakeRecordIds.Add(Feature.RecordIndex);
 	}
 
 	if (Result.bCancelled)
@@ -748,38 +547,6 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		Result.Message = FString::Printf(TEXT("Cancelled. Elapsed: %.2fs."), Result.ElapsedSeconds);
 		UE_LOG(LogWaterPlacer, Warning, TEXT("%s"), *Result.Message);
 		return Result;
-	}
-
-	TArray<ACesiumCartographicPolygon*> ClipActors;
-	if (bClipGroundUnderWater)
-	{
-		ClipActors.Reserve(LakeWorldPoints.Num());
-	}
-
-	for (int32 I = 0; I < LakeWorldPoints.Num(); ++I)
-	{
-		const FString MeshLabel = FString::Printf(TEXT("%s_Mesh_%d"), *LabelPrefix, LakeRecordIds[I]);
-		if (SpawnWaterMesh(
-				*World, LakeWorldPoints[I], WaterMaterial, MeshFolder, MeshLabel, FolderPath, ShadingPasses))
-		{
-			++Result.WaterMeshesSpawned;
-		}
-		else
-		{
-			++Result.PolygonsSkipped;
-			UE_LOG(LogWaterPlacer, Warning, TEXT("Failed to spawn water mesh for record %d."), LakeRecordIds[I]);
-		}
-
-		if (bClipGroundUnderWater)
-		{
-			const FString ClipLabel = FString::Printf(TEXT("%s_Clip_%d"), *LabelPrefix, LakeRecordIds[I]);
-			if (ACesiumCartographicPolygon* ClipActor = SpawnClipPolygon(
-					*World, LakeWorldPoints[I], ClipLabel, FolderPath))
-			{
-				ClipActors.Add(ClipActor);
-				++Result.ClipPolygonsSpawned;
-			}
-		}
 	}
 
 	SlowTask.EnterProgressFrame(1.0f, NSLOCTEXT("WaterPlacer", "ClipTilesets", "Clipping tilesets..."));
@@ -809,29 +576,11 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	}
 
 	FString Extra;
-	if (Elevation.IsLoaded())
-	{
-		Extra += FString::Printf(
-			TEXT(" Draped %d shoreline sample(s) from local elevation (%d miss). %s"),
-			Result.TerrainSamplesHit,
-			Result.TerrainSamplesMissed,
-			*Elevation.Describe());
-	}
-	else if (bDrapeStream)
-	{
-		Extra += FString::Printf(
-			TEXT(" Draped %d shoreline sample(s) onto Cesium stream (%d miss)."),
-			Result.TerrainSamplesHit,
-			Result.TerrainSamplesMissed);
-		if (Result.TerrainSamplesMissed > 0 && Result.TerrainSamplesHit == 0)
-		{
-			Extra += TEXT(" No terrain hits: look at the water in the viewport so Cesium tiles load, or set Elevation Folder Path to the best DTM on disk.");
-		}
-		else if (Result.TerrainSamplesMissed > Result.TerrainSamplesHit)
-		{
-			Extra += TEXT(" Many draping misses: frame the water so terrain tiles are loaded, or use Elevation Folder Path.");
-		}
-	}
+	Extra += FString::Printf(
+		TEXT(" Surface %d vert(s), %d tri(s) from %d elevation point(s)."),
+		Result.SurfaceVertices,
+		Result.SurfaceTriangles,
+		Result.ElevationPointsRead);
 	if (bClipGroundUnderWater)
 	{
 		Extra += FString::Printf(
@@ -849,9 +598,9 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	}
 
 	Result.Message = FString::Printf(
-		TEXT("Spawned %d water StaticMeshActor(s) from %d polygon(s).%s Elapsed: %.2fs."),
+		TEXT("Spawned %d water StaticMeshActor(s) from %d mask polygon(s).%s Elapsed: %.2fs."),
 		Result.WaterMeshesSpawned,
-		Result.PolygonsRead,
+		Result.MaskPolygonsRead,
 		*Extra,
 		Result.ElapsedSeconds);
 	UE_LOG(LogWaterPlacer, Display, TEXT("%s"), *Result.Message);
