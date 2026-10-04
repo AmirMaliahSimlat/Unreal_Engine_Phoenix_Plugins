@@ -853,10 +853,7 @@ AStaticMeshActor* WaterStaticMesh::SpawnMeshActor(
 		Comp->SetMobility(EComponentMobility::Static);
 		Comp->bIsEditorOnly = false;
 		Comp->SetStaticMesh(Mesh);
-		if (Material)
-		{
-			Comp->SetMaterial(0, Material);
-		}
+		Comp->SetMaterial(0, Material);
 		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Comp->SetCastShadow(false);
 	}

@@ -71,18 +71,21 @@ public:
 	 * @param MaskShapefilePath EPSG:4326 Polygon / PolygonZ water mask (2D fill).
 	 * @param ElevationPointsPath EPSG:4326 Point / PointZ shoreline samples. Z = ellipsoid meters.
 	 * @param OptionalAltitudeFieldName DBF column that overrides geometry Z when set. Empty = use PointZ.
-	 * @param WaterMaterialPath Optional Unreal asset path. Empty = built-in wavy translucent water
-	 *        (Single Layer Water / Water_Material_Ocean is not visible on StaticMeshActors).
+	 * @param WaterMaterialPath Optional Unreal asset path. Used only when Apply Water Material is on.
+	 *        Empty with the toggle on = built-in wavy translucent water.
+	 * @param bApplyWaterMaterial If false, spawn the mesh with an empty material slot (no default
+	 *        water material is created or assigned).
 	 * @param MeshContentFolder Content folder for saved water static meshes.
 	 * @param bClipGroundUnderWater If true, hide Cesium imagery and DTM inside each water polygon.
-	 * @param MaxOutlineVertices Max vertices kept per mask outline (meshes and clip polygons).
+	 * @param MaxOutlineVertices Optional cap on mask-outline vertices (mesh + clip). 0 = keep all.
 	 * @param OutlineSmoothMeters If > 0, simplify stair-stepped raster outlines then round corners.
-	 *        Units are meters. 0 = keep the shapefile vertices (then cap with MaxOutlineVertices).
+	 *        Units are meters. 0 = keep the shapefile vertices.
 	 * @param HeightOffsetMeters Extra height on the fitted surface (default 0.15 m).
-	 * @param InteriorSpacingMeters Interior mesh spacing in meters. The whole-lake surface is sampled
-	 *        at this density so height changes are carried across the water, not only at the shore.
-	 * @param ControlSpacingMeters How far apart shoreline PointZ controls are taken for the surface
-	 *        fit. Larger = smoother / more of the height range is spread across the lake.
+	 * @param InteriorSpacingMeters Distance in meters between extra mesh vertices inside the lake.
+	 *        These samples carry the fitted height across the water. Smaller = denser mesh.
+	 *        Minimum 1 m. There is no upper vertex cap.
+	 * @param ControlSpacingMeters Distance in meters along the shore between PointZ height samples
+	 *        that define the surface. 0 = use every nearby PointZ. Smaller = closer to raw outlines.
 	 * @param SmoothShadingPasses 0 = faceted (hard edges). 1 = standard smooth shading.
 	 *        2+ = extra neighbor-normal blur (lighting only). Max 8.
 	 * @param ActorLabelPrefix Prefix for spawned actor labels.
@@ -95,9 +98,10 @@ public:
 			WorldContext = "WorldContextObject",
 			CPP_Default_OptionalAltitudeFieldName = "",
 			CPP_Default_WaterMaterialPath = "",
+			CPP_Default_bApplyWaterMaterial = "true",
 			CPP_Default_MeshContentFolder = "/Game/WaterPlacer/Meshes",
 			CPP_Default_bClipGroundUnderWater = "false",
-			CPP_Default_MaxOutlineVertices = "8192",
+			CPP_Default_MaxOutlineVertices = "0",
 			CPP_Default_OutlineSmoothMeters = "15.0",
 			CPP_Default_HeightOffsetMeters = "0.15",
 			CPP_Default_InteriorSpacingMeters = "40.0",
@@ -111,6 +115,7 @@ public:
 		const FString& ElevationPointsPath,
 		const FString& OptionalAltitudeFieldName,
 		const FString& WaterMaterialPath,
+		bool bApplyWaterMaterial,
 		const FString& MeshContentFolder,
 		bool bClipGroundUnderWater,
 		int32 MaxOutlineVertices,

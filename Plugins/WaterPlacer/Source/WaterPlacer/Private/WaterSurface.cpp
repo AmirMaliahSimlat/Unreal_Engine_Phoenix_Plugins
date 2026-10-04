@@ -8,11 +8,8 @@
 namespace
 {
 	constexpr double DuplicateEpsDeg = 1.0e-10;
-	constexpr int32 MinOutlineVertices = 32;
-	constexpr int32 HardMaxOutlineVertices = 16384;
-	constexpr int32 MaxInteriorVertices = 18000;
-	constexpr int32 MaxControlPoints = 400;
 	constexpr int32 MinControlPoints = 8;
+	constexpr int32 MaxTpsSolveCenters = 900;
 
 	bool PointInRing(const FVector2D& P, const TArray<FVector2D>& Ring)
 	{
@@ -208,7 +205,7 @@ namespace
 			Working = MoveTemp(Unique);
 		}
 
-		if (Working.Num() <= MaxPoints)
+		if (MaxPoints <= 0 || Working.Num() <= MaxPoints)
 		{
 			Out = MoveTemp(Working);
 			return;
@@ -467,52 +464,105 @@ namespace
 			}
 			Scale = FMath::Max(Scale, 1.0);
 
-			CtrlXY.SetNum(C);
+			TArray<FVector2D> Data;
+			Data.SetNum(C);
 			for (int32 I = 0; I < C; ++I)
 			{
-				CtrlXY[I] = Normalize(XY[I]);
+				Data[I] = Normalize(XY[I]);
 			}
 
-			const int32 N = C + 3;
-			TArray<double> A;
-			A.SetNumZeroed(N * N);
-			TArray<double> B;
-			B.SetNumZeroed(N);
+			const int32 M = FMath::Min(C, MaxTpsSolveCenters);
+			CtrlXY.SetNum(M);
+			for (int32 I = 0; I < M; ++I)
+			{
+				const int32 Src = (C == 1) ? 0 : (I * (C - 1)) / FMath::Max(M - 1, 1);
+				CtrlXY[I] = Data[Src];
+			}
+
+			const int32 U = M + 3;
 			const double Lambda = 1.0e-4;
-			for (int32 I = 0; I < C; ++I)
+			TArray<double> A;
+			A.SetNumZeroed(U * U);
+			TArray<double> B;
+			B.SetNumZeroed(U);
+
+			if (C <= MaxTpsSolveCenters)
 			{
-				for (int32 J = 0; J < C; ++J)
+				for (int32 I = 0; I < C; ++I)
 				{
-					double V = TpsPhi(FVector2D::Distance(CtrlXY[I], CtrlXY[J]));
-					if (I == J)
+					for (int32 J = 0; J < C; ++J)
 					{
-						V += Lambda;
+						double V = TpsPhi(FVector2D::Distance(CtrlXY[I], CtrlXY[J]));
+						if (I == J)
+						{
+							V += Lambda;
+						}
+						A[I * U + J] = V;
 					}
-					A[I * N + J] = V;
+					A[I * U + C] = 1.0;
+					A[I * U + C + 1] = CtrlXY[I].X;
+					A[I * U + C + 2] = CtrlXY[I].Y;
+					A[C * U + I] = 1.0;
+					A[(C + 1) * U + I] = CtrlXY[I].X;
+					A[(C + 2) * U + I] = CtrlXY[I].Y;
+					B[I] = Z[I];
 				}
-				A[I * N + C] = 1.0;
-				A[I * N + C + 1] = CtrlXY[I].X;
-				A[I * N + C + 2] = CtrlXY[I].Y;
-				A[(C) * N + I] = 1.0;
-				A[(C + 1) * N + I] = CtrlXY[I].X;
-				A[(C + 2) * N + I] = CtrlXY[I].Y;
-				B[I] = Z[I];
+			}
+			else
+			{
+				TArray<double> Row;
+				Row.SetNum(U);
+				for (int32 I = 0; I < C; ++I)
+				{
+					for (int32 J = 0; J < M; ++J)
+					{
+						Row[J] = TpsPhi(FVector2D::Distance(Data[I], CtrlXY[J]));
+					}
+					Row[M] = 1.0;
+					Row[M + 1] = Data[I].X;
+					Row[M + 2] = Data[I].Y;
+					for (int32 R = 0; R < U; ++R)
+					{
+						B[R] += Row[R] * Z[I];
+						for (int32 Col = R; Col < U; ++Col)
+						{
+							A[R * U + Col] += Row[R] * Row[Col];
+						}
+					}
+				}
+				for (int32 R = 0; R < U; ++R)
+				{
+					for (int32 Col = 0; Col < R; ++Col)
+					{
+						A[R * U + Col] = A[Col * U + R];
+					}
+				}
+				for (int32 J = 0; J < M; ++J)
+				{
+					A[J * U + J] += Lambda;
+				}
+				UE_LOG(
+					LogWaterPlacer,
+					Display,
+					TEXT("Thin-plate least-squares using all %d height samples with %d kernel centers."),
+					C,
+					M);
 			}
 
-			if (!GaussSolve(A, B, N))
+			if (!GaussSolve(A, B, U))
 			{
 				OutError = TEXT("Failed to solve the water thin-plate surface (singular control set).");
 				return false;
 			}
 
-			Weights.SetNum(C);
-			for (int32 I = 0; I < C; ++I)
+			Weights.SetNum(M);
+			for (int32 I = 0; I < M; ++I)
 			{
 				Weights[I] = B[I];
 			}
-			A0 = B[C];
-			AX = B[C + 1];
-			AY = B[C + 2];
+			A0 = B[M];
+			AX = B[M + 1];
+			AY = B[M + 2];
 			return true;
 		}
 
@@ -969,10 +1019,10 @@ bool WaterSurface::BuildInterpolatedLake(
 	TFunction<bool(float, const TCHAR*)> Progress)
 {
 	OutSurface = FWaterSurfaceResult();
-	const int32 OutlineCap = FMath::Clamp(MaxOutlineVertices, MinOutlineVertices, HardMaxOutlineVertices);
+	const int32 OutlineCap = MaxOutlineVertices;
 	const double SmoothM = FMath::Max(OutlineSmoothMeters, 0.0);
-	double SpacingM = FMath::Clamp(InteriorSpacingMeters, 8.0, 400.0);
-	const double CtrlSpacingM = FMath::Clamp(ControlSpacingMeters, 20.0, 400.0);
+	const double SpacingM = FMath::Max(InteriorSpacingMeters, 1.0);
+	const double CtrlSpacingM = FMath::Max(ControlSpacingMeters, 0.0);
 
 	auto Report = [&](float Frac, const TCHAR* Stage) -> bool
 	{
@@ -1047,15 +1097,25 @@ bool WaterSurface::BuildInterpolatedLake(
 		CtrlZ.Add(HeightM);
 	};
 
-	TArray<FVector2D> ControlWalk;
-	DensifyClosedRing(Outline, CtrlSpacingM, ControlWalk);
-	for (const FVector2D& P : ControlWalk)
+	if (CtrlSpacingM <= 0.0)
 	{
-		double DistM = 0.0;
-		const int32 Idx = Grid.Nearest(P.X, P.Y, ElevationPoints, 40.0, DistM);
-		if (Idx != INDEX_NONE)
+		for (const int32 I : NearbyPts)
 		{
-			TryAddControl(ElevationPoints[Idx].LonDeg, ElevationPoints[Idx].LatDeg, ElevationPoints[Idx].HeightM);
+			TryAddControl(ElevationPoints[I].LonDeg, ElevationPoints[I].LatDeg, ElevationPoints[I].HeightM);
+		}
+	}
+	else
+	{
+		TArray<FVector2D> ControlWalk;
+		DensifyClosedRing(Outline, CtrlSpacingM, ControlWalk);
+		for (const FVector2D& P : ControlWalk)
+		{
+			double DistM = 0.0;
+			const int32 Idx = Grid.Nearest(P.X, P.Y, ElevationPoints, 40.0, DistM);
+			if (Idx != INDEX_NONE)
+			{
+				TryAddControl(ElevationPoints[Idx].LonDeg, ElevationPoints[Idx].LatDeg, ElevationPoints[Idx].HeightM);
+			}
 		}
 	}
 
@@ -1074,34 +1134,6 @@ bool WaterSurface::BuildInterpolatedLake(
 	}
 	TryAddControl(ElevationPoints[IMin].LonDeg, ElevationPoints[IMin].LatDeg, ElevationPoints[IMin].HeightM);
 	TryAddControl(ElevationPoints[IMax].LonDeg, ElevationPoints[IMax].LatDeg, ElevationPoints[IMax].HeightM);
-
-	if (CtrlXY.Num() > MaxControlPoints)
-	{
-		TArray<FVector2D> ThinnedXY;
-		TArray<double> ThinnedZ;
-		ThinnedXY.Reserve(MaxControlPoints);
-		ThinnedZ.Reserve(MaxControlPoints);
-		for (int32 I = 0; I < MaxControlPoints; ++I)
-		{
-			const int32 Src = (I * (CtrlXY.Num() - 1)) / (MaxControlPoints - 1);
-			ThinnedXY.Add(CtrlXY[Src]);
-			ThinnedZ.Add(CtrlZ[Src]);
-		}
-		CtrlXY = MoveTemp(ThinnedXY);
-		CtrlZ = MoveTemp(ThinnedZ);
-		CtrlSeen.Reset();
-		for (int32 I = 0; I < CtrlXY.Num(); ++I)
-		{
-			double Lon = 0.0;
-			double Lat = 0.0;
-			Frame.FromXY(CtrlXY[I], Lon, Lat);
-			const int32 Qx = FMath::RoundToInt(Lon * 2.0e5);
-			const int32 Qy = FMath::RoundToInt(Lat * 2.0e5);
-			CtrlSeen.Add((static_cast<uint64>(static_cast<uint32>(Qx)) << 32) | static_cast<uint32>(Qy));
-		}
-		TryAddControl(ElevationPoints[IMin].LonDeg, ElevationPoints[IMin].LatDeg, ElevationPoints[IMin].HeightM);
-		TryAddControl(ElevationPoints[IMax].LonDeg, ElevationPoints[IMax].LatDeg, ElevationPoints[IMax].HeightM);
-	}
 
 	if (CtrlXY.Num() < MinControlPoints && NearbyPts.Num() >= MinControlPoints)
 	{
@@ -1153,12 +1185,6 @@ bool WaterSurface::BuildInterpolatedLake(
 			MaxY = FMath::Max(MaxY, P.Y);
 		}
 	}
-	const double AreaM2 = FMath::Max((MaxX - MinX) * (MaxY - MinY) * 0.35, 1.0);
-	while ((AreaM2 / (SpacingM * SpacingM)) > static_cast<double>(MaxInteriorVertices))
-	{
-		SpacingM *= 1.25;
-	}
-
 	TArray<FWaterSample> Samples;
 	Samples.Reserve(Outline.Num() + 256);
 	OutSurface.Outline.Reserve(Outline.Num());

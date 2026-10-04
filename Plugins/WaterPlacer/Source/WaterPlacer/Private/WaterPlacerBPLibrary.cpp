@@ -302,6 +302,7 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	const FString& ElevationPointsPath,
 	const FString& OptionalAltitudeFieldName,
 	const FString& WaterMaterialPath,
+	bool bApplyWaterMaterial,
 	const FString& MeshContentFolder,
 	bool bClipGroundUnderWater,
 	int32 MaxOutlineVertices,
@@ -332,11 +333,14 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	UE_LOG(
 		LogWaterPlacer,
 		Display,
-		TEXT("mask='%s' elev='%s' altitudeField='%s' waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d smoothMeters=%.1f heightOff=%.2f interiorM=%.1f controlM=%.1f smoothShadingPasses=%d"),
+		TEXT("mask='%s' elev='%s' altitudeField='%s' applyMaterial=%s waterMaterial='%s' meshFolder='%s' clipGround=%s maxOutline=%d smoothMeters=%.1f heightOff=%.2f interiorM=%.1f controlM=%.1f smoothShadingPasses=%d"),
 		*CleanMaskPath,
 		*CleanElevPath,
 		AltitudeField.IsEmpty() ? TEXT("(PointZ)") : *AltitudeField,
-		CleanMaterialPath.IsEmpty() ? TEXT("(empty, wavy default)") : *CleanMaterialPath,
+		bApplyWaterMaterial ? TEXT("on") : TEXT("off"),
+		!bApplyWaterMaterial
+			? TEXT("(none)")
+			: (CleanMaterialPath.IsEmpty() ? TEXT("(empty, wavy default)") : *CleanMaterialPath),
 		*MeshFolder,
 		bClipGroundUnderWater ? TEXT("on") : TEXT("off"),
 		MaxOutlineVertices,
@@ -423,11 +427,12 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	RemovePreviousWaterPlacer(*World);
 
 	UMaterialInterface* WaterMaterial = nullptr;
-	if (!CleanMaterialPath.IsEmpty())
+	if (bApplyWaterMaterial)
 	{
-		WaterMaterial = LoadWaterMaterialFromPath(CleanMaterialPath);
-	}
-	{
+		if (!CleanMaterialPath.IsEmpty())
+		{
+			WaterMaterial = LoadWaterMaterialFromPath(CleanMaterialPath);
+		}
 		FString MaterialError;
 		if (UMaterialInterface* Prepared = WaterStaticMesh::PrepareMaterialForStaticMesh(
 				WaterMaterial, MeshFolder, MaterialError))
@@ -438,6 +443,10 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 		{
 			UE_LOG(LogWaterPlacer, Warning, TEXT("%s"), *MaterialError);
 		}
+	}
+	else
+	{
+		UE_LOG(LogWaterPlacer, Display, TEXT("Apply Water Material is off; meshes will have an empty material slot."));
 	}
 
 	FScopedSlowTask SlowTask(
@@ -592,7 +601,11 @@ FWaterPlaceResult UWaterPlacerBPLibrary::PlaceWaterFromShapefile(
 	{
 		Extra += FString::Printf(TEXT(" Ignored %d inner rings (islands in lakes)."), Result.HoleRingsIgnored);
 	}
-	if (!WaterMaterial)
+	if (!bApplyWaterMaterial)
+	{
+		Extra += TEXT(" No water material assigned (Apply Water Material off).");
+	}
+	else if (!WaterMaterial)
 	{
 		Extra += TEXT(" Water material was not loaded; meshes have an empty material slot.");
 	}

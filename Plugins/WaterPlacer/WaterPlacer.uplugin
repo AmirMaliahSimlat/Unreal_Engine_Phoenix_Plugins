@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 15,
-	"VersionName": "1.8.0",
+	"Version": 17,
+	"VersionName": "1.8.2",
 	"FriendlyName": "Water Placer",
 	"Description": "Editor tool that reads an EPSG:4326 water mask plus PointZ shoreline heights, fits one smooth thin-plate surface across each lake, and spawns engine StaticMeshActor water meshes. Optional Cesium clip hides imagery and DTM under water. Compiles for Unreal Engine 5.1 and 5.3.",
 	"Category": "Editor",
