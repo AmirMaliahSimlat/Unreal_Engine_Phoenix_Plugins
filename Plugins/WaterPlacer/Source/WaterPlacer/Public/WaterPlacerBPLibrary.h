@@ -65,8 +65,8 @@ class WATERPLACER_API UWaterPlacerBPLibrary : public UBlueprintFunctionLibrary
 public:
 	/**
 	 * Reads an EPSG:4326 water mask and outline PointZ heights, then spawns a
-	 * smooth water StaticMeshActor per lake. Height is one thin-plate surface
-	 * over the whole polygon (not a flat deck with a shore ramp).
+	 * smooth water StaticMeshActor per lake. Shoreline Z is the nearest PointZ sample.
+	 * Interior height is one thin-plate surface over the polygon (not a flat deck with a shore ramp).
 	 *
 	 * @param MaskShapefilePath EPSG:4326 Polygon / PolygonZ water mask (2D fill).
 	 * @param ElevationPointsPath EPSG:4326 Point / PointZ shoreline samples. Z = ellipsoid meters.

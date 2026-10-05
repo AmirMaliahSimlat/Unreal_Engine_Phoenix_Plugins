@@ -31,9 +31,8 @@ struct FWaterSurfaceResult
 namespace WaterSurface
 {
 	/**
-	 * Builds a water TIN whose height is one thin-plate surface over the whole lake.
-	 * Outline PointZ samples become scattered controls (not a shore-only ramp).
-	 * Every mesh vertex — interior and outline — is evaluated on that same surface.
+	 * Builds a water TIN. Shore vertices use nearest PointZ height. Interior vertices
+	 * use one thin-plate surface so height changes spread across the lake.
 	 */
 	bool BuildInterpolatedLake(
 		const FWaterShapefilePolygon& Mask,

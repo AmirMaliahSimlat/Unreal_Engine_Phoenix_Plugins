@@ -1188,12 +1188,26 @@ bool WaterSurface::BuildInterpolatedLake(
 	TArray<FWaterSample> Samples;
 	Samples.Reserve(Outline.Num() + 256);
 	OutSurface.Outline.Reserve(Outline.Num());
+	int32 OutlineSnapped = 0;
+	int32 OutlineFitFallback = 0;
+	constexpr double OutlineSnapMaxM = 100.0;
 	for (const FVector2D& LonLat : Outline)
 	{
 		FWaterSample S;
 		S.Lon = LonLat.X;
 		S.Lat = LonLat.Y;
-		S.HeightM = Fit.Evaluate(Frame.ToXY(LonLat.X, LonLat.Y));
+		double DistM = 0.0;
+		const int32 Idx = Grid.Nearest(LonLat.X, LonLat.Y, ElevationPoints, OutlineSnapMaxM, DistM);
+		if (Idx != INDEX_NONE)
+		{
+			S.HeightM = ElevationPoints[Idx].HeightM;
+			++OutlineSnapped;
+		}
+		else
+		{
+			S.HeightM = Fit.Evaluate(Frame.ToXY(LonLat.X, LonLat.Y));
+			++OutlineFitFallback;
+		}
 		Samples.Add(S);
 		OutSurface.Outline.Add(S);
 	}
@@ -1255,9 +1269,11 @@ bool WaterSurface::BuildInterpolatedLake(
 	UE_LOG(
 		LogWaterPlacer,
 		Display,
-		TEXT("Lake %d: %d outline, %d interior, %d TPS controls (rms %.3f m), surface Z %.3f..%.3f m, %d tris, spacing %.1f m."),
+		TEXT("Lake %d: %d outline (%d PointZ snap, %d fit fallback), %d interior, %d TPS controls (rms %.3f m), surface Z %.3f..%.3f m, %d tris, spacing %.1f m."),
 		Mask.RecordIndex,
 		Outline.Num(),
+		OutlineSnapped,
+		OutlineFitFallback,
 		Interior,
 		OutSurface.ControlPoints,
 		OutSurface.ControlRmsM,
